@@ -76,7 +76,7 @@ jobs:
     - name: Upload code coverage report
       uses: codecov/codecov-action@v4
       with:
-        token: ${{ secrets.CODECOV_TOKEN }}v4
+        token: ${{ secrets.CODECOV_TOKEN }}
 
   test-docs-build:
     name: Test docs build # Also tests example notebooks (similar to nbmake)
