@@ -16,7 +16,6 @@ from deprecation import deprecated
     removed_in="1.0",
     details="Use native linopy syntax instead.",
 )
-# type: ignore
 def get_var(n, c, key):
     """
     Get variables directly from network.
