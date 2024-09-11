@@ -9,24 +9,27 @@ env:
 
 jobs:
   check-preperation:
+    name: Check if release is prepared
     runs-on: ubuntu-latest
+    outputs: 
+      prepared: ${{ steps.validate.outputs.prepared }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
 
       - name: Validate commit message
+        id: validate
         run: |
           COMMIT_MESSAGE=$(git log -1 --pretty=%B)
           echo "Expected: '${{ env.PREPERATION_COMMIT }}'"
           echo "Received: '$COMMIT_MESSAGE'"
 
-          if [[ "$COMMIT_MESSAGE" != "${{ env.PREPERATION_COMMIT }}" ]]; then
+          local prepared="false"
+          if [[ "$COMMIT_MESSAGE" == "${{ env.PREPERATION_COMMIT }}" ]]; then
             prepared="false"
-          else
-            prepared="true"
           fi
 
-          echo "prepared: '$prepared'" >> $GITHUB_OUTPUT
+          echo "prepared: $prepared" >> $GITHUB_OUTPUT
   
   update-version:
     name: Update version in CITATION.cff
@@ -93,7 +96,7 @@ jobs:
 
   release:
     # Publish a GitHub release from the given git tag
-    name: Create GitHub Release
+    name: Create GitHub release
     needs: [build]
     runs-on: ubuntu-latest
     steps:
