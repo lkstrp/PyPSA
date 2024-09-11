@@ -22,7 +22,7 @@ jobs:
         python-version: 3.12
 
     - run: pip install toml setuptools_scm
-    - run: echo {{ github.ref_name }}
+    - run: echo ${{ github.ref_name }}
     - run: |
         import re
         from setuptools_scm import get_version
@@ -47,7 +47,7 @@ jobs:
       with:
         message: '[github-actions.ci] auto update version in `CITATION.cff`'
         add: 'CITATION.cff'
-        tag: '{{ github.ref_name }} --force'
+        tag: '${{ github.ref_name }} --force'
         tag_push: '--force'
 
   build:
