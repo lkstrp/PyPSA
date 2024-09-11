@@ -5,7 +5,7 @@ on:
     tags:
     - v*.*.*
 env:
-  PREPERATION_COMMIT: '[github-actions.ci] auto update version in `CITATION.cff`'
+  PREPERATION_COMMIT: '[github-actions.ci] auto update version in CITATION.cff'
 
 jobs:
   check-preperation:
@@ -24,7 +24,7 @@ jobs:
           echo "Expected: '${{ env.PREPERATION_COMMIT }}'"
           echo "Received: '$COMMIT_MESSAGE'"
 
-          local prepared="false"
+          prepared="false"
           if [[ "$COMMIT_MESSAGE" == "${{ env.PREPERATION_COMMIT }}" ]]; then
             prepared="true
             "
