@@ -10,9 +10,6 @@ env:
 jobs:
   check-preperation:
     runs-on: ubuntu-latest
-    outputs:
-      prepared: ${{ steps.check-preperation.outputs.prepared }}  # Define the boolean output as 'is-valid'
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -29,7 +26,7 @@ jobs:
             prepared="true"
           fi
 
-          echo "prepared: $prepared" >> $GITHUB_OUTPUT
+          echo "prepared: '$prepared'" >> $GITHUB_OUTPUT
   
   update-version:
     name: Update version in CITATION.cff
