@@ -18,7 +18,8 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: 3.9
+        python-version: 3.12
+
     - run: pip install toml setuptools_scm
     - run: |
         import re
@@ -43,6 +44,8 @@ jobs:
       uses: EndBug/add-and-commit@v9
       with:
         message: '[github-actions.ci] auto update version in `CITATION.cff`'
+        push: master
+        add: 'CITATION.cff'
 
   build:
     # Build the Python SDist and wheel, performs metadata and readme linting
