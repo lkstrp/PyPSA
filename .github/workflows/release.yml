@@ -4,11 +4,37 @@ on:
   push:
     tags:
     - v*.*.*
+env:
+  PREPERATION_COMMIT: '[github-actions.ci] auto update version in `CITATION.cff`'
 
 jobs:
+  check-preperation:
+    runs-on: ubuntu-latest
+    outputs:
+      prepared: ${{ steps.check-preperation.outputs.prepared }}  # Define the boolean output as 'is-valid'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Validate commit message
+        run: |
+          COMMIT_MESSAGE=$(git log -1 --pretty=%B)
+          echo "Expected: '$EXPECTED_MESSAGE'"
+          echo "Received: '$COMMIT_MESSAGE'"
+
+          if [[ "$COMMIT_MESSAGE" != "${{ env.PREPERATION_COMMIT }}" ]]; then
+            PREPARED="false"
+          else
+            PREPARED="true"
+          fi
+
+          echo "::set-output name=prepared::$PREPARED"
   
   update-version:
     name: Update version in CITATION.cff
+    needs: [check-preperation]
+    if: ${{ needs.check-preperation.outputs.prepared == 'false' }}
     runs-on: ubuntu-latest
     steps:
     - name: Generate token for PyPSA Bot
@@ -53,7 +79,7 @@ jobs:
     - name: Commit changes
       uses: EndBug/add-and-commit@v9
       with:
-        message: '[github-actions.ci] auto update version in `CITATION.cff`'
+        message: '${{ env.PREPERATION_COMMIT }}'
         add: 'CITATION.cff'
         tag: '${{ github.ref_name }} --force'
         tag_push: '--force'
@@ -61,7 +87,8 @@ jobs:
   build:
     # Build the Python SDist and wheel, performs metadata and readme linting
     name: Build and verify package
-    needs: [update-version]
+    needs: [check-preperation]
+    if: ${{ needs.check-preperation.outputs.prepared == 'true' }}
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
