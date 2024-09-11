@@ -4,6 +4,9 @@ on:
   push:
     tags:
     - v*.*.*
+    branches:
+      - master
+      - main
 
 jobs:
   build:
@@ -13,37 +16,6 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - uses: hynek/build-and-inspect-python-package@v2
-
-  release:
-    # Publish a GitHub release from the given git tag
-    name: Create GitHub Release
-    needs: [build]
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - uses: softprops/action-gh-release@v2
-      with:
-        body: |
-          Revised release notes are available in the [documentation](https://pypsa.readthedocs.io/en/latest/references/release-notes.html).
-        append_body: true
-        generate_release_notes: true
-
-  publish:
-    # Publish the built SDist and wheel from "dist" job to PyPI
-    name: Publish to PyPI
-    needs: [build]
-    runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/project/pypsa/
-    permissions:
-      id-token: write
-    steps:
-    - uses: actions/download-artifact@v4
-      with:
-        name: Packages
-        path: dist
-    - uses: pypa/gh-action-pypi-publish@release/v1
 
   update-version:
     name: Update version in CITATION.cff
@@ -78,11 +50,39 @@ jobs:
             file.write(updated_cff_content)
       shell: python
 
-    - name: Create Pull Request
-      uses: peter-evans/create-pull-request@v6
+    - name: Commit changes
+      uses: EndBug/add-and-commit@v9
       with:
-        commit-message: '[github-actions.ci] auto update version in `CITATION.cff`'
-        title: 'Auto-update CITATION.cff version'
-        body: 'This PR updates the version in CITATION.cff file.'
-        branch: 'auto-update-citation-cff'
-        base: 'master'
+        message: '[github-actions.ci] auto update version in `CITATION.cff`'
+
+  # release:
+  #   # Publish a GitHub release from the given git tag
+  #   name: Create GitHub Release
+  #   needs: [update-version]
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #   - uses: actions/checkout@v4
+  #   - uses: softprops/action-gh-release@v2
+  #     with:
+  #       body: |
+  #         Revised release notes are available in the [documentation](https://pypsa.readthedocs.io/en/latest/references/release-notes.html).
+  #       append_body: true
+  #       generate_release_notes: true
+
+  # publish:
+  #   # Publish the built SDist and wheel from "dist" job to PyPI
+  #   name: Publish to PyPI
+  #   needs: [update-version]
+  #   runs-on: ubuntu-latest
+  #   environment:
+  #     name: pypi
+  #     url: https://pypi.org/project/pypsa/
+  #   permissions:
+  #     id-token: write
+  #   steps:
+  #   - uses: actions/download-artifact@v4
+  #     with:
+  #       name: Packages
+  #       path: dist
+  #   - uses: pypa/gh-action-pypi-publish@release/v1
+
