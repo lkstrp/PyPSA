@@ -31,15 +31,15 @@ jobs:
 
           echo "prepared=$prepared" >> $GITHUB_OUTPUT
   
-  update-version:
-    name: Update version in CITATION.cff
+  prepare-release:
+    name: Prepare release
     needs: [check-preperation]
     if: ${{ needs.check-preperation.outputs.prepared == 'false' }}
     runs-on: ubuntu-latest
     steps:
     - name: Generate token for PyPSA Bot
       id: generate-token
-      uses: actions/create-github-app-token@v1
+      uses: actions/create-github-app-token@v1.10.4
       with:
         app-id: ${{ vars.PYPSA_BOT_ID }}
         private-key: ${{ secrets.PYPSA_BOT_PRIVATE_KEY }}
@@ -108,20 +108,20 @@ jobs:
         append_body: true
         generate_release_notes: true
 
-  # publish:
-  #   # Publish the built SDist and wheel from "dist" job to PyPI
-  #   name: Publish to PyPI
-  #   needs: [build]
-  #   runs-on: ubuntu-latest
-  #   environment:
-  #     name: pypi
-  #     url: https://pypi.org/project/pypsa/
-  #   permissions:
-  #     id-token: write
-  #   steps:
-  #   - uses: actions/download-artifact@v4
-  #     with:
-  #       name: Packages
-  #       path: dist
-  #   - uses: pypa/gh-action-pypi-publish@release/v1
+  publish:
+    # Publish the built SDist and wheel from "dist" job to PyPI
+    name: Publish to PyPI
+    needs: [build]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/pypsa/
+    permissions:
+      id-token: write
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: Packages
+        path: dist
+    - uses: pypa/gh-action-pypi-publish@release/v1
 
