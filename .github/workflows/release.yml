@@ -26,7 +26,8 @@ jobs:
 
           local prepared="false"
           if [[ "$COMMIT_MESSAGE" == "${{ env.PREPERATION_COMMIT }}" ]]; then
-            prepared="false"
+            prepared="true
+            "
           fi
 
           echo "prepared: $prepared" >> $GITHUB_OUTPUT
