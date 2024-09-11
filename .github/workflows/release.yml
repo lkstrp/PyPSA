@@ -11,10 +11,18 @@ jobs:
     name: Update version in CITATION.cff
     runs-on: ubuntu-latest
     steps:
+    - name: Generate token for PyPSA Bot
+      id: generate-token
+      uses: actions/create-github-app-token@v1
+      with:
+        app-id: ${{ vars.PYPSA_BOT_ID }}
+        private-key: ${{ secrets.PYPSA_BOT_PRIVATE_KEY }}
+
     - uses: actions/checkout@v4
       with:
         fetch-depth: 0 # Needed for setuptools_scm
         ref: master
+        token: ${{ steps.generate-token.outputs.token }}
 
     - name: Set up Python
       uses: actions/setup-python@v5
