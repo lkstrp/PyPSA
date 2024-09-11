@@ -30,7 +30,7 @@ jobs:
             "
           fi
 
-          echo "prepared: $prepared" >> $GITHUB_OUTPUT
+          echo "prepared=$prepared" >> $GITHUB_OUTPUT
   
   update-version:
     name: Update version in CITATION.cff
