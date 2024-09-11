@@ -20,16 +20,16 @@ jobs:
       - name: Validate commit message
         run: |
           COMMIT_MESSAGE=$(git log -1 --pretty=%B)
-          echo "Expected: '$EXPECTED_MESSAGE'"
+          echo "Expected: '${{ env.PREPERATION_COMMIT }}'"
           echo "Received: '$COMMIT_MESSAGE'"
 
           if [[ "$COMMIT_MESSAGE" != "${{ env.PREPERATION_COMMIT }}" ]]; then
-            PREPARED="false"
+            prepared="false"
           else
-            PREPARED="true"
+            prepared="true"
           fi
 
-          echo "::set-output name=prepared::$PREPARED"
+          echo "prepared: $prepared" >> $GITHUB_OUTPUT
   
   update-version:
     name: Update version in CITATION.cff
