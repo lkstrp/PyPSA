@@ -3,20 +3,12 @@ name: Release
 on:
   push:
     tags:
-    - v*.*.*
+    - 'v[0-9]+.[0-9]+.[0-9]+$'
 
 jobs:
-  build:
-    # Build the Python SDist and wheel, performs metadata and readme linting
-    name: Build and verify package
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - uses: hynek/build-and-inspect-python-package@v2
-
+  
   update-version:
     name: Update version in CITATION.cff
-    needs: [build]
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -52,10 +44,19 @@ jobs:
       with:
         message: '[github-actions.ci] auto update version in `CITATION.cff`'
 
+  build:
+    # Build the Python SDist and wheel, performs metadata and readme linting
+    name: Build and verify package
+    needs: [update-version]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: hynek/build-and-inspect-python-package@v2
+
   # release:
   #   # Publish a GitHub release from the given git tag
   #   name: Create GitHub Release
-  #   needs: [update-version]
+  #   needs: [build]
   #   runs-on: ubuntu-latest
   #   steps:
   #   - uses: actions/checkout@v4
@@ -69,7 +70,7 @@ jobs:
   # publish:
   #   # Publish the built SDist and wheel from "dist" job to PyPI
   #   name: Publish to PyPI
-  #   needs: [update-version]
+  #   needs: [build]
   #   runs-on: ubuntu-latest
   #   environment:
   #     name: pypi
