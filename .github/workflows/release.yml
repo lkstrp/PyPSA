@@ -87,6 +87,10 @@ jobs:
             file.write(updated_cff_content)
       shell: python
 
+    - name: Remove previous tag
+      run: |
+        git tag -d ${{ github.ref_name }}
+        git push origin --delete ${{ github.ref_name }}
 
     - name: Commit changes
       uses: stefanzweifel/git-auto-commit-action@v5
