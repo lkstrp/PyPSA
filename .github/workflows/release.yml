@@ -6,7 +6,7 @@ on:
     - v*.*.*
 
 env:
-  PREPERATION_COMMIT: '[github-actions.ci] auto update version in CITATION.cff'
+  PREPERATION_COMMIT: '[github-actions.ci] auto update powerplants.csv'
 
 jobs:
   check-preperation:
@@ -61,6 +61,7 @@ jobs:
         ref: ${{ env.BRANCH_NAME }}
         token: ${{ steps.generate-token.outputs.token }}
 
+
     - uses: actions/setup-python@v5
       with:
         python-version: 3.12
@@ -86,13 +87,14 @@ jobs:
             file.write(updated_cff_content)
       shell: python
 
+
     - name: Commit changes
-      uses: EndBug/add-and-commit@v9
+      uses: stefanzweifel/git-auto-commit-action@v5
       with:
-        message: '${{ env.PREPERATION_COMMIT }}'
-        add: 'CITATION.cff'
-        tag: '${{ github.ref_name }} --force'
-        tag_push: '--force-with-lease'
+        commit_message: '${{ env.PREPERATION_COMMIT }}'
+        file_pattern: 'CITATION.cff'
+        tagging_message: '${{ github.ref_name }}'
+        push_options: '--tags'
 
   build:
     name: Build and verify package
