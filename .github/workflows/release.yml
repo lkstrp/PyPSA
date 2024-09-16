@@ -99,7 +99,7 @@ jobs:
         commit_message: '${{ env.PREPERATION_COMMIT }}'
         file_pattern: 'CITATION.cff'
         tagging_message: '${{ github.ref_name }}'
-        push_options: '--tags'
+        push_options: '${{ github.ref_name }}'
 
   build:
     name: Build and verify package
