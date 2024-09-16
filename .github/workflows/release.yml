@@ -95,6 +95,7 @@ jobs:
     - name: Commit changes
       uses: stefanzweifel/git-auto-commit-action@v5
       with:
+        branch: ${{ env.BRANCH_NAME }}
         commit_message: '${{ env.PREPERATION_COMMIT }}'
         file_pattern: 'CITATION.cff'
         tagging_message: '${{ github.ref_name }}'
