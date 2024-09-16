@@ -112,19 +112,19 @@ jobs:
         append_body: true
         generate_release_notes: true
 
-  publish:
-    name: Publish to PyPI
-    needs: [build]
-    runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/project/pypsa/
-    permissions:
-      id-token: write
-    steps:
-    - uses: actions/download-artifact@v4
-      with:
-        name: Packages
-        path: dist
-    - uses: pypa/gh-action-pypi-publish@release/v1
+  # publish:
+  #   name: Publish to PyPI
+  #   needs: [build]
+  #   runs-on: ubuntu-latest
+  #   environment:
+  #     name: pypi
+  #     url: https://pypi.org/project/pypsa/
+  #   permissions:
+  #     id-token: write
+  #   steps:
+  #   - uses: actions/download-artifact@v4
+  #     with:
+  #       name: Packages
+  #       path: dist
+  #   - uses: pypa/gh-action-pypi-publish@release/v1
 
