@@ -4,6 +4,7 @@ on:
   push:
     tags:
     - v*.*.*
+
 env:
   PREPERATION_COMMIT: '[github-actions.ci] auto update version in CITATION.cff'
 
@@ -14,12 +15,12 @@ jobs:
     outputs: 
       prepared: ${{ steps.validate.outputs.prepared }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
       - name: Validate commit message
         id: validate
         run: |
+          # Check if last commit is the expected commit message
           COMMIT_MESSAGE=$(git log -1 --pretty=%B)
           echo "Expected: '${{ env.PREPERATION_COMMIT }}'"
           echo "Received: '$COMMIT_MESSAGE'"
@@ -39,19 +40,24 @@ jobs:
     steps:
     - name: Generate token for PyPSA Bot
       id: generate-token
-      uses: actions/create-github-app-token@v1.10.4
+      uses: actions/create-github-app-token@v1
       with:
         app-id: ${{ vars.PYPSA_BOT_ID }}
         private-key: ${{ secrets.PYPSA_BOT_PRIVATE_KEY }}
-
+    
+    - name: Find the branch for commit/ tag
+      run: |
+        branch=$(git branch -r --contains ${{ github.sha }} | grep -v 'HEAD' | head -n 1 | sed 's|origin/||')
+        echo "Branch found: $branch"
+        echo "BRANCH_NAME=$branch" >> $GITHUB_ENV
+  
     - uses: actions/checkout@v4
       with:
-        fetch-depth: 0 # Needed for setuptools_scm
-        ref: master
+        fetch-depth: 0
+        ref: ${{ env.BRANCH_NAME }}
         token: ${{ steps.generate-token.outputs.token }}
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
+    - uses: actions/setup-python@v5
       with:
         python-version: 3.12
 
@@ -82,10 +88,9 @@ jobs:
         message: '${{ env.PREPERATION_COMMIT }}'
         add: 'CITATION.cff'
         tag: '${{ github.ref_name }} --force'
-        tag_push: '--force'
+        tag_push: '--force-with-lease'
 
   build:
-    # Build the Python SDist and wheel, performs metadata and readme linting
     name: Build and verify package
     needs: [check-preperation]
     if: ${{ needs.check-preperation.outputs.prepared == 'true' }}
@@ -95,7 +100,6 @@ jobs:
     - uses: hynek/build-and-inspect-python-package@v2
 
   release:
-    # Publish a GitHub release from the given git tag
     name: Create GitHub release
     needs: [build]
     runs-on: ubuntu-latest
@@ -109,7 +113,6 @@ jobs:
         generate_release_notes: true
 
   publish:
-    # Publish the built SDist and wheel from "dist" job to PyPI
     name: Publish to PyPI
     needs: [build]
     runs-on: ubuntu-latest
