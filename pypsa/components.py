@@ -872,7 +872,7 @@ class Network(Basic):
         non-scalar attributes are assumed to be static and indexed by names. If you want
         to add time-varying attributes to multiple components, you can pass a 2D array/
         DataFrame where the first dimension is snapshots and the second dimension is
-        names.
+        names. A Sequence of length 1 is treated as a scalar.
 
         Any attributes which are not specified will be given the default
         value from :doc:`/user-guide/components`.
@@ -946,6 +946,9 @@ class Network(Basic):
         # Process name/names to pandas.Index of strings and add suffix
         single_component = np.isscalar(name)
         names = pd.Index([name]) if single_component else pd.Index(name)
+        # Handle Sequence of length 1 as scalar
+        if len(names) == 1:
+            single_component = True
         names = names.astype(str) + suffix
 
         names_str = "name" if single_component else "names"
