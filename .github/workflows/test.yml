@@ -116,7 +116,7 @@ jobs:
         pytest test/test_docs.py --test-docs
 
   test-pypsa-eur:
-    name: Test pypsa-eur model runs
+    name: Test pypsa-eur run
     needs: [build]
     runs-on: ubuntu-latest
     
@@ -128,7 +128,6 @@ jobs:
     - uses: actions/checkout@v4
       with:
         repository: 'PyPSA/pypsa-eur'
-        ref: 'stable'
       
     - name: Setup secrets
       run: |
