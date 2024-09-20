@@ -29,7 +29,7 @@ jobs:
       python-versions: ${{ steps.baipp.outputs.supported_python_classifiers_json_array }}
 
   test-pypsa-eur:
-    name: Test pypsa-eur run
+    name: PyPSA-Eur run
     needs: [build]
     runs-on: ubuntu-latest
     
@@ -88,6 +88,5 @@ jobs:
 
     - name: Run snakemake test workflows
       run: |
-        chmod +x test.sh
         ./test.sh
 
