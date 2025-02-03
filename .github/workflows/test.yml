@@ -5,8 +5,6 @@ on:
     branches:
     - master
     - release-branch-v*
-    tags-ignore:
-    - v*.*.*
   pull_request:
     branches: ['*']
   schedule:
@@ -20,6 +18,11 @@ jobs:
     name: Build and verify package
     runs-on: ubuntu-latest
     steps:
+
+    - name: Exit if release was triggered
+      if: github.ref_type == 'tag'
+      run: exit -1
+
     - uses: actions/checkout@v4
       with:
         fetch-depth: 0   # Needed for setuptools_scm

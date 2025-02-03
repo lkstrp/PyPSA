@@ -112,7 +112,7 @@ jobs:
         push_options: '${{ github.ref_name }}'
 
   build:
-    name: Build and verify package
+    name: Build release package
     needs: [check-preparation]
     if: ${{ needs.check-preparation.outputs.prepared == 'true' }}
     runs-on: ubuntu-latest
