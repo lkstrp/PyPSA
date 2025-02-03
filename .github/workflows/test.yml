@@ -31,7 +31,7 @@ jobs:
       python-versions: ${{ steps.baipp.outputs.supported_python_classifiers_json_array }}
 
   unit-tests:
-    name: Unit tests
+    name: Unit
     needs: [build]
     uses: ./.github/workflows/test-unit.yml
     with:
@@ -39,7 +39,7 @@ jobs:
       python-versions: ${{ needs.build.outputs.python-versions }}
 
   integration-tests:
-    name: Integration tests
+    name: Integration
     needs: [build]
     uses: ./.github/workflows/test-integration.yml
     with:
