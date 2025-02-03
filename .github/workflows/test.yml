@@ -2,6 +2,8 @@ name: Tests
 
 on:
   push:
+    tags-ignore:
+    - v*.*.*
     branches:
     - master
     - release-branch-v*
@@ -18,10 +20,6 @@ jobs:
     name: Build and verify package
     runs-on: ubuntu-latest
     steps:
-
-    - name: Exit if release was triggered
-      if: github.ref_type == 'tag'
-      run: exit -1
 
     - uses: actions/checkout@v4
       with:
