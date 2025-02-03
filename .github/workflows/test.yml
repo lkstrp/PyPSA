@@ -2,13 +2,11 @@ name: Tests
 
 on:
   push:
-    branches:
-    - master
-    - release-branch-v*
     tags-ignore:
     - '**'
   pull_request:
-    branches: ['*']
+    branches:
+    - '**'
   schedule:
   - cron: "0 5 * * *"
   workflow_call:
