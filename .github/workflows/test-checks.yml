@@ -6,6 +6,7 @@ on:
     inputs:
       artifact-name:
         type: string
+        required: true
 
 # Cancel any in-progress runs when a new run is triggered
 concurrency:
@@ -31,14 +32,14 @@ jobs:
     - name: Download package
       uses: actions/download-artifact@v4
       with:
-        name: ${{ github.event.inputs.artifact-name }}
+        name: ${{ inputs.artifact-name }}
         path: dist
 
     - name: Install package and dependencies
       run: |
         python -m pip install uv
         uv pip install --system nbmake requests
-        uv pip install --system "$(ls ${{ github.event.inputs.artifact-path }}/*.whl)[dev, cartopy, docs]"
+        uv pip install --system "$(ls ${{ inputs.artifact-path }}/*.whl)[dev, cartopy, docs]"
 
     - name: Test docs build
       run: |
@@ -62,14 +63,14 @@ jobs:
     - name: Download package
       uses: actions/download-artifact@v4
       with:
-        name: ${{ github.event.inputs.artifact-name }}
+        name: ${{ inputs.artifact-name }}
         path: dist
 
     - name: Install package and dependencies
       run: |
         python -m pip install uv
         uv pip install --system nbmake requests
-        uv pip install --system "$(ls ${{ github.event.inputs.artifact-path }}/*.whl)[dev]"
+        uv pip install --system "$(ls ${{ inputs.artifact-path }}/*.whl)[dev]"
 
         # TODO: Remove once types in linopy are resolved
         uv pip install --system linopy==0.3.14 --reinstall
