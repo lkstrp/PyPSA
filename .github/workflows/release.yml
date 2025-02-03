@@ -2,9 +2,6 @@ name: Release
 
 on:
   push:
-    branches:
-    - master
-    - release-branch-v*
     tags:
     - v*.*.*
 
@@ -36,7 +33,7 @@ jobs:
         echo "prepared=$prepared" >> $GITHUB_OUTPUT
 
   tests:
-    name: Run 'Unit tests' workflow
+    name: Run Tests
     needs: [check-preparation]
     # Run test workflow before building and releasing
     if: ${{ needs.check-preparation.outputs.prepared == 'false' }}
