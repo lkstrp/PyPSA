@@ -2,6 +2,9 @@ name: Release
 
 on:
   push:
+    branches:
+    - master
+    - release-branch-v*
     tags:
     - v*.*.*
 
