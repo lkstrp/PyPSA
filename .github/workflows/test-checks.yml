@@ -1,0 +1,80 @@
+name: Checks
+# Subsequent workflow of Tests/ test.yaml workflow
+
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        type: string
+        required: true
+
+# Cancel any in-progress runs when a new run is triggered
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-checks
+  cancel-in-progress: true
+
+jobs:
+
+  docs-build:
+    name: Docs build # Also tests example notebooks (similar to nbmake)
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v5
+      with:
+        python-version: 3.12
+
+    - name: Download package
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: dist
+
+    - name: Install package and dependencies
+      run: |
+        python -m pip install uv
+        uv pip install --system nbmake requests
+        uv pip install --system "$(ls dist/*.whl)[dev, cartopy, docs]"
+
+    - name: Test docs build
+      run: |
+        sudo apt-get install -y pandoc
+        pytest test/test_docs.py --test-docs-build
+
+  check-types:
+    name: Types
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v5
+      with:
+        python-version: 3.12
+
+    - name: Download package
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: dist
+
+    - name: Install package and dependencies
+      run: |
+        python -m pip install uv
+        uv pip install --system nbmake requests
+        uv pip install --system "$(ls dist/*.whl)[dev]"
+
+        # TODO: Remove once types in linopy are resolved
+        uv pip install --system linopy==0.3.14 --reinstall
+
+    - name: Run type checker (mypy)
+      run: |
+        mypy .
