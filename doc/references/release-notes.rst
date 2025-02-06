@@ -38,14 +38,14 @@ Features
 
 * Deprecation of custom components (https://github.com/PyPSA/PyPSA/pull/1130)
 
-   * This version of PyPSA deprecates custom components. While we don't see many use 
-     cases for them, they might be added in an improved way in future again. For a 
-     potential reimplementation we would be happy to hear your use case and 
-     requirements via the `issue tracker <https://www.github.com/PyPSA/PyPSA/issues>`_.
-   
-   * If you don't know what this is or have never used the ``override_components``
-     and ``override_component_attrs`` arguments during Network initialisation, you can
-     safely ignore this deprecation.
+  * This version of PyPSA deprecates custom components. While we don't see many use 
+    cases for them, they might be added in an improved way in future again. For a 
+    potential reimplementation we would be happy to hear your use case and 
+    requirements via the `issue tracker <https://www.github.com/PyPSA/PyPSA/issues>`_.
+  
+  * If you don't know what this is or have never used the ``override_components``
+    and ``override_component_attrs`` arguments during Network initialisation, you can
+    safely ignore this deprecation.
 
 * PyPSA `0.33` provides support for the recent Python 3.13 release and drops support 
   for Python 3.9. While Python 3.9 still gets security updates until October 2025,
