@@ -27,8 +27,7 @@ requires-python = ">=3.10"
 
 dependencies = [
     "numpy",
-    "scipy>=1.14.1,!=1.15.0; python_version >= '3.13'",
-    "scipy; python_version < '3.13'",
+    "scipy>=1.14.1,!=1.15.0",
     "pandas>=0.24",
     "xarray",
     "netcdf4",
@@ -49,7 +48,7 @@ Homepage = "https://github.com/PyPSA/PyPSA"
 Source = "https://github.com/PyPSA/PyPSA"
 
 [project.optional-dependencies]
-hdf5 = ["tables; python_version < '3.13'"]
+hdf5 = ["tables"]
 cartopy = ["cartopy>=0.16"]
 excel = ["openpyxl", "python-calamine"]
 gurobipy = ["gurobipy"]
