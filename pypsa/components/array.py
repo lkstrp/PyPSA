@@ -188,30 +188,16 @@ class ComponentsArrayMixin(_ComponentsABC):
         # snapshots = getattr(snapshots, "values", snapshots) # TODO # noqa: ERA001
         inds = getattr(inds, "values", inds)
 
-        # Use .values to avoid holding references to original pandas objects. Otherwise,
-        # the xarray object cannot be garbage collected.
         if attr == "active":
-            activity_mask = self.get_activity_mask(snapshots)
-            res = xarray.DataArray(
-                activity_mask.values,
-                dims=activity_mask.dims,
-                coords=activity_mask.coords,
-            )
+            res = xarray.DataArray(self.get_activity_mask(snapshots).copy())
         elif attr in self.dynamic.keys() or snapshots is not None:
-            data = self._as_dynamic(attr, snapshots)
+            res = self._as_dynamic(attr, snapshots)
             if self.has_scenarios:
                 # TODO implement this better
-                data.columns.name = None
-            res = xarray.DataArray(
-                data.values,
-                dims=["snapshot", "name"],
-                coords={"snapshot": data.index, "name": data.columns},
-            )
+                res.columns.name = None
+            res = xarray.DataArray(res.copy())
         else:
-            static_data = self.static[attr]
-            res = xarray.DataArray(
-                static_data.values, dims=["name"], coords={"name": static_data.index}
-            )
+            res = xarray.DataArray(self.static[attr].copy())
 
         # Rename dimension
         # res = res.rename({self.name: "component"}) # noqa: ERA001
