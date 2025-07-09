@@ -9,7 +9,7 @@ from __future__ import annotations
 import copy
 import inspect
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 import xarray
@@ -21,59 +21,49 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
-class _XarrayAccessor:
-    """Accessor class that provides property-like xarray access to all attributes.
-
-    Attributes are lazy evaluated via _as_xarray method of the component.
-    """
-
-    def __init__(self, component: ComponentsArrayMixin) -> None:
-        self._component = component
-
-    def __getattr__(self, attr: str) -> xarray.DataArray:
-        try:
-            return self._component._as_xarray(attr=attr)
-        except AttributeError as e:
-            msg = (
-                f"'{self._component.__class__.__name__}' components has no "
-                "attribute '{attr}'"
-            )
-            raise AttributeError(msg) from e
-
-    def __getitem__(self, attr: str) -> xarray.DataArray:
-        try:
-            return self._component._as_xarray(attr=attr)
-        except AttributeError as e:
-            msg = (
-                f"'{self._component.__class__.__name__}' components has no "
-                "attribute '{attr}'"
-            )
-            raise AttributeError(msg) from e
-
-
 class ComponentsArrayMixin(_ComponentsABC):
     """Helper class for components array methods.
 
     Class only inherits to Components and should not be used directly.
     """
 
-    def __init__(self) -> None:
-        """Initialize the ComponentsArrayMixin."""
-        self.da = _XarrayAccessor(self)
+    @property
+    def da(self) -> Any:
+        """Dynamic accessor property that creates fresh instance each time."""
+        component = self
+
+        class XarrayAccessor:
+            def __getattr__(self, attr: str) -> xarray.DataArray:
+                try:
+                    return component._as_xarray(attr=attr)
+                except AttributeError as e:
+                    msg = (
+                        f"'{component.__class__.__name__}' components has no "
+                        f"attribute '{attr}'"
+                    )
+                    raise AttributeError(msg) from e
+
+            def __getitem__(self, attr: str) -> xarray.DataArray:
+                try:
+                    return component._as_xarray(attr=attr)
+                except AttributeError as e:
+                    msg = (
+                        f"'{component.__class__.__name__}' components has no "
+                        f"attribute '{attr}'"
+                    )
+                    raise AttributeError(msg) from e
+
+        return XarrayAccessor()
 
     def __deepcopy__(
         self, memo: dict[int, object] | None = None
     ) -> ComponentsArrayMixin:
-        """Create custom deepcopy which does not copy the xarray accessor."""
+        """Create custom deepcopy."""
         cls = self.__class__
         result = cls.__new__(cls)
         memo[id(self)] = result  # type: ignore
         for k, v in self.__dict__.items():
-            setattr(
-                result,
-                k,
-                _XarrayAccessor(result) if k == "da" else copy.deepcopy(v, memo),
-            )
+            setattr(result, k, copy.deepcopy(v, memo))
         return result
 
     def _as_dynamic(
