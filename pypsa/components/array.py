@@ -7,8 +7,10 @@ DataArray for each variable.
 from __future__ import annotations
 
 import copy
+import gc
 import inspect
 import os
+import weakref
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -25,30 +27,46 @@ class _XarrayAccessor:
     """Accessor class that provides property-like xarray access to all attributes.
 
     Attributes are lazy evaluated via _as_xarray method of the component.
+    Uses weak reference caching to avoid memory leaks while improving performance.
     """
 
     def __init__(self, component: ComponentsArrayMixin) -> None:
         self._component = component
+        self._cache: dict[str, weakref.ref] = {}
+
+    def _get_or_create_xarray(self, attr: str) -> xarray.DataArray:
+        """Get xarray from cache or create new one with weak reference caching."""
+        # Check if we have a cached version
+        if attr in self._cache:
+            cached_ref = self._cache[attr]
+            cached_array = cached_ref()
+            if cached_array is not None:
+                return cached_array
+
+        # Create new xarray DataArray
+        try:
+            array = self._component._as_xarray(attr=attr)
+            # Store weak reference in cache
+            self._cache[attr] = weakref.ref(array)
+            return array
+        except AttributeError as e:
+            msg = (
+                f"'{self._component.__class__.__name__}' components has no "
+                f"attribute '{attr}'"
+            )
+            raise AttributeError(msg) from e
 
     def __getattr__(self, attr: str) -> xarray.DataArray:
-        try:
-            return self._component._as_xarray(attr=attr)
-        except AttributeError as e:
-            msg = (
-                f"'{self._component.__class__.__name__}' components has no "
-                f"attribute '{attr}'"
-            )
-            raise AttributeError(msg) from e
+        return self._get_or_create_xarray(attr)
 
     def __getitem__(self, attr: str) -> xarray.DataArray:
-        try:
-            return self._component._as_xarray(attr=attr)
-        except AttributeError as e:
-            msg = (
-                f"'{self._component.__class__.__name__}' components has no "
-                f"attribute '{attr}'"
-            )
-            raise AttributeError(msg) from e
+        return self._get_or_create_xarray(attr)
+
+    def clear_cache(self) -> None:
+        """Clear the weak reference cache and suggest garbage collection."""
+        self._cache.clear()
+        # Suggest garbage collection to free up memory
+        gc.collect()
 
 
 class ComponentsArrayMixin(_ComponentsABC):
@@ -130,15 +148,27 @@ class ComponentsArrayMixin(_ComponentsABC):
         empty_index = index[:0]  # keep index name and names
         empty_static = pd.Series([], index=empty_index)
         static = self.static.get(attr, empty_static)
-        empty_dynamic = pd.DataFrame(index=sns, columns=empty_index)
-        dynamic = self.dynamic.get(attr, empty_dynamic).loc[sns]
 
         if inds is not None:
             index = index.intersection(inds)
 
-        diff = index.difference(dynamic.columns)
-        static_to_dynamic = pd.DataFrame({**static[diff]}, index=sns)
-        res = pd.concat([dynamic, static_to_dynamic], axis=1, names=sns.names)[index]
+        # Optimize: check if attribute exists in dynamic first to avoid empty DataFrame creation
+        if attr in self.dynamic:
+            dynamic = self.dynamic[attr].loc[sns]
+            diff = index.difference(dynamic.columns)
+
+            # Only create static_to_dynamic if needed
+            if len(diff) > 0:
+                static_to_dynamic = pd.DataFrame({**static[diff]}, index=sns)
+                res = pd.concat([dynamic, static_to_dynamic], axis=1, names=sns.names)[
+                    index
+                ]
+            else:
+                res = dynamic[index]
+        else:
+            # Pure static attribute - avoid dynamic DataFrame creation
+            static_to_dynamic = pd.DataFrame({**static[index]}, index=sns)
+            res = static_to_dynamic
 
         # power flow calculations in pf.py require a starting point for the algorithm, while p_set default is n/a
         if attr == "p_set" and in_pf:
@@ -228,5 +258,12 @@ class ComponentsArrayMixin(_ComponentsABC):
                 pass
 
         res.name = attr
+
+        # Clean up any temporary variables to help with memory management
+        # This is particularly important for large networks
+        locals_to_clean = ["array", "cached_array", "cached_ref"]
+        for var_name in locals_to_clean:
+            if var_name in locals():
+                del locals()[var_name]
 
         return res
