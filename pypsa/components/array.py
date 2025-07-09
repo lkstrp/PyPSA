@@ -36,7 +36,7 @@ class _XarrayAccessor:
         except AttributeError as e:
             msg = (
                 f"'{self._component.__class__.__name__}' components has no "
-                "attribute '{attr}'"
+                f"attribute '{attr}'"
             )
             raise AttributeError(msg) from e
 
@@ -46,7 +46,7 @@ class _XarrayAccessor:
         except AttributeError as e:
             msg = (
                 f"'{self._component.__class__.__name__}' components has no "
-                "attribute '{attr}'"
+                f"attribute '{attr}'"
             )
             raise AttributeError(msg) from e
 
@@ -188,16 +188,30 @@ class ComponentsArrayMixin(_ComponentsABC):
         # snapshots = getattr(snapshots, "values", snapshots) # TODO # noqa: ERA001
         inds = getattr(inds, "values", inds)
 
+        # Use .values to avoid holding references to original pandas objects. Otherwise,
+        # the xarray object cannot be garbage collected.
         if attr == "active":
-            res = xarray.DataArray(self.get_activity_mask(snapshots))
+            activity_mask = self.get_activity_mask(snapshots)
+            res = xarray.DataArray(
+                activity_mask.values,
+                dims=activity_mask.dims,
+                coords=activity_mask.coords,
+            )
         elif attr in self.dynamic.keys() or snapshots is not None:
-            res = self._as_dynamic(attr, snapshots)
+            data = self._as_dynamic(attr, snapshots)
             if self.has_scenarios:
                 # TODO implement this better
-                res.columns.name = None
-            res = xarray.DataArray(res)
+                data.columns.name = None
+            res = xarray.DataArray(
+                data.values,
+                dims=["snapshot", "name"],
+                coords={"snapshot": data.index, "name": data.columns},
+            )
         else:
-            res = xarray.DataArray(self.static[attr])
+            static_data = self.static[attr]
+            res = xarray.DataArray(
+                static_data.values, dims=["name"], coords={"name": static_data.index}
+            )
 
         # Rename dimension
         # res = res.rename({self.name: "component"}) # noqa: ERA001
