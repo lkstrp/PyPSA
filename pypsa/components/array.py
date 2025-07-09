@@ -36,7 +36,7 @@ class _XarrayAccessor:
         except AttributeError as e:
             msg = (
                 f"'{self._component.__class__.__name__}' components has no "
-                "attribute '{attr}'"
+                f"attribute '{attr}'"
             )
             raise AttributeError(msg) from e
 
@@ -46,7 +46,7 @@ class _XarrayAccessor:
         except AttributeError as e:
             msg = (
                 f"'{self._component.__class__.__name__}' components has no "
-                "attribute '{attr}'"
+                f"attribute '{attr}'"
             )
             raise AttributeError(msg) from e
 
@@ -59,7 +59,14 @@ class ComponentsArrayMixin(_ComponentsABC):
 
     def __init__(self) -> None:
         """Initialize the ComponentsArrayMixin."""
-        self.da = _XarrayAccessor(self)
+        self._da = None
+
+    @property
+    def da(self) -> _XarrayAccessor:
+        """Lazy xarray accessor for component attributes."""
+        if self._da is None:
+            self._da = _XarrayAccessor(self)
+        return self._da
 
     def __deepcopy__(
         self, memo: dict[int, object] | None = None
@@ -69,11 +76,11 @@ class ComponentsArrayMixin(_ComponentsABC):
         result = cls.__new__(cls)
         memo[id(self)] = result  # type: ignore
         for k, v in self.__dict__.items():
-            setattr(
-                result,
-                k,
-                _XarrayAccessor(result) if k == "da" else copy.deepcopy(v, memo),
-            )
+            if k == "_da":
+                # Reset lazy accessor to None for the copy
+                setattr(result, k, None)
+            else:
+                setattr(result, k, copy.deepcopy(v, memo))
         return result
 
     def _as_dynamic(
