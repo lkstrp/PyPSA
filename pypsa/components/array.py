@@ -188,15 +188,15 @@ class ComponentsArrayMixin(_ComponentsABC):
         inds = getattr(inds, "values", inds)
 
         if attr == "active":
-            res = xarray.DataArray(self.get_activity_mask(snapshots))
+            res = xarray.DataArray(self.get_activity_mask(snapshots).copy())
         elif attr in self.dynamic.keys() or snapshots is not None:
             res = self._as_dynamic(attr, snapshots)
             if self.has_scenarios:
                 # TODO implement this better
                 res.columns.name = None
-            res = xarray.DataArray(res)
+            res = xarray.DataArray(res.copy())
         else:
-            res = xarray.DataArray(self.static[attr])
+            res = xarray.DataArray(self.static[attr].copy())
 
         # Rename dimension
         # res = res.rename({self.name: "component"}) # noqa: ERA001
