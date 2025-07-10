@@ -57,23 +57,20 @@ class ComponentsArrayMixin(_ComponentsABC):
     Class only inherits to Components and should not be used directly.
     """
 
-    def __init__(self) -> None:
-        """Initialize the ComponentsArrayMixin."""
-        self.da = _XarrayAccessor(self)
+    @property
+    def da(self) -> _XarrayAccessor:
+        """Lazy xarray accessor that creates instances on demand."""
+        return _XarrayAccessor(self)
 
     def __deepcopy__(
         self, memo: dict[int, object] | None = None
     ) -> ComponentsArrayMixin:
-        """Create custom deepcopy which does not copy the xarray accessor."""
+        """Create custom deepcopy ignoring the da property."""
         cls = self.__class__
         result = cls.__new__(cls)
         memo[id(self)] = result  # type: ignore
         for k, v in self.__dict__.items():
-            setattr(
-                result,
-                k,
-                _XarrayAccessor(result) if k == "da" else copy.deepcopy(v, memo),
-            )
+            setattr(result, k, copy.deepcopy(v, memo))
         return result
 
     def _as_dynamic(
