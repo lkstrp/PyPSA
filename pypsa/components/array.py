@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import inspect
 import os
+import weakref
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -21,32 +22,34 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
-class _XarrayAccessor:
-    """Accessor class that provides property-like xarray access to all attributes.
-
-    Attributes are lazy evaluated via _as_xarray method of the component.
-    """
+class _XarrayAccessorNamespace:
+    """Lightweight namespace for xarray accessor functionality."""
 
     def __init__(self, component: ComponentsArrayMixin) -> None:
-        self._component = component
+        # Store weak reference to avoid circular references
+        self._component_ref = weakref.ref(component)
 
     def __getattr__(self, attr: str) -> xarray.DataArray:
+        component = self._component_ref()
+        if component is None:
+            raise ReferenceError("Component has been garbage collected")
         try:
-            return self._component._as_xarray(attr=attr)
+            return component._as_xarray(attr=attr)
         except AttributeError as e:
             msg = (
-                f"'{self._component.__class__.__name__}' components has no "
-                "attribute '{attr}'"
+                f"'{component.__class__.__name__}' components has no attribute '{attr}'"
             )
             raise AttributeError(msg) from e
 
     def __getitem__(self, attr: str) -> xarray.DataArray:
+        component = self._component_ref()
+        if component is None:
+            raise ReferenceError("Component has been garbage collected")
         try:
-            return self._component._as_xarray(attr=attr)
+            return component._as_xarray(attr=attr)
         except AttributeError as e:
             msg = (
-                f"'{self._component.__class__.__name__}' components has no "
-                "attribute '{attr}'"
+                f"'{component.__class__.__name__}' components has no attribute '{attr}'"
             )
             raise AttributeError(msg) from e
 
@@ -57,20 +60,30 @@ class ComponentsArrayMixin(_ComponentsABC):
     Class only inherits to Components and should not be used directly.
     """
 
+    def __init__(self) -> None:
+        """Initialize the ComponentsArrayMixin."""
+        self._da = None
+
     @property
-    def da(self) -> _XarrayAccessor:
-        """Lazy xarray accessor that creates instances on demand."""
-        return _XarrayAccessor(self)
+    def da(self) -> _XarrayAccessorNamespace:
+        """Cached xarray accessor with weak reference."""
+        if self._da is None:
+            self._da = _XarrayAccessorNamespace(self)
+        return self._da
 
     def __deepcopy__(
         self, memo: dict[int, object] | None = None
     ) -> ComponentsArrayMixin:
-        """Create custom deepcopy ignoring the da property."""
+        """Create custom deepcopy ignoring the da accessor."""
         cls = self.__class__
         result = cls.__new__(cls)
         memo[id(self)] = result  # type: ignore
         for k, v in self.__dict__.items():
-            setattr(result, k, copy.deepcopy(v, memo))
+            if k == "_da":
+                # Don't copy the accessor, let it be recreated lazily
+                setattr(result, k, None)
+            else:
+                setattr(result, k, copy.deepcopy(v, memo))
         return result
 
     def _as_dynamic(
