@@ -71,7 +71,7 @@ lookup = pd.read_csv(
 )
 
 
-def define_objective(n: Network, sns: pd.Index) -> None:
+def define_objective(n: Network, sns: pd.Index, scale: bool = False) -> None:
     """Define and write the optimization objective function.
 
     Builds the (linear or quadratic) objective by assembling the following terms:
@@ -162,7 +162,7 @@ def define_objective(n: Network, sns: pd.Index) -> None:
     else:
         n._objective_constant = float(constant)
         has_const = constant != 0
-    if has_const:
+    if has_const and not scale:
         object_const = m.add_variables(constant, constant, name="objective_constant")
         objective.append(-1 * object_const)
 
@@ -298,6 +298,122 @@ def define_objective(n: Network, sns: pd.Index) -> None:
     m.objective = sum(terms) if is_quadratic else merge(terms)
 
 
+def scale_model(n, row_scales=None, col_scales=None) -> None:
+    """Apply row and column scaling to reduce coefficient ranges.
+
+    Parameters
+    ----------
+    n : pypsa.Network
+        Network with attached model
+    row_scales : dict, optional
+        Scaling factors for each constraint row {constraint_name: scale_value}
+    col_scales : dict, optional
+        Scaling factors for each variable {variable_name: scale_value}
+
+    """
+    # TODO Hardcode scaling vlaues for now
+    row_scales = row_scales or {
+        "Store-ext-e_nom-lower": 1e3,
+        "Store-ext-e_nom-upper": 1e3,
+        "Generator-fix-p-upper": 1e3,
+        "StorageUnit-fix-state_of_charge-upper": 1e3,
+        "Generator-e_sum_max": 1e3,
+        "GlobalConstraint-biomass limit": 1e3,
+        "GlobalConstraint-co2_sequestration_limit": 1e3,
+    }
+    col_scales = col_scales or {}
+
+    n.model.objective.data["coeffs"] = n.model.objective.data["coeffs"] * 1e-2
+
+    # Log scaling factors
+    for name, scale in row_scales.items():
+        logger.info("Auto-scaling: Constraint %s by %.1e", name, scale)
+    for name, scale in col_scales.items():
+        logger.info("Auto-scaling: Variable %s by %.1e", name, scale)
+
+    # Apply row scaling to constraints
+    for con_name, row_scale in row_scales.items():
+        if con_name in n.model.constraints:
+            con = n.model.constraints[con_name]
+            # Row scaling: divide coefficients and RHS by row scale
+            con.coeffs = con.coeffs / row_scale
+            con.rhs = con.rhs / row_scale
+
+    # Apply column scaling to constraints
+    # if col_scales:
+    #     for con_name, con in n.model.constraints.items():
+    #         var_dim = "vars" if "vars" in con.coeffs.dims else con.coeffs.dims[-1]
+    #         # Build scaling array only for variables that have scaling factors
+    #         scale_array = xr.ones_like(con.coeffs)
+    #         for var_name, var_scale in col_scales.items():
+    #             # Check if this variable appears in this constraint
+    #             if var_name in n.model.variables:
+    #                 var = n.model.variables[var_name]
+    #                 if hasattr(var, "labels"):
+    #                     # Get the labels for this variable
+    #                     labels_array = (
+    #                         var.labels.values
+    #                         if hasattr(var.labels, "values")
+    #                         else var.labels
+    #                     )
+    #                     labels_flat = labels_array.flatten()
+    #                     for label in labels_flat:
+    #                         if (
+    #                             label >= 0
+    #                             and label in con.coeffs.coords[var_dim].values
+    #                         ):
+    #                             scale_array.loc[{var_dim: label}] = var_scale
+    #         # Apply column scaling if any scaling factors were found
+    #         if not scale_array.equals(xr.ones_like(con.coeffs)):
+    #             con.coeffs = con.coeffs * scale_array
+
+    # # Scale variable bounds (divide by column scaling)
+    # for var_name, var_scale in col_scales.items():
+    #     if var_name in n.model.variables:
+    #         var = n.model.variables[var_name]
+    #         if var.lower is not None:
+    #             var.lower = var.lower / var_scale
+    #         if var.upper is not None:
+    #             var.upper = var.upper / var_scale
+
+    # # Scale objective coefficients (multiply by column scaling)
+    # if col_scales:
+    #     obj_coeffs = n.model.objective.expression.data.get("coeffs")
+    #     if obj_coeffs is not None:
+    #         var_dim = (
+    #             "vars"
+    #             if "vars" in obj_coeffs.dims
+    #             else obj_coeffs.dims[-1]
+    #             if obj_coeffs.dims
+    #             else None
+    #         )
+    #         if var_dim and var_dim in obj_coeffs.dims:
+    #             # Build scaling array only for variables that have scaling factors
+    #             obj_scale_array = xr.ones_like(obj_coeffs)
+    #             for var_name, var_scale in col_scales.items():
+    #                 if var_name in n.model.variables:
+    #                     var = n.model.variables[var_name]
+    #                     if hasattr(var, "labels"):
+    #                         # Get the labels for this variable
+    #                         labels_array = (
+    #                             var.labels.values
+    #                             if hasattr(var.labels, "values")
+    #                             else var.labels
+    #                         )
+    #                         labels_flat = labels_array.flatten()
+    #                         for label in labels_flat:
+    #                             if (
+    #                                 label >= 0
+    #                                 and label in obj_coeffs.coords[var_dim].values
+    #                             ):
+    #                                 obj_scale_array.loc[{var_dim: label}] = var_scale
+    #             # Apply scaling if any factors were found
+    #             if not obj_scale_array.equals(xr.ones_like(obj_coeffs)):
+    #                 n.model.objective.expression.data["coeffs"] = (
+    #                     obj_coeffs * obj_scale_array
+    #                 )
+
+
 class OptimizationAccessor(OptimizationAbstractMixin):
     """Optimization accessor for building and solving models using linopy."""
 
@@ -415,6 +531,7 @@ class OptimizationAccessor(OptimizationAbstractMixin):
         transmission_losses: int = 0,
         linearized_unit_commitment: bool = False,
         consistency_check: bool = True,
+        scale: bool = False,
         **kwargs: Any,
     ) -> Model:
         """Create a linopy.Model instance from a pypsa network.
@@ -436,6 +553,8 @@ class OptimizationAccessor(OptimizationAbstractMixin):
             Whether to optimise using the linearised unit commitment formulation or not.
         consistency_check : bool, default: True
             Whether to run the consistency check before building the model.
+        bound_range : tuple, optional
+            Range (min, max) to apply to infinite variable bounds for better numerical stability.
         **kwargs:
             Keyword arguments used by `linopy.Model()`, such as `solver_dir` or `chunk`.
 
@@ -540,7 +659,10 @@ class OptimizationAccessor(OptimizationAbstractMixin):
         define_nominal_constraints_per_bus_carrier(n, sns)
         define_growth_limit(n, sns)
 
-        define_objective(n, sns)
+        if scale:
+            scale_model(n)
+
+        define_objective(n, sns, scale)
 
         return n.model
 
