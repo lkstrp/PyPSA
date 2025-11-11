@@ -362,6 +362,141 @@ def iplot(
     return fig
 
 
+class MapDataExtractor:
+    """Extract geospatial data from a PyPSA network for map plotting.
+
+    This class handles the extraction and management of coordinate data for network
+    components (buses, branches, etc.) to be used across different plotting backends.
+    Data is extracted lazily when requested and cached for subsequent calls.
+    """
+
+    def __init__(
+        self,
+        n: "Network",
+        layouter: Callable | None = None,
+        jitter: float | None = None,
+    ):
+        """Initialize the map data extractor.
+
+        Parameters
+        ----------
+        n : Network
+            The PyPSA network to extract data from.
+        layouter : Callable | None, optional
+            Layouting function from networkx which overrules coordinates given in
+            n.buses[['x', 'y']].
+        jitter : float, optional
+            Amount of random noise to add to node positions.
+
+        """
+        self._n: Network = n
+        self._layouter = layouter
+        self._jitter = jitter
+
+        # Lazy initialization for cached data
+        self._bus_positions: pd.DataFrame | None = None
+        self._branch_positions: dict[str, pd.DataFrame] = {}
+
+    def get_bus_positions(self) -> pd.DataFrame:
+        """Get x, y positions for all buses.
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with columns ['x', 'y'] indexed by bus names.
+
+        """
+        if self._bus_positions is not None:
+            return self._bus_positions
+
+        buses = self._n.c.buses.static
+
+        # Check if all x and y are missing/zero → then fallback to layouter
+        is_empty = (buses[["x", "y"]].isnull() | (buses[["x", "y"]] == 0)).all().all()
+
+        if self._layouter or is_empty:
+            x, y = apply_layouter(self._n, self._layouter, inplace=False)
+        else:
+            x, y = buses["x"], buses["y"]
+
+        # Apply jitter if requested
+        if self._jitter:
+            x, y = add_jitter(x=x, y=y, jitter=self._jitter)
+
+        # Validation mask for WGS84 coordinates
+        valid = (
+            x.notnull()
+            & y.notnull()
+            & (x >= -180)
+            & (x <= 180)  # longitude
+            & (y >= -90)
+            & (y <= 90)  # latitude
+        )
+
+        # Keep only valid buses
+        dropped = (~valid).sum()
+        if dropped:
+            logger.warning("Dropping %d buses with invalid WGS84 coordinates", dropped)
+            x, y = x[valid], y[valid]
+
+        # Cache as DataFrame and return
+        self._bus_positions = pd.DataFrame({"x": x, "y": y})
+        return self._bus_positions
+
+    def get_branch_positions(self, component_name: str) -> pd.DataFrame:
+        """Get start and end positions for branches of a given component.
+
+        Returns are cached per component - first call extracts data, subsequent calls
+        for the same component return cached result.
+
+        Parameters
+        ----------
+        component_name : str
+            Name of the component (e.g., "Line", "Link", "Transformer").
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with columns ['bus0_x', 'bus0_y', 'bus1_x', 'bus1_y']
+            indexed by branch names.
+
+        """
+        # Return cached if available
+        if component_name in self._branch_positions:
+            return self._branch_positions[component_name]
+
+        # Ensure bus positions are available
+        bus_positions = self.get_bus_positions()
+
+        # Get component data
+        component = as_components(self._n, component_name)
+        branch_data = component.static
+
+        # Filter to branches where both buses exist in bus positions
+        bus_index = bus_positions.index
+        valid = branch_data["bus0"].isin(bus_index) & branch_data["bus1"].isin(
+            bus_index
+        )
+
+        if not valid.all():
+            dropped = (~valid).sum()
+            logger.warning(
+                "Dropping %d row(s) in '%s' with missing buses", dropped, component_name
+            )
+            branch_data = branch_data[valid]
+
+        # Create positions DataFrame
+        positions = pd.DataFrame(index=branch_data.index)
+        positions["bus0_x"] = bus_positions.loc[branch_data["bus0"], "x"].values
+        positions["bus0_y"] = bus_positions.loc[branch_data["bus0"], "y"].values
+        positions["bus1_x"] = bus_positions.loc[branch_data["bus1"], "x"].values
+        positions["bus1_y"] = bus_positions.loc[branch_data["bus1"], "y"].values
+
+        # Cache and return
+        self._branch_positions[component_name] = positions
+        return positions
+
+
 class PydeckPlotter:
     """Class to create and manage an interactive pydeck map for a PyPSA network."""
 
@@ -415,11 +550,7 @@ class PydeckPlotter:
 
         """
         self._n: Network = n
-        self._x: pd.Series
-        self._y: pd.Series
-        self._init_xy(layouter=layouter)
-        if jitter:
-            self._x, self._y = add_jitter(x=self._x, y=self._y, jitter=jitter)
+        self._data_extractor = MapDataExtractor(n=n, layouter=layouter, jitter=jitter)
 
         self._map_style: str = self._init_map_style(map_style)
         self._view_state: pdk.ViewState = self._init_view_state(
@@ -443,37 +574,6 @@ class PydeckPlotter:
     def layers(self) -> dict[str, pdk.Layer]:
         """Get the layers of the interactive map."""
         return self._layers
-
-    def _init_xy(
-        self,
-        layouter: Callable | None = None,
-    ) -> None:
-        """Initialize x and y coordinates from the network buses."""
-        buses = self._n.c.buses.static
-
-        # Check if all x and y are missing/zero → then fallback to layouter
-        is_empty = (buses[["x", "y"]].isnull() | (buses[["x", "y"]] == 0)).all().all()
-
-        if layouter or is_empty:
-            self._x, self._y = apply_layouter(self._n, layouter, inplace=False)
-        else:
-            self._x, self._y = buses["x"], buses["y"]
-
-        # Validation mask for WGS84 coordinates
-        valid = (
-            self._x.notnull()
-            & self._y.notnull()
-            & (self._x >= -180)
-            & (self._x <= 180)  # longitude
-            & (self._y >= -90)
-            & (self._y <= 90)  # latitude
-        )
-
-        # Keep only valid buses
-        dropped = (~valid).sum()
-        if dropped:
-            logger.warning("Dropping %d buses with invalid WGS84 coordinates", dropped)
-            self._x, self._y = self._x[valid], self._y[valid]
 
     def _init_map_style(self, map_style: str) -> str:
         """Set the initial map style for the interactive map."""
@@ -506,9 +606,10 @@ class PydeckPlotter:
         if isinstance(view_state, pdk.ViewState):
             return view_state
 
+        bus_positions = self._data_extractor.get_bus_positions()
         vs = {
-            "longitude": self._x.mean(),
-            "latitude": self._y.mean(),
+            "longitude": bus_positions["x"].mean(),
+            "latitude": bus_positions["y"].mean(),
             "zoom": 4,
             "min_zoom": None,
             "max_zoom": None,
@@ -687,11 +788,11 @@ class PydeckPlotter:
 
         bus_data = self.prepare_component_data("Bus", extra_columns=bus_columns)
 
-        valid_idx = self._x.index.intersection(bus_data.index)
+        positions = self._data_extractor.get_bus_positions()
+        valid_idx = positions.index.intersection(bus_data.index)
         bus_data = bus_data.loc[valid_idx].copy()
         self._component_data["Bus"] = bus_data
-        bus_data["x"] = self._x.loc[bus_data.index]
-        bus_data["y"] = self._y.loc[bus_data.index]
+        bus_data[["x", "y"]] = positions.loc[valid_idx, ["x", "y"]]
 
         # Handle bus sizes
         bus_size_series = _convert_to_series(bus_size, bus_data.index).clip(lower=0)
@@ -912,8 +1013,11 @@ class PydeckPlotter:
             extra_columns=bus_columns,
         )
 
-        # Only keep buses with valid coordinates, same index order as self._x and self._y
-        bus_data = bus_data.loc[self._x.index[self._x.index.isin(bus_data.index)]]
+        # Only keep buses with valid coordinates, same index order as data extractor
+        bus_positions = self._data_extractor.get_bus_positions()
+        bus_data = bus_data.loc[
+            bus_positions.index[bus_positions.index.isin(bus_data.index)]
+        ]
 
         # Drop tiny values to avoid numerical issues
         bus_size = bus_size.drop(bus_size[abs(bus_size) < EPS].index)
@@ -955,8 +1059,11 @@ class PydeckPlotter:
 
         # Convert to NumPy arrays for speed-up
         bus_coords = np.column_stack(
-            [self._x.loc[valid_buses], self._y.loc[valid_buses]]
-        )  # assumes that bus_data is aligned with self._x and self._y, done above
+            [
+                bus_positions.loc[valid_buses, "x"],
+                bus_positions.loc[valid_buses, "y"],
+            ]
+        )  # assumes that bus_data is aligned with data extractor coordinates, done above
         bus_indices = valid_buses.to_numpy()
         bus_values = bus_size.to_numpy()
 
@@ -1089,7 +1196,10 @@ class PydeckPlotter:
         )
 
         # Only keep rows where both bus0 and bus1 are present
-        valid = c_data["bus0"].isin(self._x.index) & c_data["bus1"].isin(self._x.index)
+        bus_positions = self._data_extractor.get_bus_positions()
+        valid = c_data["bus0"].isin(bus_positions.index) & c_data["bus1"].isin(
+            bus_positions.index
+        )
         if not valid.all():
             dropped = (~valid).sum()
             logger.warning(
@@ -1130,13 +1240,14 @@ class PydeckPlotter:
             geoms = static_data["geometry"].reindex(c_data.index)
             branch_paths = series_to_pdk_path(geoms)
         else:
+            bus_positions = self._data_extractor.get_bus_positions()
             branch_paths = [
                 [[x0, y0], [x1, y1]]
                 for x0, y0, x1, y1 in zip(
-                    self._x.loc[c_data["bus0"]],
-                    self._y.loc[c_data["bus0"]],
-                    self._x.loc[c_data["bus1"]],
-                    self._y.loc[c_data["bus1"]],
+                    bus_positions.loc[c_data["bus0"], "x"],
+                    bus_positions.loc[c_data["bus0"], "y"],
+                    bus_positions.loc[c_data["bus1"], "x"],
+                    bus_positions.loc[c_data["bus1"], "y"],
                     strict=False,
                 )
             ]
