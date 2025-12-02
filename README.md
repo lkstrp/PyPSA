@@ -11,6 +11,7 @@ SPDX-License-Identifier: MIT
 
 # PyPSA - Python for Power System Analysis
 
+bla
 
 [![PyPI version](https://img.shields.io/pypi/v/pypsa.svg)](https://pypi.python.org/pypi/pypsa)
 [![Conda version](https://img.shields.io/conda/vn/conda-forge/pypsa.svg)](https://anaconda.org/conda-forge/pypsa)
