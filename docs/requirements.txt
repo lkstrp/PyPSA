@@ -351,7 +351,9 @@ mkdocs==1.6.1
 mkdocs-autolinks-plugin==0.7.1
     # via pypsa
 mkdocs-autorefs==1.4.3
-    # via mkdocstrings
+    # via
+    #   mkdocstrings
+    #   mkdocstrings-python
 mkdocs-ezlinks-plugin==0.1.14
     # via pypsa
 mkdocs-get-deps==0.2.0
@@ -374,7 +376,7 @@ mkdocs-video==1.5.0
     # via pypsa
 mkdocstrings==1.0.0
     # via mkdocstrings-python
-mkdocstrings-python==0.10.1
+mkdocstrings-python==1.19.0
     # via pypsa
 msgpack==1.1.2
     # via blosc2
