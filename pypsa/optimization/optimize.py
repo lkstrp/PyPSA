@@ -56,7 +56,7 @@ from pypsa.optimization.global_constraints import (
     define_transmission_expansion_cost_limit,
     define_transmission_volume_expansion_limit,
 )
-from pypsa.optimization.scaling import Scaler
+from pypsa.optimization.scaling import Scaler, scaling_report
 from pypsa.optimization.variables import (
     define_cvar_variables,
     define_loss_variables,
@@ -532,9 +532,10 @@ class OptimizationAccessor(OptimizationAbstractMixin):
             bus connectivity count. Defaults to ``[30, 100, 400]``.
         scaling : bool | dict | None, default None
             Rescale to better conditioned units before solving, then convert
-            results back. `True` uses `energy`/1e3, `cost`/1e3, `emissions`/1e6.
-            Pass a dict to override any subset. When None, defaults to module
-            wide option `options.params.optimize.scaling`.
+            results back. `True` uses `energy`/1024, `cost`/1024,
+            `emissions`/2**20. Pass a dict to override any subset, e.g.
+            `{"energy": 1, "cost": 1, "emissions": 1}`. When None, defaults to
+            module wide option `options.params.optimize.scaling`.
         **kwargs:
             Keyword argument used by `linopy.Model.solve`, such as `solver_name`,
             `problem_fn` or solver options directly passed to the solver.
@@ -647,9 +648,10 @@ class OptimizationAccessor(OptimizationAbstractMixin):
             bus connectivity count. Defaults to ``[30, 100, 400]``.
         scaling : bool | dict | None, default None
             Rescale to better conditioned units before solving, then convert
-            results back. `True` uses `energy`/1e3, `cost`/1e3, `emissions`/1e6.
-            Pass a dict to override any subset. When None, defaults to module
-            wide option `options.params.optimize.scaling`.
+            results back. `True` uses `energy`/1024, `cost`/1024,
+            `emissions`/2**20. Pass a dict to override any subset, e.g.
+            `{"energy": 1, "cost": 1, "emissions": 1}`. When None, defaults to
+            module wide option `options.params.optimize.scaling`.
         **kwargs:
             Keyword arguments used by `linopy.Model()`, such as `solver_dir` or `chunk`.
 
@@ -913,6 +915,27 @@ class OptimizationAccessor(OptimizationAbstractMixin):
             _assert_data_integrity(self._n)
 
         return status, condition
+
+    def scaling_report(self) -> pd.DataFrame:
+        """Report absolute nonzero numerical ranges of the stored linopy model.
+
+        One row per constraint group (coefficient and rhs ranges), per
+        variable group (bound ranges, infinities excluded) and one for the
+        objective coefficients. Useful to judge conditioning before/after
+        `scaling`.
+
+        Returns
+        -------
+        pd.DataFrame
+            Indexed by (kind, name) with columns `coeff_min`, `coeff_max`,
+            `rhs_min`, `rhs_max`, `bound_min`, `bound_max`.
+
+        """
+        n = self._n
+        if n._model is None:
+            msg = "Network has no model. Call `n.optimize.create_model()` first."
+            raise ValueError(msg)
+        return scaling_report(n._model)
 
     def assign_solution(self, factors: Scaler | None = None) -> None:
         """Map solution to network components."""

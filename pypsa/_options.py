@@ -481,8 +481,8 @@ options._add_option(
     "params.optimize.scaling",
     False,
     "Default value for the 'scaling' parameter in optimization. False means no "
-    "scaling, True uses energy/1e3, cost/1e3, emissions/1e6, and a dict overrides "
-    "any subset. See n.optimize(scaling=...).",
+    "scaling, True uses energy/1024, cost/1024, emissions/2**20, and a dict "
+    "overrides any subset. See n.optimize(scaling=...).",
 )
 
 options._add_option(

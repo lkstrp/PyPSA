@@ -263,9 +263,11 @@ class OptimizationAbstractMGAMixin:
             ).sum()
             fixed_cost = (n.statistics.installed_capex().sum() * w).sum()
 
-        # Scale the unscaled cost constants to match the model's scaled objective.
-        optimal_cost /= n._scaling["energy"]
-        fixed_cost /= n._scaling["energy"]
+        # Scale the unscaled cost constants to match the model's scaled
+        # objective, which is in cost units (assign_solution multiplies by
+        # factors.cost).
+        optimal_cost /= n._scaling["cost"]
+        fixed_cost /= n._scaling["cost"]
 
         # Add constraint
         objective = n.model.objective

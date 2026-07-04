@@ -7,17 +7,24 @@
 from __future__ import annotations
 
 import re
+import warnings
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, NamedTuple
+
+import numpy as np
+import pandas as pd
+import xarray as xr
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from linopy import Constraint, Model
+
     from pypsa import Network
 
-# - `energy` (MW / MWh), default 1e3
-# - `cost` (€), default 1e3
-# - `emissions` (tCO2), default 1e6
+# - `energy` (MW / MWh), default 1024
+# - `cost` (€), default 1024
+# - `emissions` (tCO2), default 2**20
 #
 # (energy, cost, emissions)
 _NOM = re.compile(r"(?!v_nom)(\w+_nom(_min|_max|_set|_mod)?|nom_(min|max)_\w+)")
@@ -64,10 +71,10 @@ class Scaler(NamedTuple):
         """Resolve the `scaling` argument into a `Scaler` or `None`."""
         if scaling is False or scaling is None:
             return None
-        defaults = {
-            "energy": 1e3,
-            "cost": 1e3,
-            "emissions": 1e6,
+        defaults: dict = {
+            "energy": 1024.0,
+            "cost": 1024.0,
+            "emissions": 2.0**20,
         }
         if scaling is True:
             return cls(**defaults)
@@ -85,7 +92,12 @@ class Scaler(NamedTuple):
             if not isinstance(v, (int, float)):
                 msg = f"scaling factor {k!r} must be numeric, got {v!r}"
                 raise TypeError(msg)
-        return cls(**{k: float(scaling.get(k, d)) for k, d in defaults.items()})
+        merged = {k: scaling.get(k, d) for k, d in defaults.items()}
+        return cls(
+            energy=float(merged["energy"]),
+            cost=float(merged["cost"]),
+            emissions=float(merged["emissions"]),
+        )
 
     def _factor(self, exponents: tuple[int, int, int]) -> float:
         """Product of the base units raised to the given exponents."""
@@ -155,3 +167,53 @@ class Scaler(NamedTuple):
                 n.components[cname].dynamic[col] = original
             if constant is not None:
                 n.global_constraints["constant"] = constant
+
+
+def _valid_abs_coeffs(con: Constraint) -> xr.DataArray:
+    """|coeffs| with linopy filler terms (vars == -1) and genuine zeros masked."""
+    data = con.data
+    return abs(data["coeffs"]).where((data["vars"] != -1) & (data["coeffs"] != 0))
+
+
+def scaling_report(m: Model) -> pd.DataFrame:
+    """Absolute nonzero numerical ranges of a linopy model, per group.
+
+    One row per constraint group (`coeff_min/coeff_max/rhs_min/rhs_max`),
+    per variable group (`bound_min/bound_max`, infinities excluded) and one
+    for the objective coefficients. Filler terms and masked rows are
+    excluded; linopy's `coefficientrange` is signed and filler-polluted.
+    """
+    rows: dict[tuple[str, str], dict[str, float]] = {}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN groups
+        for name, con in m.constraints.items():
+            live = con.data["labels"] != -1
+            absc = _valid_abs_coeffs(con).where(live)
+            absr = abs(con.data["rhs"])
+            absr = absr.where(live & np.isfinite(absr) & (absr != 0))
+            rows[("constraint", name)] = {
+                "coeff_min": float(absc.min()),
+                "coeff_max": float(absc.max()),
+                "rhs_min": float(absr.min()),
+                "rhs_max": float(absr.max()),
+            }
+        for name, var in m.variables.items():
+            bounds = xr.concat(
+                [abs(var.data["lower"]), abs(var.data["upper"])], dim="_bound"
+            )
+            bounds = bounds.where(
+                (var.data["labels"] != -1) & np.isfinite(bounds) & (bounds != 0)
+            )
+            rows[("variable", name)] = {
+                "bound_min": float(bounds.min()),
+                "bound_max": float(bounds.max()),
+            }
+        obj = abs(m.objective.coeffs)
+        obj = obj.where(obj != 0)
+        rows[("objective", "")] = {
+            "coeff_min": float(obj.min()),
+            "coeff_max": float(obj.max()),
+        }
+    df = pd.DataFrame.from_dict(rows, orient="index")
+    df.index = pd.MultiIndex.from_tuples(df.index, names=["kind", "name"])
+    return df
