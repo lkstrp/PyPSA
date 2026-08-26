@@ -9,7 +9,7 @@ from __future__ import annotations
 import copy
 import logging
 import warnings
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 from weakref import ref
 
 from deprecation import deprecated
@@ -55,6 +55,7 @@ from pypsa.network.power_flow import (
 from pypsa.network.transform import NetworkTransformMixin
 from pypsa.optimization.optimize import OptimizationAccessor
 from pypsa.optimization.scaling import Scaler
+from pypsa.optimization.window import SnapshotWindow
 from pypsa.plot.accessor import PlotAccessor
 from pypsa.plot.maps import explore
 from pypsa.statistics.expressions import StatisticsAccessor
@@ -94,6 +95,7 @@ class Network(
     _committable_big_m: float | None
     _scaling: dict[str, float]
     _scaler: Scaler | None
+    _optimize_window: SnapshotWindow | None
     iteration: int
 
     # ----------------
@@ -167,6 +169,7 @@ class Network(
         self._committable_big_m: float | None = None
         self._scaling: dict[str, float] = {"energy": 1.0, "cost": 1.0, "emissions": 1.0}
         self._scaler: Scaler | None = None
+        self._optimize_window: SnapshotWindow | None = None
 
         # Initialize accessors
         self.optimize: OptimizationAccessor = OptimizationAccessor(self)
@@ -319,6 +322,13 @@ class Network(
 
         """
         return self.equals(other)
+
+    def __setstate__(self, state: dict) -> None:
+        """Restore state and relink SubNetwork weakrefs dropped on pickling."""
+        self.__dict__.update(state)
+        for sub in self.c.sub_networks.static.get("obj", []):
+            if isinstance(sub, SubNetwork):
+                sub._n = ref(self)
 
     def __getitem__(self, key: str) -> Network:
         """Return a shallow slice of the Network object.
@@ -487,6 +497,11 @@ class Network(
 
             return self.slice_network(key)
 
+    def __iter__(self) -> NoReturn:
+        """Raise a clear error, as Network objects are not iterable."""
+        msg = "PyPSA Network objects are not iterable."
+        raise TypeError(msg)
+
     @property
     def stats(self) -> StatisticsAccessor:
         """Network [statistics functionality][pypsa.statistics.StatisticsAccessor] accessor (alias for [pypsa.Network.statistics][])."""
@@ -533,6 +548,7 @@ class Network(
             AbstractStatisticsAccessor,
             linopy.Model,
             Scaler,
+            SnapshotWindow,
         ]
         not_equal = False
         if isinstance(other, self.__class__):
@@ -657,28 +673,32 @@ class Network(
         <BLANKLINE>
         Variables:
         ----------
-        * Generator-p_nom (name)
-        * Line-s_nom (name)
-        * Link-p_nom (name)
-        * Generator-p (snapshot, name)
-        * Line-s (snapshot, name)
-        * Link-p (snapshot, name)
-        * objective_constant
+         * Generator-p_nom (name)
+         * Line-s_nom (name)
+         * Link-p_nom (name)
+         * Generator-p (snapshot, name)
+         * Line-s (snapshot, name)
+         * Link-p (snapshot, name)
+         * objective_constant
+        <BLANKLINE>
+        Expressions:
+        ------------
+        <empty>
         <BLANKLINE>
         Constraints:
         ------------
-        * Generator-ext-p_nom-lower (name)
-        * Line-ext-s_nom-lower (name)
-        * Link-ext-p_nom-lower (name)
-        * Generator-ext-p-lower (snapshot, name)
-        * Generator-ext-p-upper (snapshot, name)
-        * Line-ext-s-lower (snapshot, name)
-        * Line-ext-s-upper (snapshot, name)
-        * Link-ext-p-lower (snapshot, name)
-        * Link-ext-p-upper (snapshot, name)
-        * Bus-nodal_balance (name, snapshot)
-        * Kirchhoff-Voltage-Law (snapshot, cycle)
-        * GlobalConstraint-co2_limit
+         * Generator-ext-p_nom-lower (name)
+         * Line-ext-s_nom-lower (name)
+         * Link-ext-p_nom-lower (name)
+         * Generator-ext-p-lower (snapshot, name)
+         * Generator-ext-p-upper (snapshot, name)
+         * Line-ext-s-lower (snapshot, name)
+         * Line-ext-s-upper (snapshot, name)
+         * Link-ext-p-lower (snapshot, name)
+         * Link-ext-p-upper (snapshot, name)
+         * Bus-nodal_balance (snapshot, name)
+         * Kirchhoff-Voltage-Law (snapshot, cycle)
+         * GlobalConstraint-co2_limit
         <BLANKLINE>
         Status:
         -------
@@ -1096,17 +1116,17 @@ class Network(
         Examples
         --------
         >>> n.passive_branches() # doctest: +ELLIPSIS
-                    active    b  b_pu  ...         x      x_pu  x_pu_eff
-        component                     ...
-        0            True  0.0   0.0  ...  0.796878  0.000006  0.000006
-        1            True  0.0   0.0  ...  0.391560  0.000003  0.000003
-        2            True  0.0   0.0  ...  0.000000  0.000000  0.000000
-        3            True  0.0   0.0  ...  0.000000  0.000000  0.000000
-        4            True  0.0   0.0  ...  0.000000  0.000000  0.000000
-        5            True  0.0   0.0  ...  0.238800  0.000002  0.000002
-        6            True  0.0   0.0  ...  0.400000  0.000003  0.000003
+                        active    b  b_pu  ...         x      x_pu  x_pu_eff
+        component name                     ...
+        Line      0       True  0.0   0.0  ...  0.796878  0.000006  0.000006
+                  1       True  0.0   0.0  ...  0.391560  0.000003  0.000003
+                  2       True  0.0   0.0  ...  0.000000  0.000000  0.000000
+                  3       True  0.0   0.0  ...  0.000000  0.000000  0.000000
+                  4       True  0.0   0.0  ...  0.000000  0.000000  0.000000
+                  5       True  0.0   0.0  ...  0.238800  0.000002  0.000002
+                  6       True  0.0   0.0  ...  0.400000  0.000003  0.000003
         <BLANKLINE>
-        [7 rows x 41 columns]
+        [7 rows x 44 columns]
 
         """
         comps = sorted(
@@ -1146,7 +1166,7 @@ class Network(
                   Bremen Converter     True           0  ...                   1
                   DC link              True           0  ...                   1
         <BLANKLINE>
-        [4 rows x 47 columns]
+        [4 rows x 52 columns]
 
         See Also
         --------
@@ -1437,6 +1457,12 @@ class SubNetwork(NetworkGraphMixin, SubNetworkPowerFlowMixin):
         """
         self._n = ref(n)
         self.name = name
+
+    def __getstate__(self) -> dict:
+        """Drop the unpicklable parent weakref, relinked in Network.__setstate__."""
+        state = self.__dict__.copy()
+        state.pop("_n", None)
+        return state
 
     # TODO assign __str__ and __repr__
     @property
