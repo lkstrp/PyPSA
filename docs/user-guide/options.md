@@ -128,8 +128,8 @@ optimize.include_objective_constant:
 optimize.scaling:
     Default: False
     Description: Default for `scaling` in `n.optimize`. False: off. True: auto-tuned
-        pow2 model scaling. Dict pins `energy`/`cost` factors or `rows=False`;
-        unspecified parts are tuned.
+        pow2 model scaling. Dict pins `energy`/`cost` factors or `rows=False` and
+        tunes the rest.
 consistency.numerical_tolerance:
     Default: 1e-09
     Description: Tolerance for numerical comparisons in consistency checks (e.g. p_min_pu > p_max_pu).

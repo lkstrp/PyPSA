@@ -481,8 +481,8 @@ options._add_option(
     "params.optimize.scaling",
     False,
     "Default for `scaling` in `n.optimize`. False: off. True: auto-tuned pow2 "
-    "model scaling. Dict pins `energy`/`cost` factors or `rows=False`; "
-    "unspecified parts are tuned.",
+    "model scaling. Dict pins `energy`/`cost` factors or `rows=False` and "
+    "tunes the rest.",
 )
 
 options._add_option(

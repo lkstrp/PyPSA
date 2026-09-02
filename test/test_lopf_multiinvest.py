@@ -456,7 +456,6 @@ def test_global_constraint_primary_energy_store(n_sts):
     assert round(soc_diff @ emissions, 0) == 3000
 
 
-@pytest.mark.no_scaling  # asserts on the raw model RHS
 def test_global_constraint_primary_energy_storage_stochastic(n_sus):
     """
     Test global constraints with primary energy for storage in stochastic networks.

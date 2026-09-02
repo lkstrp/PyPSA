@@ -16,18 +16,19 @@ import pandas as pd
 import scipy.sparse as sp
 import xarray as xr
 from linopy import QuadraticExpression
+from linopy.constraints import CSRConstraint
 from scipy.optimize import Bounds, LinearConstraint, milp
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from linopy import Constraint, Model
+    from linopy import Constraint, Model, Variable
 
 logger = logging.getLogger(__name__)
 
 ColumnClass = Literal["energy", "cost", "none"]
 
-# log2 range every scaled quantity is pulled into, per category
+# magnitude window every scaled quantity is pulled into, per category
 WINDOW: dict[str, tuple[float, float]] = {
     "matrix": (1e-3, 1e6),
     "cost": (1e-2, 1e6),
@@ -45,9 +46,11 @@ _DIMENSIONLESS_SUFFIXES = (
     "-shut_down",
     "-maintenance",
     "-maintenance_start",
+    "-maintenance_status",
     "-n_mod",
 )
 _COST_COLUMNS = {"CVaR-a", "CVaR-theta", "CVaR", "objective_constant"}
+_COST_SUFFIXES = ("-marginal_cost_piecewise", "-capital_cost_piecewise")
 
 
 class ScalingSpec(NamedTuple):
@@ -90,7 +93,7 @@ def resolve_scaling(scaling: bool | dict | None) -> ScalingSpec | None:
         if v is None:
             pins[k] = None
             continue
-        if isinstance(v, bool) or not isinstance(v, (int, float)):
+        if isinstance(v, bool) or not isinstance(v, (int, float, np.number)):
             msg = f"scaling factor {k!r} must be numeric, got {v!r}"
             raise TypeError(msg)
         if v <= 0:
@@ -112,7 +115,7 @@ def classify_columns(m: Model) -> dict[str, ColumnClass]:
             or name == "Transformer-phase_shift"
         ):
             classes[name] = "none"
-        elif name in _COST_COLUMNS:
+        elif name in _COST_COLUMNS or name.endswith(_COST_SUFFIXES):
             classes[name] = "cost"
         else:
             classes[name] = "energy"
@@ -161,8 +164,17 @@ def _group_ranges(m: Model, classes: dict[str, ColumnClass] | None) -> pd.DataFr
                 lo, hi = float(np.nanmin(part.values)), float(np.nanmax(part.values))
                 if np.isfinite(lo):
                     rows[(name, cls)] = {"coeff_min": lo, "coeff_max": hi}
+    return _frame(rows, ["name", "cls"], ["coeff_min", "coeff_max"])
+
+
+def _frame(rows: dict, names: list[str], columns: list[str]) -> pd.DataFrame:
+    """DataFrame from `{index tuple: row}` that keeps its MultiIndex when empty."""
+    if not rows:
+        return pd.DataFrame(
+            columns=columns, index=pd.MultiIndex.from_arrays([[], []], names=names)
+        )
     df = pd.DataFrame.from_dict(rows, orient="index")
-    df.index = pd.MultiIndex.from_tuples(df.index, names=["name", "cls"])
+    df.index = pd.MultiIndex.from_tuples(df.index, names=names)
     return df
 
 
@@ -173,7 +185,8 @@ def _quantities(m: Model) -> tuple[np.ndarray, np.ndarray, list[str]]:
     scaled quantity is `log2 v + A @ g`.
     """
     classes = classify_columns(m)
-    report = scaling_report(m)
+    report = _report(m, None)
+    kinds = report.index.get_level_values("kind")
     names = list(m.constraints)
     kidx = {name: 2 + k for k, name in enumerate(names)}
     ncol = 2 + len(names)
@@ -196,20 +209,22 @@ def _quantities(m: Model) -> tuple[np.ndarray, np.ndarray, list[str]]:
         a[kidx[name]] = 1
         add(r["coeff_min"], a, "matrix")
         add(r["coeff_max"], a, "matrix")
-    con_rep = report.xs("constraint")
+    con_rep = report.xs("constraint") if "constraint" in kinds else pd.DataFrame()
     for name, r in con_rep.iterrows():
         if np.isfinite(r["rhs_min"]):
             a = np.zeros(ncol)
             a[kidx[name]] = 1
             add(r["rhs_min"], a, "rhs")
             add(r["rhs_max"], a, "rhs")
-    for name, r in report.xs("variable").iterrows():
-        if np.isfinite(r["bound_min"]):
+    var_rep = report.xs("variable") if "variable" in kinds else pd.DataFrame()
+    for name, r in var_rep.iterrows():
+        # fixed variables are presolved away, their bound must not steer the ILP
+        if np.isfinite(r["bound_min"]) and not _is_fixed(m.variables[name]):
             a = np.zeros(ncol)
             a[:2] = -np.array(col_vec[classes[name]])
             add(r["bound_min"], a, "bound")
             add(r["bound_max"], a, "bound")
-    if "objective" in report.index.get_level_values("kind"):
+    if "objective" in kinds:
         for name, r in report.xs("objective").iterrows():
             a = np.zeros(ncol)
             a[:2] = col_vec[classes[name]]
@@ -217,6 +232,13 @@ def _quantities(m: Model) -> tuple[np.ndarray, np.ndarray, list[str]]:
             add(r["coeff_min"], a, "cost")
             add(r["coeff_max"], a, "cost")
     return np.array(logv), np.array(arows).reshape(len(logv), ncol), cats
+
+
+def _is_fixed(var: Variable) -> bool:
+    """Tell whether every live entry has lower == upper."""
+    ds = var.data
+    live = ds["labels"] != -1
+    return bool((ds["lower"] == ds["upper"]).where(live, True).all())
 
 
 def choose_exponents(m: Model, spec: ScalingSpec) -> ScalingExponents:
@@ -228,8 +250,12 @@ def choose_exponents(m: Model, spec: ScalingSpec) -> ScalingExponents:
     """
     names = list(m.constraints)
     zero = ScalingExponents(0, 0, dict.fromkeys(names, 0))
-    if m.matrices.indicator_A is not None:
+    if any(c.is_indicator for _, c in m.constraints.items()):
         logger.warning("scaling skipped: model has indicator constraints")
+        return zero
+    if any(isinstance(c, CSRConstraint) for _, c in m.constraints.items()):
+        # frozen constraints rebuild .data on every access, in-place writes are lost
+        logger.warning("scaling skipped: model has frozen constraints")
         return zero
     if isinstance(m.objective.expression, QuadraticExpression):
         logger.warning("scaling skipped: model has a quadratic objective")
@@ -369,8 +395,8 @@ def _apply_scaling(
             put(ds, "solution", ds["solution"] * cfac)
     obj = m.objective.expression.data
     put(obj, "coeffs", obj["coeffs"] * fac(obj["vars"], cexp) * ofac)
-    if sign == -1 and m.objective.value is not None:
-        m.objective.set_value(m.objective.value * 2.0**oexp)
+    if m.objective.value is not None:
+        m.objective.set_value(m.objective.value * ofac)
 
 
 @contextmanager
@@ -441,15 +467,21 @@ def scaling_report(m: Model) -> pd.DataFrame:
     for the objective coefficients. Filler terms and masked rows are
     excluded, linopy's `coefficientrange` is signed and filler-polluted.
     """
+    return _report(m, _group_ranges(m, None))
+
+
+def _report(m: Model, coeffs: pd.DataFrame | None) -> pd.DataFrame:
+    """Rhs, bound and objective ranges, joined with `coeffs` from `_group_ranges`."""
     rows: dict[tuple[str, str], dict[str, float]] = {}
-    coeffs = _group_ranges(m, None)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN groups
         for name, con in m.constraints.items():
             live = con.data["labels"] != -1
             absr = abs(con.data["rhs"])
             absr = absr.where(live & np.isfinite(absr) & (absr != 0))
-            cr = coeffs.loc[(name, "all")] if (name, "all") in coeffs.index else None
+            cr = None
+            if coeffs is not None and (name, "all") in coeffs.index:
+                cr = coeffs.loc[(name, "all")]
             empty = absr.size == 0
             rows[("constraint", name)] = {
                 "coeff_min": float(cr["coeff_min"]) if cr is not None else np.nan,
@@ -484,6 +516,5 @@ def scaling_report(m: Model) -> pd.DataFrame:
                     "coeff_min": float(absc[sel].min()),
                     "coeff_max": float(absc[sel].max()),
                 }
-    df = pd.DataFrame.from_dict(rows, orient="index")
-    df.index = pd.MultiIndex.from_tuples(df.index, names=["kind", "name"])
-    return df
+    cols = ["coeff_min", "coeff_max", "rhs_min", "rhs_max", "bound_min", "bound_max"]
+    return _frame(rows, ["kind", "name"], cols)

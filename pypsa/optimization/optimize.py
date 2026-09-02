@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import warnings
+from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -660,6 +661,16 @@ class OptimizationAccessor(OptimizationAbstractMixin):
         n = self._n
         n._multi_invest = int(multi_investment_periods)
         n._linearized_uc = linearized_unit_commitment
+        # resolve here so a FutureWarning points at the caller, not the decorator
+        scaling_active = (
+            resolve_scaling(
+                scaling if scaling is not None else options.params.optimize.scaling
+            )
+            is not None
+        )
+        include_objective_constant = _resolve_include_objective_constant(
+            include_objective_constant, scaling_active=scaling_active
+        )
 
         n.consistency_check(
             strict=["unknown_buses", "maintenance", "phase_shift_bounds"]
@@ -1013,7 +1024,7 @@ class OptimizationAccessor(OptimizationAbstractMixin):
 
         n = self._n
         m = n.model
-        sns = m.parameters.snapshots.to_index()
+        sns = self._window.model_index
         if extra_functionality:
             extra_functionality(n, sns)
         if log_to_console is not None:
@@ -1021,21 +1032,22 @@ class OptimizationAccessor(OptimizationAbstractMixin):
 
         spec = n._scaling_spec
         n._scaling_factors = None
+        ctx: AbstractContextManager = nullcontext()
         if spec is not None:
-            # drop zeros now so the sanitizer never sees scaled coefficients
+            # sanitize now, the solver-side pass must not see scaled data or
+            # relabel rows between apply and restore
             m.constraints.sanitize_zeros()
+            m.constraints.sanitize_infinities()
             kwargs["sanitize_zeros"] = False
+            kwargs["sanitize_infinities"] = False
             exps = choose_exponents(m, spec)
             n._scaling_factors = {
                 "energy": 2.0**exps.energy,
                 "cost": 2.0**exps.cost,
                 "rows": {k: 2.0**v for k, v in exps.rows.items()},
             }
-            with scaled(m, exps):
-                status, condition = m.solve(
-                    solver_name=solver_name, **solver_options, **kwargs
-                )
-        else:
+            ctx = scaled(m, exps)
+        with ctx:
             status, condition = m.solve(
                 solver_name=solver_name, **solver_options, **kwargs
             )

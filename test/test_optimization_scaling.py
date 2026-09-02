@@ -525,6 +525,53 @@ def test_scaling_quadratic_objective_skipped(caplog):
     assert set(factors["rows"].values()) == {1.0}
 
 
+def test_scaling_frozen_constraints_skipped(ac_dc_network, caplog):
+    """Frozen (CSR) constraints cannot be scaled in place, so scaling steps aside."""
+    n = ac_dc_network
+    ref = n.copy()
+    ref.optimize(scaling=False)
+    with caplog.at_level("WARNING", logger="pypsa.optimization.scaling"):
+        n.optimize(scaling=True, model_kwargs={"freeze_constraints": True})
+    assert "frozen constraints" in caplog.text
+    assert n.optimize.scaling_factors["energy"] == 1.0
+    np.testing.assert_allclose(n.objective, ref.objective, rtol=1e-6)
+
+
+def test_scaling_restores_infinite_rhs_rows():
+    """Rows the solver-side sanitizer would relabel still restore bit-exactly."""
+    import pypsa
+
+    def build():
+        n = pypsa.Network()
+        n.set_snapshots(range(2))
+        n.add("Bus", "b")
+        n.add("Load", "l", bus="b", p_set=[100, 150])
+        n.add("Generator", "g", bus="b", p_nom=np.inf, marginal_cost=10)
+        return n
+
+    ref = build()
+    ref.optimize.create_model()
+    ref.model.constraints.sanitize_zeros()
+    ref.model.constraints.sanitize_infinities()
+    n = build()
+    n.optimize(scaling={"energy": 8, "cost": 16})
+    for k, c in n.model.constraints.items():
+        assert c.data["coeffs"].equals(ref.model.constraints[k].data["coeffs"])
+
+
+def test_scaling_keeps_stale_objective_value(ac_dc_network):
+    """A failing re-solve must leave the previous objective value untouched."""
+    n = ac_dc_network
+    n.optimize(scaling={"energy": 8, "cost": 16})
+    value = n.model.objective.value
+    with (
+        patch("linopy.Model.solve", side_effect=RuntimeError("boom")),
+        pytest.raises(RuntimeError),
+    ):
+        n.optimize.solve_model()
+    assert n.model.objective.value == value
+
+
 def _exps_for(m, energy=9, cost=17):
     from pypsa.optimization.scaling import ScalingExponents
 
@@ -706,6 +753,7 @@ def test_resolve_scaling():
     assert resolve_scaling({"energy": 1000}) == ScalingSpec(10, None, True)
     assert resolve_scaling({"rows": False}) == ScalingSpec(None, None, False)
     assert resolve_scaling({"cost": 65536.0}).cost == 16
+    assert resolve_scaling({"energy": np.int64(1024)}).energy == 10
     for bad in ("big", {"energy": "x"}, {"rows": 1}):
         with pytest.raises(TypeError):
             resolve_scaling(bad)
