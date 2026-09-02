@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import warnings
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -63,7 +63,7 @@ from pypsa.optimization.global_constraints import (
     define_transmission_volume_expansion_limit,
 )
 from pypsa.optimization.piecewise import PiecewiseOptions, define_piecewise
-from pypsa.optimization.scaling import Scaler, equilibrated, scaling_report
+from pypsa.optimization.scaling import Scaler, scaling_report
 from pypsa.optimization.variables import (
     define_cvar_variables,
     define_loss_variables,
@@ -1005,24 +1005,16 @@ class OptimizationAccessor(OptimizationAbstractMixin):
         factors = n._scaler
         m = n.model
         sns = m.parameters.snapshots.to_index()
-        equilibrate = factors is not None and (factors.rows or factors.columns)
         with factors.applied(n) if factors else nullcontext():
             if extra_functionality:
                 extra_functionality(n, sns)
             if log_to_console is not None:
                 kwargs["log_to_console"] = log_to_console
-            eq_ctx: AbstractContextManager = nullcontext()
-            if factors is not None and equilibrate:
-                # run the zero-drop now, it must not see equilibrated coeffs
-                m.constraints.sanitize_zeros()
-                kwargs["sanitize_zeros"] = False
-                eq_ctx = equilibrated(m, rows=factors.rows, columns=factors.columns)
-            with eq_ctx:
-                status, condition = m.solve(
-                    solver_name=solver_name,
-                    **solver_options,
-                    **kwargs,
-                )
+            status, condition = m.solve(
+                solver_name=solver_name,
+                **solver_options,
+                **kwargs,
+            )
 
             if status == "ok":
                 n.optimize.assign_solution(factors)

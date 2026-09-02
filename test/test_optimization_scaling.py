@@ -476,53 +476,94 @@ def test_scaling_overnight_cost():
     )
 
 
-@pytest.mark.parametrize(
-    "extra",
-    [{"rows": True, "columns": True}, {"energy": 1, "cost": 1, "rows": True}],
-    ids=["with-units", "equilibration-only"],
-)
-def test_scaling_equilibration(extra):
-    """Pow2 Ruiz equilibration must leave results and duals unchanged."""
-    ref = _solve(_build_transformer_network(True), scaling=False)
-    got = _solve(_build_transformer_network(True), scaling={"energy": 1024.0, **extra})
+def _exps_for(m, energy=9, cost=17):
+    from pypsa.optimization.scaling import ScalingExponents
 
-    np.testing.assert_allclose(got.objective, ref.objective, rtol=1e-6)
-    np.testing.assert_allclose(
-        got.c.lines.dynamic["p0"].values,
-        ref.c.lines.dynamic["p0"].values,
-        rtol=1e-5,
-        atol=1e-6,
-    )
-    np.testing.assert_allclose(
-        got.c.transformers.dynamic["phase_shift_opt"].values,
-        ref.c.transformers.dynamic["phase_shift_opt"].values,
-        rtol=1e-5,
-        atol=1e-6,
-    )
-    np.testing.assert_allclose(
-        got.c.buses.dynamic.marginal_price.values,
-        ref.c.buses.dynamic.marginal_price.values,
-        rtol=1e-5,
-        atol=1e-6,
+    return ScalingExponents(
+        energy, cost, {name: (i % 5) - 2 for i, name in enumerate(m.constraints)}
     )
 
 
-def test_equilibrated_restores_model():
-    """The equilibration context must scale in place and restore bit-exactly."""
-    from pypsa.optimization.scaling import equilibrated
+def _model_snapshot(m):
+    return {
+        "coeffs": {k: c.data["coeffs"].copy() for k, c in m.constraints.items()},
+        "rhs": {k: c.data["rhs"].copy() for k, c in m.constraints.items()},
+        "lower": {k: v.data["lower"].copy() for k, v in m.variables.items()},
+        "upper": {k: v.data["upper"].copy() for k, v in m.variables.items()},
+        "objective": m.objective.expression.data["coeffs"].copy(),
+    }
 
-    n = _build_transformer_network(True)
-    n.optimize.create_model()
+
+def _assert_snapshot_equal(m, snap):
+    for k, c in m.constraints.items():
+        assert c.data["coeffs"].equals(snap["coeffs"][k])
+        assert c.data["rhs"].equals(snap["rhs"][k])
+    for k, v in m.variables.items():
+        assert v.data["lower"].equals(snap["lower"][k])
+        assert v.data["upper"].equals(snap["upper"][k])
+    assert m.objective.expression.data["coeffs"].equals(snap["objective"])
+
+
+def test_scaled_context_applier_restores_bit_exact(ac_dc_network):
+    from pypsa.optimization.scaling import scaled
+
+    n = ac_dc_network
+    n.optimize.create_model(include_objective_constant=False)
     m = n.model
-    before = {name: con.data["coeffs"].copy() for name, con in m.constraints.items()}
-    with equilibrated(m):
-        changed = any(
-            not con.data["coeffs"].equals(before[name])
-            for name, con in m.constraints.items()
+    snap = _model_snapshot(m)
+    with scaled(m, _exps_for(m)):
+        assert not m.objective.expression.data["coeffs"].equals(snap["objective"])
+        assert any(
+            not c.data["coeffs"].equals(snap["coeffs"][k])
+            for k, c in m.constraints.items()
         )
-        assert changed
+    _assert_snapshot_equal(m, snap)
+
+
+def test_scaled_context_solve_matches_plain(ac_dc_network):
+    from pypsa.optimization.scaling import scaled
+
+    n = ac_dc_network
+    # a zero p_nom_opt makes the bound duals degenerate, floor it
+    n.generators["p_nom_min"] = 10.0
+    ref = n.copy()
+    ref.optimize.create_model(include_objective_constant=False)
+    ref.model.solve()
+
+    n.optimize.create_model(include_objective_constant=False)
+    m = n.model
+    m.constraints.sanitize_zeros()
+    with scaled(m, _exps_for(m)):
+        m.solve(sanitize_zeros=False)
+
+    np.testing.assert_allclose(m.objective.value, ref.model.objective.value, rtol=1e-6)
+    for name, var in m.variables.items():
+        np.testing.assert_allclose(
+            var.solution.values,
+            ref.model.variables[name].solution.values,
+            rtol=1e-6,
+            atol=1e-6,
+        )
     for name, con in m.constraints.items():
-        assert con.data["coeffs"].equals(before[name])
+        np.testing.assert_allclose(
+            con.dual.values,
+            ref.model.constraints[name].dual.values,
+            rtol=1e-6,
+            atol=1e-6,
+        )
+
+
+def test_scaled_context_zero_exponents_untouched(ac_dc_network):
+    from pypsa.optimization.scaling import ScalingExponents, scaled
+
+    n = ac_dc_network
+    n.optimize.create_model(include_objective_constant=False)
+    m = n.model
+    before = {k: c.data["coeffs"].values for k, c in m.constraints.items()}
+    with scaled(m, ScalingExponents(0, 0, dict.fromkeys(m.constraints, 0))):
+        pass
+    for k, c in m.constraints.items():
+        assert np.shares_memory(c.data["coeffs"].values, before[k])
 
 
 def test_scaling_resolver_errors(ac_dc_network):

@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from linopy import Constraint, Model
-    from linopy.matrices import MatrixAccessor
 
     from pypsa import Network
 
@@ -493,105 +492,81 @@ class Scaler(NamedTuple):
                 n.global_constraints["constant"] = constant
 
 
-def _ruiz_pow2_exponents(
-    mat: MatrixAccessor, rows: bool, columns: bool, max_iter: int = 10
-) -> tuple[np.ndarray, np.ndarray]:
-    """Pow2 Ruiz equilibration exponents per constraint/variable label.
-
-    Returns (rexp, cexp) arrays indexed by label, one slot longer than the
-    largest label so filler entries (label -1) map to exponent 0.
-    """
-    A = mat.A
-    rexp = np.zeros((mat.clabels.max() + 2) if len(mat.clabels) else 1, dtype=np.int64)
-    cexp = np.zeros((mat.vlabels.max() + 2) if len(mat.vlabels) else 1, dtype=np.int64)
-    if A is None:
-        return rexp, cexp
-
-    W = abs(A.tocsr(copy=True))
-    nr, nc = W.shape
-    row_of_nnz = np.repeat(np.arange(nr), np.diff(W.indptr))
-    er = np.zeros(nr, dtype=np.int64)
-    ec = np.zeros(nc, dtype=np.int64)
-    # only continuous columns are scaled, integral domains stay intact
-    col_ok = mat.vtypes == "C" if columns else np.zeros(nc, dtype=bool)
-
-    for _ in range(max_iter):
-        step_r = np.zeros(nr, dtype=np.int64)
-        step_c = np.zeros(nc, dtype=np.int64)
-        if rows:
-            rmax = W.max(axis=1).toarray().ravel()
-            nz = rmax > 0
-            step_r[nz] = -np.round(np.log2(rmax[nz]) / 2).astype(np.int64)
-        if col_ok.any():
-            cmax = W.max(axis=0).toarray().ravel()
-            nz = col_ok & (cmax > 0)
-            step_c[nz] = -np.round(np.log2(cmax[nz]) / 2).astype(np.int64)
-        if not step_r.any() and not step_c.any():
-            break
-        W.data *= np.exp2(step_r[row_of_nnz] + step_c[W.indices])
-        er += step_r
-        ec += step_c
-
-    rexp[mat.clabels] = er
-    cexp[mat.vlabels] = ec
-    return rexp, cexp
-
-
-def _apply_equilibration(
-    m: Model, rexp: np.ndarray, cexp: np.ndarray, sign: int
+def _apply_scaling(
+    m: Model, rexp: np.ndarray, cexp: np.ndarray, oexp: int, sign: int
 ) -> None:
-    """Scale the model by 2^(sign*exponents); sign=-1 restores bit-exactly."""
+    """Scale the model by 2^(sign*exponents); sign=-1 restores bit-exactly.
+
+    Convention: `x_j = 2**cexp_j * x'_j`, row i is multiplied by `2**rexp_i`,
+    the objective by `2**-oexp`. On restore the solution maps back with
+    `2**cexp`, duals with `2**(rexp + oexp)` and the objective value with
+    `2**oexp`.
+    """
+    ofac = 2.0 ** (-sign * oexp)
 
     def fac(template: xr.DataArray, exp: np.ndarray) -> xr.DataArray:
         return template.copy(data=np.exp2(sign * exp[template.values]))
 
-    for con in m.constraints.values():
+    for _, con in m.constraints.items():  # noqa: PERF102
         ds = con.data
         rfac = fac(ds["labels"], rexp)
         ds["coeffs"] = ds["coeffs"] * rfac * fac(ds["vars"], cexp)
         ds["rhs"] = ds["rhs"] * rfac
         if "dual" in ds:
-            ds["dual"] = ds["dual"] * fac(ds["labels"], -rexp)
-    for var in m.variables.values():
+            ds["dual"] = ds["dual"] * fac(ds["labels"], -rexp) * ofac
+    for _, var in m.variables.items():  # noqa: PERF102
         ds = var.data
         cfac = fac(ds["labels"], -cexp)
         ds["lower"] = ds["lower"] * cfac
         ds["upper"] = ds["upper"] * cfac
         if "solution" in ds:
-            # x = C x': the solution maps back with the same factor as bounds
             ds["solution"] = ds["solution"] * cfac
     obj = m.objective.expression.data
-    obj["coeffs"] = obj["coeffs"] * fac(obj["vars"], cexp)
+    obj["coeffs"] = obj["coeffs"] * fac(obj["vars"], cexp) * ofac
+    if sign == -1 and m.objective.value is not None:
+        m.objective.set_value(m.objective.value * 2.0**oexp)
 
 
 @contextmanager
-def equilibrated(m: Model, rows: bool = True, columns: bool = True) -> Iterator[None]:
-    """Pow2 Ruiz-equilibrate the built linopy model in place around a solve.
+def scaled(m: Model, exps: ScalingExponents) -> Iterator[None]:
+    """Scale the built model in place around a solve, restoring on exit.
 
-    Coefficients, rhs, bounds and objective are scaled by per-row/per-column
-    powers of two (bit-exact, integral variables untouched) and restored on
-    exit; solution and dual values are mapped back to original units. Call
+    Energy columns get `2**exps.energy`, cost columns `2**exps.cost`, each
+    constraint group its row exponent and the objective `2**-exps.cost`.
+    Solution, duals and objective value come back in original units. Call
     `m.constraints.sanitize_zeros()` before and solve with
     `sanitize_zeros=False` so the zero-drop never sees scaled coefficients.
     """
-    mat = m.matrices
-    if mat.indicator_A is not None:
-        logger.warning("equilibration skipped: model has indicator constraints")
+    if exps.energy == 0 and exps.cost == 0 and not any(exps.rows.values()):
+        logger.info("scaling: nothing to scale")
         yield
         return
-    rexp, cexp = _ruiz_pow2_exponents(mat, rows, columns)
-    _apply_equilibration(m, rexp, cexp, +1)
+    classes = classify_columns(m)
+    col_exp = {"energy": exps.energy, "cost": exps.cost, "none": 0}
+    nvar = max((int(v.labels.max()) for _, v in m.variables.items()), default=-1) + 2
+    ncon = max((int(c.labels.max()) for _, c in m.constraints.items()), default=-1) + 2
+    cexp = np.zeros(nvar, dtype=np.int64)
+    rexp = np.zeros(ncon, dtype=np.int64)
+    for name, var in m.variables.items():
+        labels = var.labels.values.ravel()
+        cexp[labels[labels != -1]] = col_exp[classes[name]]
+    for name, con in m.constraints.items():
+        labels = con.labels.values.ravel()
+        rexp[labels[labels != -1]] = exps.rows.get(name, 0)
+    rvals = list(exps.rows.values())
+    _apply_scaling(m, rexp, cexp, exps.cost, +1)
     logger.info(
-        "equilibrated model: row exponents [%d, %d], column exponents [%d, %d]",
-        rexp.min(),
-        rexp.max(),
-        cexp.min(),
-        cexp.max(),
+        "scaling: energy 2^%d, cost 2^%d, row exponents [%d, %d] over %d groups",
+        exps.energy,
+        exps.cost,
+        min(rvals, default=0),
+        max(rvals, default=0),
+        len(rvals),
     )
     try:
         yield
     finally:
-        _apply_equilibration(m, rexp, cexp, -1)
+        _apply_scaling(m, rexp, cexp, exps.cost, -1)
 
 
 def _valid_abs_coeffs(con: Constraint) -> xr.DataArray:
