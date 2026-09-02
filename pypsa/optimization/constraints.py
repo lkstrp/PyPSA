@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from xarray import DataArray  # noqa: TC004
 
     from pypsa import Network
+    from pypsa.components import Components
 
     ArgItem = list[str | int | float | DataArray]
 
@@ -1635,7 +1636,26 @@ def define_kirchhoff_voltage_constraints(n: Network, sns: pd.Index) -> None:
         https://doi.org/10.1016/j.epsr.2020.106908
 
     """
+    scale = n._scaling["energy"]
+    if scale == 1:
+        _define_kvl_constraints(n, sns)
+        return
+    # pu derivation (here and in cycle_matrix) needs true s_nom values,
+    # which Scaler.applied has scaled
+    holders: list[Components] = [n.c.transformers, n.c.transformer_types]
+    backups = [c.static["s_nom"].copy() for c in holders]
+    for c in holders:
+        c.static["s_nom"] *= scale
+    try:
+        _define_kvl_constraints(n, sns)
+    finally:
+        for c, backup in zip(holders, backups, strict=True):
+            c.static["s_nom"] = backup
+
+
+def _define_kvl_constraints(n: Network, sns: pd.Index) -> None:
     m = n.model
+    scale = n._scaling["energy"]
     n.calculate_dependent_values()
 
     window = n.optimize._window.subset(sns)
@@ -1670,7 +1690,8 @@ def define_kirchhoff_voltage_constraints(n: Network, sns: pd.Index) -> None:
             for names, angle in contributions:
                 C = DataArray(C_trafos.loc[names])
                 sel = angle.sel(name=names, snapshot=snapshots)
-                lhs_period = lhs_period + (sel @ C) * deg_to_rad * 1e5
+                # divide by scale so the angle term matches the scaled flows
+                lhs_period = lhs_period + (sel @ C) * (deg_to_rad * 1e5 / scale)
 
         lhs_parts.append(lhs_period)
 

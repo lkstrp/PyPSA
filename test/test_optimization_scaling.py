@@ -57,7 +57,13 @@ def test_scaling_equivalence(request, network, scaling):
         a = got.components[c].dynamic.get(attr)
         b = ref.components[c].dynamic.get(attr)
         if a is not None and a.shape[1]:
-            np.testing.assert_allclose(a.values, b.values, rtol=1e-5, atol=1e-6)
+            if c == "StorageUnit":
+                # individual dispatch is degenerate across identical units
+                np.testing.assert_allclose(
+                    a.values.sum(axis=1), b.values.sum(axis=1), rtol=1e-5, atol=1e-4
+                )
+            else:
+                np.testing.assert_allclose(a.values, b.values, rtol=1e-5, atol=1e-6)
 
     np.testing.assert_allclose(
         got.c.buses.dynamic.marginal_price.values,
@@ -377,12 +383,156 @@ def test_scaling_two_step_fixed_nominal():
     assert two.c.generators.static.at["fixed", "p_nom_opt"] == 200
 
 
+def _build_transformer_network(variable=False):
+    import pypsa
+
+    n = pypsa.Network()
+    n.set_snapshots([0, 1])
+    n.add("Carrier", "AC")
+    n.add("Bus", "A", v_nom=1.0, carrier="AC")
+    n.add("Bus", "B", v_nom=1.0, carrier="AC")
+    n.add("Generator", "gen_A", bus="A", p_nom=100, marginal_cost=10.0, carrier="AC")
+    n.add("Load", "load_B", bus="B", p_set=[50.0, 50.0])
+    n.add("Line", "L1", bus0="A", bus1="B", x=0.01, r=1e-6, s_nom=100, carrier="AC")
+    bounds = {"phase_shift_min": -20.0, "phase_shift_max": 20.0} if variable else {}
+    n.add(
+        "Transformer",
+        "T1",
+        bus0="A",
+        bus1="B",
+        x=1.0,  # x_pu = x / s_nom = 0.01
+        r=1e-6,
+        s_nom=100,
+        phase_shift=10.0,
+        **bounds,
+    )
+    return n
+
+
+@pytest.mark.parametrize("variable", [False, True], ids=["fixed", "variable"])
+def test_scaling_transformer_phase_shift(variable):
+    """Transformer KVL terms and phase_shift readback must survive scaling.
+
+    x_pu is derived from s_nom inside the scaled context and the phase-shift
+    angle term is a raw constant, so both need explicit scaling handling."""
+    ref = _solve(_build_transformer_network(variable), scaling=False)
+    got = _solve(_build_transformer_network(variable), scaling=True)
+
+    np.testing.assert_allclose(got.objective, ref.objective, rtol=1e-6)
+    for c in ("lines", "transformers"):
+        np.testing.assert_allclose(
+            got.c[c].dynamic["p0"].values,
+            ref.c[c].dynamic["p0"].values,
+            rtol=1e-5,
+            atol=1e-6,
+        )
+    if variable:
+        np.testing.assert_allclose(
+            got.c.transformers.dynamic["phase_shift_opt"].values,
+            ref.c.transformers.dynamic["phase_shift_opt"].values,
+            rtol=1e-5,
+            atol=1e-6,
+        )
+    # Persisted per-unit impedances must be the true values, not scaled ones.
+    np.testing.assert_allclose(
+        got.c.transformers.static["x_pu"].values,
+        ref.c.transformers.static["x_pu"].values,
+        rtol=1e-12,
+    )
+
+
+def test_scaling_overnight_cost():
+    """overnight_cost and fom_cost enter the objective and must scale like
+    capital_cost."""
+    import pypsa
+
+    def build():
+        n = pypsa.Network()
+        n.set_snapshots(range(3))
+        n.add("Bus", "b")
+        n.add("Load", "l", bus="b", p_set=[100, 150, 120])
+        n.add("Generator", "fixed", bus="b", p_nom=100, marginal_cost=30)
+        n.add(
+            "Generator",
+            "ext",
+            bus="b",
+            p_nom_extendable=True,
+            overnight_cost=1e6,
+            discount_rate=0.07,
+            lifetime=25,
+            fom_cost=2e4,
+            marginal_cost=10,
+        )
+        return n
+
+    ref = _solve(build(), scaling=False)
+    got = _solve(build(), scaling=True)
+    np.testing.assert_allclose(got.objective, ref.objective, rtol=1e-6)
+    np.testing.assert_allclose(
+        got.c.generators.static["p_nom_opt"].values,
+        ref.c.generators.static["p_nom_opt"].values,
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{"rows": True, "columns": True}, {"energy": 1, "cost": 1, "rows": True}],
+    ids=["with-units", "equilibration-only"],
+)
+def test_scaling_equilibration(extra):
+    """Pow2 Ruiz equilibration must leave results and duals unchanged."""
+    ref = _solve(_build_transformer_network(True), scaling=False)
+    got = _solve(_build_transformer_network(True), scaling={"energy": 1024.0, **extra})
+
+    np.testing.assert_allclose(got.objective, ref.objective, rtol=1e-6)
+    np.testing.assert_allclose(
+        got.c.lines.dynamic["p0"].values,
+        ref.c.lines.dynamic["p0"].values,
+        rtol=1e-5,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        got.c.transformers.dynamic["phase_shift_opt"].values,
+        ref.c.transformers.dynamic["phase_shift_opt"].values,
+        rtol=1e-5,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        got.c.buses.dynamic.marginal_price.values,
+        ref.c.buses.dynamic.marginal_price.values,
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
+def test_equilibrated_restores_model():
+    """The equilibration context must scale in place and restore bit-exactly."""
+    from pypsa.optimization.scaling import equilibrated
+
+    n = _build_transformer_network(True)
+    n.optimize.create_model()
+    m = n.model
+    before = {name: con.data["coeffs"].copy() for name, con in m.constraints.items()}
+    with equilibrated(m):
+        changed = any(
+            not con.data["coeffs"].equals(before[name])
+            for name, con in m.constraints.items()
+        )
+        assert changed
+    for name, con in m.constraints.items():
+        assert con.data["coeffs"].equals(before[name])
+
+
 def test_scaling_resolver_errors(ac_dc_network):
     n = ac_dc_network
     with pytest.raises(TypeError):  # not a bool/dict
         n.optimize(scaling="big")
     with pytest.raises(TypeError):  # non-numeric value
         n.optimize(scaling={"energy": "big"})
+    with pytest.raises(TypeError):  # non-bool equilibration flag
+        n.optimize(scaling={"rows": 1024})
     for bad in ({"power": 100}, {"money": 1e6}, {"enrgy": 100}):  # old/typo keys
         with pytest.raises(ValueError):
             n.optimize(scaling=bad)
@@ -416,7 +566,7 @@ def test_scaling_report(ac_dc_network):
     rep = n.optimize.scaling_report()
     cols = {"coeff_min", "coeff_max", "rhs_min", "rhs_max", "bound_min", "bound_max"}
     assert cols <= set(rep.columns)
-    assert ("objective", "") in rep.index
+    assert "objective" in rep.index.get_level_values("kind")
     con = rep.xs("constraint").dropna(subset=["coeff_min"])
     assert (con["coeff_min"] > 0).all()
     assert (con["coeff_max"] >= con["coeff_min"]).all()
