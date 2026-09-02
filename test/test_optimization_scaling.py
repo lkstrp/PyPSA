@@ -570,3 +570,134 @@ def test_scaling_report(ac_dc_network):
     con = rep.xs("constraint").dropna(subset=["coeff_min"])
     assert (con["coeff_min"] > 0).all()
     assert (con["coeff_max"] >= con["coeff_min"]).all()
+
+
+# --- resolver, column classifier, exponent chooser ----------------------------
+
+
+def test_resolve_scaling():
+    from pypsa.optimization.scaling import ScalingSpec, resolve_scaling
+
+    assert resolve_scaling(False) is None
+    assert resolve_scaling(None) is None
+    assert resolve_scaling(True) == ScalingSpec(None, None, True)
+    assert resolve_scaling({"energy": 1000}) == ScalingSpec(10, None, True)
+    assert resolve_scaling({"rows": False}) == ScalingSpec(None, None, False)
+    assert resolve_scaling({"cost": 65536.0}).cost == 16
+    for bad in ("big", {"energy": "x"}, {"rows": 1}):
+        with pytest.raises(TypeError):
+            resolve_scaling(bad)
+    for bad in ({"emissions": 1}, {"columns": True}, {"energy": 0}):
+        with pytest.raises(ValueError):
+            resolve_scaling(bad)
+    with pytest.raises(ValueError, match="energy"):
+        resolve_scaling({"power": 2})
+
+
+def _build_uc_modular_network():
+    import pypsa
+
+    n = pypsa.Network()
+    n.set_snapshots(range(4))
+    n.add("Bus", "b")
+    n.add("Load", "l", bus="b", p_set=[400, 600, 800, 500])
+    n.add(
+        "Generator",
+        "modular_gas",
+        bus="b",
+        p_nom_extendable=True,
+        committable=True,
+        p_nom_mod=200,
+        p_nom_max=1000,
+        p_min_pu=0.3,
+        marginal_cost=50,
+        capital_cost=50000,
+        start_up_cost=100,
+        shut_down_cost=50,
+    )
+    return n
+
+
+def test_classify_columns():
+    from pypsa.optimization.scaling import classify_columns
+
+    n = _build_uc_modular_network()
+    n.optimize.create_model()
+    classes = classify_columns(n.model)
+    assert classes["Generator-status"] == "none"
+    assert classes["Generator-n_mod"] == "none"
+    assert classes["Generator-p"] == "energy"
+    assert classes["Generator-p_nom"] == "energy"
+
+
+def test_classify_columns_cvar(stochastic_network):
+    from pypsa.optimization.scaling import classify_columns
+
+    n = stochastic_network
+    n.set_risk_preference(alpha=0.2, omega=0.5)
+    n.optimize.create_model()
+    classes = classify_columns(n.model)
+    assert classes["CVaR-a"] == "cost"
+    assert classes["CVaR"] == "cost"
+
+
+def _window_violation(m, exps):
+    """Sum of log2 window violations of every ILP quantity under `exps`."""
+    from pypsa.optimization.scaling import WINDOW, _quantities
+
+    logv, A, cats = _quantities(m)
+    g = np.array([exps.energy, exps.cost, *exps.rows.values()], dtype=float)
+    scaled = logv + A @ g
+    lo = np.log2([WINDOW[c][0] for c in cats])
+    hi = np.log2([WINDOW[c][1] for c in cats])
+    return float(np.maximum(lo - scaled, 0).sum() + np.maximum(scaled - hi, 0).sum())
+
+
+def test_choose_exponents(ac_dc_network):
+    from pypsa.optimization.scaling import (
+        ScalingExponents,
+        ScalingSpec,
+        choose_exponents,
+    )
+
+    n = ac_dc_network
+    n.optimize.create_model(include_objective_constant=False)
+    m = n.model
+
+    pinned = choose_exponents(m, ScalingSpec(9, 17, False))
+    assert pinned.energy == 9
+    assert pinned.cost == 17
+    assert set(pinned.rows) == set(m.constraints)
+    assert all(v == 0 for v in pinned.rows.values())
+
+    auto = choose_exponents(m, ScalingSpec(None, None, True))
+    assert auto == choose_exponents(m, ScalingSpec(None, None, True))
+    assert isinstance(auto, ScalingExponents)
+    assert all(
+        isinstance(v, int) for v in (auto.energy, auto.cost, *auto.rows.values())
+    )
+    zero = ScalingExponents(0, 0, dict.fromkeys(m.constraints, 0))
+    viol_auto, viol_zero = _window_violation(m, auto), _window_violation(m, zero)
+    assert viol_auto == 0 or viol_auto < viol_zero
+
+
+def test_choose_exponents_indicator(caplog):
+    import pypsa
+    from pypsa.optimization.scaling import ScalingSpec, choose_exponents
+
+    n = pypsa.Network()
+    n.set_snapshots(range(2))
+    n.add("Bus", "b")
+    n.add("Load", "l", bus="b", p_set=[50, 80])
+    n.add("Generator", "g", bus="b", p_nom=100, committable=True, marginal_cost=10)
+    n.optimize.create_model()
+    m = n.model
+    status = m.variables["Generator-status"]
+    p = m.variables["Generator-p"]
+    m.add_indicator_constraints(status, 1, 1 * p, ">=", 0, name="ind")
+    with caplog.at_level("WARNING"):
+        exps = choose_exponents(m, ScalingSpec(None, None, True))
+    assert exps.energy == 0
+    assert exps.cost == 0
+    assert all(v == 0 for v in exps.rows.values())
+    assert "indicator" in caplog.text
