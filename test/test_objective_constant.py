@@ -68,6 +68,7 @@ def test_include_objective_constant_false(
     assert "objective_constant" not in n.model.variables
 
 
+@pytest.mark.no_scaling  # scaling silences the warning
 def test_include_objective_constant_none_raises_future_warning(
     network_with_extendable_assets: pypsa.Network,
 ) -> None:
@@ -171,6 +172,7 @@ def test_no_objective_constant_when_no_extendables(
     assert "objective_constant" not in n.model.variables
 
 
+@pytest.mark.no_scaling  # scaling silences the warning
 def test_create_model_raises_future_warning(
     network_with_extendable_assets: pypsa.Network,
 ) -> None:

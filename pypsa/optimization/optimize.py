@@ -628,7 +628,7 @@ class OptimizationAccessor(OptimizationAbstractMixin):
         scaling : bool | dict | None, default None
             Scale the built model in place around the solve with powers of two
             chosen by a small ILP, then map results back to original units.
-            `True` tunes everything. A dict pins parts and tunes the rest:
+            `True` tunes everything. A dict pins parts and tunes the rest,
             `energy` and `cost` fix the column and objective factors (rounded
             to a power of two), `rows=False` keeps every constraint row
             unscaled, i.e. pure unit scaling. The applied factors are
@@ -755,7 +755,7 @@ class OptimizationAccessor(OptimizationAbstractMixin):
         scaling : bool | dict | None, default None
             Scale the built model in place around the solve with powers of two
             chosen by a small ILP, then map results back to original units.
-            `True` tunes everything. A dict pins parts and tunes the rest:
+            `True` tunes everything. A dict pins parts and tunes the rest,
             `energy` and `cost` fix the column and objective factors (rounded
             to a power of two), `rows=False` keeps every constraint row
             unscaled, i.e. pure unit scaling. The applied factors are

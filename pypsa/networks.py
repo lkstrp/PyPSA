@@ -552,6 +552,8 @@ class Network(
         not_equal = False
         if isinstance(other, self.__class__):
             for key, value in self.__dict__.items():
+                if key in ("_scaling_spec", "_scaling_factors"):
+                    continue  # solve-time state, not persisted
                 if not equals(
                     value,
                     other.__dict__[key],

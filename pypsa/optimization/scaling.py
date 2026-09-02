@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 import xarray as xr
+from linopy import QuadraticExpression
 from scipy.optimize import Bounds, LinearConstraint, milp
 
 if TYPE_CHECKING:
@@ -50,7 +51,7 @@ _COST_COLUMNS = {"CVaR-a", "CVaR-theta", "CVaR", "objective_constant"}
 
 
 class ScalingSpec(NamedTuple):
-    """Resolved `scaling` argument. `None` pins mean "let the ILP choose"."""
+    """Resolved `scaling` argument. `None` pins mean the ILP chooses."""
 
     energy: int | None
     cost: int | None
@@ -58,7 +59,7 @@ class ScalingSpec(NamedTuple):
 
 
 class ScalingExponents(NamedTuple):
-    """Chosen log2 exponents: one per column class and one per constraint group."""
+    """Chosen log2 exponents, one per column class and one per constraint group."""
 
     energy: int
     cost: int
@@ -121,7 +122,13 @@ def classify_columns(m: Model) -> dict[str, ColumnClass]:
 def _label_classes(m: Model, classes: dict[str, ColumnClass]) -> np.ndarray:
     """Per-variable-label class code (0 energy, 1 cost, 2 none), filler -1 -> 2."""
     codes = {"energy": 0, "cost": 1, "none": 2}
-    size = max((int(v.labels.max()) for _, v in m.variables.items()), default=-1) + 2
+    size = (
+        max(
+            (int(v.labels.max()) for _, v in m.variables.items() if v.labels.size),
+            default=-1,
+        )
+        + 2
+    )
     out = np.full(size, 2, dtype=np.int8)
     for name, var in m.variables.items():
         labels = var.labels.values.ravel()
@@ -143,13 +150,15 @@ def _group_ranges(m: Model, classes: dict[str, ColumnClass] | None) -> pd.DataFr
             if label_cls is None:
                 parts = {"all": absc}
             else:
-                cls_of = label_cls[con.data["vars"].values]
+                cls_of = con.data["vars"].copy(data=label_cls[con.data["vars"].values])
                 parts = {
                     c: absc.where(cls_of == i)
                     for i, c in enumerate(("energy", "cost", "none"))
                 }
             for cls, part in parts.items():
-                lo, hi = float(part.min()), float(part.max())
+                if part.size == 0:
+                    continue
+                lo, hi = float(np.nanmin(part.values)), float(np.nanmax(part.values))
                 if np.isfinite(lo):
                     rows[(name, cls)] = {"coeff_min": lo, "coeff_max": hi}
     df = pd.DataFrame.from_dict(rows, orient="index")
@@ -158,9 +167,9 @@ def _group_ranges(m: Model, classes: dict[str, ColumnClass] | None) -> pd.DataFr
 
 
 def _quantities(m: Model) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    """ILP quantities: log2 values, exponent matrix over (g_e, g_c, r_k), categories.
+    """ILP quantities, log2 values, exponent matrix over (g_e, g_c, r_k), categories.
 
-    Row i of the matrix says how quantity i moves under the unknowns; the
+    Row i of the matrix says how quantity i moves under the unknowns. The
     scaled quantity is `log2 v + A @ g`.
     """
     classes = classify_columns(m)
@@ -175,6 +184,8 @@ def _quantities(m: Model) -> tuple[np.ndarray, np.ndarray, list[str]]:
     cats: list[str] = []
 
     def add(v: float, a: np.ndarray, cat: str) -> None:
+        if not (np.isfinite(v) and v > 0):
+            return
         logv.append(float(np.log2(v)))
         arows.append(a)
         cats.append(cat)
@@ -220,6 +231,9 @@ def choose_exponents(m: Model, spec: ScalingSpec) -> ScalingExponents:
     if m.matrices.indicator_A is not None:
         logger.warning("scaling skipped: model has indicator constraints")
         return zero
+    if isinstance(m.objective.expression, QuadraticExpression):
+        logger.warning("scaling skipped: model has a quadratic objective")
+        return zero
     logv, A, cats = _quantities(m)
     if not len(logv):
         return zero
@@ -229,7 +243,7 @@ def choose_exponents(m: Model, spec: ScalingSpec) -> ScalingExponents:
     cat_list = list(WINDOW)
     cat_idx = np.array([cat_list.index(c) for c in cats])
     scaled = A.any(axis=1)
-    # unknown layout: g (ng) | t=|g| (ng) | lo/hi per category (2*ncat) | s_lo, s_hi (2*nq)
+    # unknown layout, g (ng) | t=|g| (ng) | lo/hi per category (2*ncat) | s_lo, s_hi (2*nq)
     ncat = len(cat_list)
     i_t = ng
     i_lo = 2 * ng
@@ -292,7 +306,7 @@ def choose_exponents(m: Model, spec: ScalingSpec) -> ScalingExponents:
     vub = np.concatenate([np.full(ng, G_MAX), np.full(nvar - ng, np.inf)])
     vlb[i_lo:i_slo] = -np.inf
     for j in range(ncat):
-        if not (cat_idx == j).any():  # unused category: pin its spread to 0
+        if not (cat_idx == j).any():  # unused category, pin its spread to 0
             vlb[i_lo + j] = vub[i_lo + j] = vlb[i_hi + j] = vub[i_hi + j] = 0
     if spec.energy is not None:
         vlb[0] = vub[0] = spec.energy
@@ -323,9 +337,9 @@ def choose_exponents(m: Model, spec: ScalingSpec) -> ScalingExponents:
 def _apply_scaling(
     m: Model, rexp: np.ndarray, cexp: np.ndarray, oexp: int, sign: int
 ) -> None:
-    """Scale the model by 2^(sign*exponents); sign=-1 restores bit-exactly.
+    """Scale the model by 2^(sign*exponents), sign=-1 restores bit-exactly.
 
-    Convention: `x_j = 2**cexp_j * x'_j`, row i is multiplied by `2**rexp_i`,
+    Convention, `x_j = 2**cexp_j * x'_j`, row i is multiplied by `2**rexp_i`,
     the objective by `2**-oexp`. On restore the solution maps back with
     `2**cexp`, duals with `2**(rexp + oexp)` and the objective value with
     `2**oexp`.
@@ -375,8 +389,20 @@ def scaled(m: Model, exps: ScalingExponents) -> Iterator[None]:
         return
     classes = classify_columns(m)
     col_exp = {"energy": exps.energy, "cost": exps.cost, "none": 0}
-    nvar = max((int(v.labels.max()) for _, v in m.variables.items()), default=-1) + 2
-    ncon = max((int(c.labels.max()) for _, c in m.constraints.items()), default=-1) + 2
+    nvar = (
+        max(
+            (int(v.labels.max()) for _, v in m.variables.items() if v.labels.size),
+            default=-1,
+        )
+        + 2
+    )
+    ncon = (
+        max(
+            (int(c.labels.max()) for _, c in m.constraints.items() if c.labels.size),
+            default=-1,
+        )
+        + 2
+    )
     cexp = np.zeros(nvar, dtype=np.int64)
     rexp = np.zeros(ncon, dtype=np.int64)
     for name, var in m.variables.items():
@@ -413,7 +439,7 @@ def scaling_report(m: Model) -> pd.DataFrame:
     One row per constraint group (`coeff_min/coeff_max/rhs_min/rhs_max`),
     per variable group (`bound_min/bound_max`, infinities excluded) and one
     for the objective coefficients. Filler terms and masked rows are
-    excluded; linopy's `coefficientrange` is signed and filler-polluted.
+    excluded, linopy's `coefficientrange` is signed and filler-polluted.
     """
     rows: dict[tuple[str, str], dict[str, float]] = {}
     coeffs = _group_ranges(m, None)
@@ -424,11 +450,12 @@ def scaling_report(m: Model) -> pd.DataFrame:
             absr = abs(con.data["rhs"])
             absr = absr.where(live & np.isfinite(absr) & (absr != 0))
             cr = coeffs.loc[(name, "all")] if (name, "all") in coeffs.index else None
+            empty = absr.size == 0
             rows[("constraint", name)] = {
                 "coeff_min": float(cr["coeff_min"]) if cr is not None else np.nan,
                 "coeff_max": float(cr["coeff_max"]) if cr is not None else np.nan,
-                "rhs_min": float(absr.min()),
-                "rhs_max": float(absr.max()),
+                "rhs_min": np.nan if empty else float(np.nanmin(absr.values)),
+                "rhs_max": np.nan if empty else float(np.nanmax(absr.values)),
             }
         for name, var in m.variables.items():
             bounds = xr.concat(
@@ -437,13 +464,16 @@ def scaling_report(m: Model) -> pd.DataFrame:
             bounds = bounds.where(
                 (var.data["labels"] != -1) & np.isfinite(bounds) & (bounds != 0)
             )
+            empty = bounds.size == 0
             rows[("variable", name)] = {
-                "bound_min": float(bounds.min()),
-                "bound_max": float(bounds.max()),
+                "bound_min": np.nan if empty else float(np.nanmin(bounds.values)),
+                "bound_max": np.nan if empty else float(np.nanmax(bounds.values)),
             }
-        # objective split per variable group: one unit each, so mixed groups
+        # objective split per variable group, one unit each, so mixed groups
         # (e.g. the objective-constant variable) don't hide the true range
         flat = m.objective.expression.flat
+        if "vars" not in flat.columns:  # quadratic terms carry vars1/vars2
+            flat = flat.iloc[:0].assign(vars=[])
         flat = flat[(flat["coeffs"] != 0) & (flat["vars"] != -1)]
         absc = flat["coeffs"].abs()
         for name, var in m.variables.items():

@@ -290,7 +290,7 @@ def test_scaling_storage():
         atol=1e-5,
     )
     # Store energy-balance dual verifies the cost/energy factor. (The StorageUnit
-    # SoC-balance dual is skipped: it is degenerate whenever the unit sits at
+    # SoC-balance dual is skipped, it is degenerate whenever the unit sits at
     # SoC=0, so scaled/unscaled land on equivalent alternate dual vertices.)
     np.testing.assert_allclose(
         got.c.stores.dynamic.mu_energy_balance.values,
@@ -474,6 +474,55 @@ def test_scaling_overnight_cost():
         rtol=1e-5,
         atol=1e-6,
     )
+
+
+def test_scaling_piecewise_marginal_cost():
+    """Piecewise chords mix column classes in one row and must round-trip."""
+    import pandas as pd
+
+    import pypsa
+
+    def build():
+        costs = pd.DataFrame(
+            {"p_pu": [0.0, 0.5, 1.0], "marginal_cost": [0.0, 20.0, 40.0]}
+        )
+        n = pypsa.Network()
+        n.add("Bus", "b")
+        n.add("Generator", "gen", bus="b", p_nom=100, marginal_cost=costs)
+        n.add("Load", "l", bus="b", p_set=50)
+        return n
+
+    ref = _solve(build(), scaling=False)
+    got = _solve(build(), scaling=True)
+    np.testing.assert_allclose(got.objective, ref.objective, rtol=1e-6)
+    np.testing.assert_allclose(
+        got.c.generators.dynamic.p.values, ref.c.generators.dynamic.p.values, rtol=1e-6
+    )
+
+
+def test_scaling_quadratic_objective_skipped(caplog):
+    """A quadratic objective is left unscaled with a warning."""
+    import pypsa
+
+    n = pypsa.Network()
+    n.set_snapshots(range(2))
+    n.add("Bus", "b")
+    n.add("Load", "l", bus="b", p_set=[100, 150])
+    n.add(
+        "Generator",
+        "g",
+        bus="b",
+        p_nom=300,
+        marginal_cost=10,
+        marginal_cost_quadratic=0.1,
+    )
+    with caplog.at_level("WARNING", logger="pypsa.optimization.scaling"):
+        n.optimize(scaling=True)
+    assert "quadratic objective" in caplog.text
+    factors = n.optimize.scaling_factors
+    assert factors["energy"] == 1.0
+    assert factors["cost"] == 1.0
+    assert set(factors["rows"].values()) == {1.0}
 
 
 def _exps_for(m, energy=9, cost=17):
