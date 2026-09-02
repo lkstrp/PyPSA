@@ -4,6 +4,7 @@
 
 """Tests for numerical scaling in n.optimize(scaling=...)."""
 
+import warnings
 from unittest.mock import patch
 
 import numpy as np
@@ -20,12 +21,8 @@ def _solve(n, **kw):
 @pytest.mark.parametrize("network", NETWORKS)
 @pytest.mark.parametrize(
     "scaling",
-    [
-        True,
-        {"energy": 100, "cost": 1e3},
-        {"energy": 1, "cost": 1, "emissions": 1},
-    ],
-    ids=["default", "custom", "identity"],
+    [True, {"energy": 100, "cost": 1e3}, {"rows": False}],
+    ids=["auto", "pinned", "units_only"],
 )
 def test_scaling_equivalence(request, network, scaling):
     """Scaled and unscaled solves must agree in original units."""
@@ -88,7 +85,7 @@ def test_scaling_equivalence(request, network, scaling):
 
 @pytest.mark.parametrize("network", NETWORKS)
 def test_scaling_inputs_restored(request, network):
-    """Scaled input columns must be byte-identical after the call."""
+    """Network inputs are never touched by model scaling."""
     n = request.getfixturevalue(network)
     before = n.c.generators.static["capital_cost"].copy()
     before_mc = n.c.generators.dynamic["marginal_cost"].copy()
@@ -104,10 +101,12 @@ def test_scaling_inputs_restored(request, network):
 
 @pytest.mark.parametrize("network", NETWORKS)
 def test_scaling_exception_safety(request, network):
-    """A solve failure must still restore the scaled inputs."""
+    """A solve failure must leave inputs and the model in original units."""
     n = request.getfixturevalue(network)
     before = n.c.generators.static["capital_cost"].copy()
     n.optimize.create_model(scaling=True)
+    n.model.constraints.sanitize_zeros()
+    coeffs = {k: c.data["coeffs"].copy() for k, c in n.model.constraints.items()}
     with (
         patch("linopy.Model.solve", side_effect=RuntimeError("boom")),
         pytest.raises(RuntimeError),
@@ -116,10 +115,12 @@ def test_scaling_exception_safety(request, network):
     np.testing.assert_array_equal(
         n.c.generators.static["capital_cost"].values, before.values
     )
+    for k, c in n.model.constraints.items():
+        assert c.data["coeffs"].equals(coeffs[k])
 
 
 def test_scaling_unit_commitment():
-    """Commitment costs (1/cost) multiply dimensionless binaries, not a quantity."""
+    """Commitment binaries stay unscaled, their costs still round-trip."""
     import pypsa
 
     def build():
@@ -152,7 +153,7 @@ def test_scaling_unit_commitment():
 
 
 def test_scaling_modular():
-    """Modular size columns (*_nom_mod, MW/MWh) must scale by 1/energy."""
+    """Integer module counts stay unscaled next to scaled capacities."""
     import pypsa
 
     def build():
@@ -413,8 +414,7 @@ def _build_transformer_network(variable=False):
 def test_scaling_transformer_phase_shift(variable):
     """Transformer KVL terms and phase_shift readback must survive scaling.
 
-    x_pu is derived from s_nom inside the scaled context and the phase-shift
-    angle term is a raw constant, so both need explicit scaling handling."""
+    The phase-shift angle is a dimensionless column mixed into energy rows."""
     ref = _solve(_build_transformer_network(variable), scaling=False)
     got = _solve(_build_transformer_network(variable), scaling=True)
 
@@ -566,17 +566,49 @@ def test_scaled_context_zero_exponents_untouched(ac_dc_network):
         assert np.shares_memory(c.data["coeffs"].values, before[k])
 
 
-def test_scaling_resolver_errors(ac_dc_network):
+def test_scaling_factors_property(ac_dc_network):
     n = ac_dc_network
-    with pytest.raises(TypeError):  # not a bool/dict
-        n.optimize(scaling="big")
-    with pytest.raises(TypeError):  # non-numeric value
-        n.optimize(scaling={"energy": "big"})
-    with pytest.raises(TypeError):  # non-bool equilibration flag
-        n.optimize(scaling={"rows": 1024})
-    for bad in ({"power": 100}, {"money": 1e6}, {"enrgy": 100}):  # old/typo keys
-        with pytest.raises(ValueError):
-            n.optimize(scaling=bad)
+    assert n.optimize.scaling_factors is None
+    n.optimize(scaling=True)
+    factors = n.optimize.scaling_factors
+    assert set(factors) == {"energy", "cost", "rows"}
+    assert set(factors["rows"]) == set(n.model.constraints)
+    values = [factors["energy"], factors["cost"], *factors["rows"].values()]
+    assert all(float(np.log2(v)).is_integer() for v in values)
+    n.optimize(scaling=False)
+    assert n.optimize.scaling_factors is None
+
+
+def test_scaling_objective_constant(ac_dc_network):
+    """Scaling silences the unset-option FutureWarning and drops the constant."""
+    import pypsa
+
+    n = ac_dc_network
+    ref, got = n.copy(), n.copy()
+    pypsa.options.params.optimize.include_objective_constant = None
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        n.optimize(scaling=True)
+    assert "objective_constant" not in n.model.variables
+    assert n.objective_constant == 0.0
+
+    # an explicit True keeps the constant variable and still round-trips
+    ref.optimize(scaling=False, include_objective_constant=True)
+    got.optimize(scaling=True, include_objective_constant=True)
+    assert "objective_constant" in got.model.variables
+    np.testing.assert_allclose(got.objective, ref.objective, rtol=1e-6)
+    np.testing.assert_allclose(got.objective_constant, ref.objective_constant)
+
+
+def test_scaling_extra_functionality(ac_dc_network):
+    """Constraints added in extra_functionality are seen by the tuner."""
+
+    def tiny(n, sns):
+        n.model.add_constraints(1e-7 * n.model["Generator-p"] >= 0, name="tiny")
+
+    n = ac_dc_network
+    n.optimize(scaling=True, extra_functionality=tiny)
+    assert n.optimize.scaling_factors["rows"]["tiny"] != 1.0
 
 
 def test_scaling_mga(ac_dc_network):

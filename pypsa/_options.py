@@ -480,9 +480,9 @@ options._add_option(
 options._add_option(
     "params.optimize.scaling",
     False,
-    "Default value for the 'scaling' parameter in optimization. False means no "
-    "scaling, True uses energy/1024, cost/1024, emissions/2**20, and a dict "
-    "overrides any subset. See n.optimize(scaling=...).",
+    "Default for `scaling` in `n.optimize`. False: off. True: auto-tuned pow2 "
+    "model scaling. Dict pins `energy`/`cost` factors or `rows=False`; "
+    "unspecified parts are tuned.",
 )
 
 options._add_option(

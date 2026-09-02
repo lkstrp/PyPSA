@@ -6,7 +6,6 @@ SPDX-License-Identifier: CC-BY-4.0
 
 # Release Notes
 
-<!--
 ## Upcoming Release
 
 !!! info "Upcoming Release"
@@ -14,7 +13,10 @@ SPDX-License-Identifier: CC-BY-4.0
     The features listed below have not yet been released, but will be included in the
     next update! If you would like to use these features in the meantime, you will need
     to install the `master` branch, e.g. `pip install git+https://github.com/pypsa/pypsa`.
--->
+
+### Features
+
+- `n.optimize(scaling=True)` now scales the built linopy model in place instead of rescaling network inputs. Power-of-two factors for energy columns, the objective and every constraint row are chosen by a small integer program over the model's coefficient ranges, applied around the solve and restored bit-exactly, so results, duals and `n.objective` come back in original units. A dict pins parts of the choice: `energy` and `cost` fix the column and objective factors, `rows=False` keeps constraint rows unscaled. The `emissions` key is gone. Constraints added via `extra_functionality` are scaled too, and the applied factors are exposed at `n.optimize.scaling_factors`. With scaling on, an unset `include_objective_constant` defaults to `False` without the deprecation warning.
 
 ## [**v1.3.0**](https://github.com/PyPSA/PyPSA/releases/tag/v1.3.0) <small>19th August 2026</small> { id="v1.3.0" }
 

@@ -41,7 +41,6 @@ if TYPE_CHECKING:
     from xarray import DataArray  # noqa: TC004
 
     from pypsa import Network
-    from pypsa.components import Components
 
     ArgItem = list[str | int | float | DataArray]
 
@@ -939,11 +938,6 @@ def _define_ramp_limit_big_m(
         p_init = c.da.p_init.sel(name=idx).where(initially_up, 0)
         s_init = initially_up
 
-    # scale the raw p_init constant like the p variable it is compared to
-    scale = n._scaling["energy"]
-    if scale != 1:
-        p_init = p_init / scale
-
     p_prev_ce = (
         p.to_linexpr().shift(snapshot=1).fillna(0) + p_init.fillna(0) * filter_first_sn
     )
@@ -1098,11 +1092,6 @@ def define_ramp_limit_constraints(
         p_init = c.da.p_init.sel(name=idx).where(initially_up, 0)
         s_init = initially_up
         mask.loc[{"snapshot": sns[0]}] = p_init.notnull()
-
-    # scale the raw p_init constant like the p variable it is compared to
-    scale = n._scaling["energy"]
-    if scale != 1:
-        p_init = p_init / scale
 
     # skip starts of periods except the first where p_init is used
     boundary = window.period_start_mask()
@@ -1636,26 +1625,7 @@ def define_kirchhoff_voltage_constraints(n: Network, sns: pd.Index) -> None:
         https://doi.org/10.1016/j.epsr.2020.106908
 
     """
-    scale = n._scaling["energy"]
-    if scale == 1:
-        _define_kvl_constraints(n, sns)
-        return
-    # pu derivation (here and in cycle_matrix) needs true s_nom values,
-    # which Scaler.applied has scaled
-    holders: list[Components] = [n.c.transformers, n.c.transformer_types]
-    backups = [c.static["s_nom"].copy() for c in holders]
-    for c in holders:
-        c.static["s_nom"] *= scale
-    try:
-        _define_kvl_constraints(n, sns)
-    finally:
-        for c, backup in zip(holders, backups, strict=True):
-            c.static["s_nom"] = backup
-
-
-def _define_kvl_constraints(n: Network, sns: pd.Index) -> None:
     m = n.model
-    scale = n._scaling["energy"]
     n.calculate_dependent_values()
 
     window = n.optimize._window.subset(sns)
@@ -1690,8 +1660,7 @@ def _define_kvl_constraints(n: Network, sns: pd.Index) -> None:
             for names, angle in contributions:
                 C = DataArray(C_trafos.loc[names])
                 sel = angle.sel(name=names, snapshot=snapshots)
-                # divide by scale so the angle term matches the scaled flows
-                lhs_period = lhs_period + (sel @ C) * (deg_to_rad * 1e5 / scale)
+                lhs_period = lhs_period + (sel @ C) * (deg_to_rad * 1e5)
 
         lhs_parts.append(lhs_period)
 
@@ -2443,8 +2412,7 @@ def define_tangent_loss_constraints(
         )
         raise ValueError(msg)
 
-    scale = n._scaling["energy"]
-    r_pu_eff = c.da.r_pu_eff * scale if scale != 1 else c.da.r_pu_eff
+    r_pu_eff = c.da.r_pu_eff
 
     # Calculate upper bound on losses
     upper_limit = r_pu_eff * (s_max_pu * s_nom_max) ** 2
@@ -2551,12 +2519,7 @@ def define_secant_loss_constraints(
         )
         raise ValueError(msg)
 
-    scale = n._scaling["energy"]
-    if scale != 1:
-        r_pu_eff = c.da.r_pu_eff * scale
-        atol = atol / scale
-    else:
-        r_pu_eff = c.da.r_pu_eff
+    r_pu_eff = c.da.r_pu_eff
 
     # Calculate upper bound on losses
     upper_limit = r_pu_eff * (s_max_pu * s_nom_max) ** 2

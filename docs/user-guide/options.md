@@ -127,9 +127,9 @@ optimize.include_objective_constant:
         False in v2.0).
 optimize.scaling:
     Default: False
-    Description: Default value for the 'scaling' parameter in optimization. False means
-        no scaling, True uses energy/1e3, cost/1e3, emissions/1e6, and a dict overrides
-        any subset. See n.optimize(scaling=...).
+    Description: Default for `scaling` in `n.optimize`. False: off. True: auto-tuned
+        pow2 model scaling. Dict pins `energy`/`cost` factors or `rows=False`;
+        unspecified parts are tuned.
 consistency.numerical_tolerance:
     Default: 1e-09
     Description: Tolerance for numerical comparisons in consistency checks (e.g. p_min_pu > p_max_pu).

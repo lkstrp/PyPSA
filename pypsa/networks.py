@@ -54,7 +54,6 @@ from pypsa.network.power_flow import (
 )
 from pypsa.network.transform import NetworkTransformMixin
 from pypsa.optimization.optimize import OptimizationAccessor
-from pypsa.optimization.scaling import Scaler
 from pypsa.optimization.window import SnapshotWindow
 from pypsa.plot.accessor import PlotAccessor
 from pypsa.plot.maps import explore
@@ -67,6 +66,7 @@ if TYPE_CHECKING:
     from scipy.sparse import spmatrix
 
     from pypsa.components.legacy import Component
+    from pypsa.optimization.scaling import ScalingSpec
 
 
 logger = logging.getLogger(__name__)
@@ -93,8 +93,8 @@ class Network(
     _multi_invest: int
     _linearized_uc: int
     _committable_big_m: float | None
-    _scaling: dict[str, float]
-    _scaler: Scaler | None
+    _scaling_spec: ScalingSpec | None
+    _scaling_factors: dict | None
     _optimize_window: SnapshotWindow | None
     iteration: int
 
@@ -167,8 +167,8 @@ class Network(
         self._objective_constant: float | None = None
         self._multi_invest: int = 0
         self._committable_big_m: float | None = None
-        self._scaling: dict[str, float] = {"energy": 1.0, "cost": 1.0, "emissions": 1.0}
-        self._scaler: Scaler | None = None
+        self._scaling_spec: ScalingSpec | None = None
+        self._scaling_factors: dict | None = None
         self._optimize_window: SnapshotWindow | None = None
 
         # Initialize accessors
@@ -547,7 +547,6 @@ class Network(
             PlotAccessor,
             AbstractStatisticsAccessor,
             linopy.Model,
-            Scaler,
             SnapshotWindow,
         ]
         not_equal = False

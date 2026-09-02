@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 import signal
 import tempfile
-from contextlib import nullcontext
 from multiprocessing import get_context
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -263,12 +262,6 @@ class OptimizationAbstractMGAMixin:
             ).sum()
             fixed_cost = (n.statistics.installed_capex().sum() * w).sum()
 
-        # Scale the unscaled cost constants to match the model's scaled
-        # objective, which is in cost units (assign_solution multiplies by
-        # factors.cost).
-        optimal_cost /= n._scaling["cost"]
-        fixed_cost /= n._scaling["cost"]
-
         # Add constraint
         objective = n.model.objective
         if not isinstance(objective, (LinearExpression | QuadraticExpression)):
@@ -372,11 +365,8 @@ class OptimizationAbstractMGAMixin:
             msg = f"Could not parse optimization sense {sense}"
             raise ValueError(msg)
 
-        # Build budget constraint and objective in the model's scaled units.
-        factors = n._scaler
-        with factors.applied(n) if factors else nullcontext():
-            self._n.optimize._add_near_opt_constraint(multi_investment_periods, slack)
-            m.objective = self.build_linexpr_from_weights(weights, model=m) * sense
+        self._n.optimize._add_near_opt_constraint(multi_investment_periods, slack)
+        m.objective = self.build_linexpr_from_weights(weights, model=m) * sense
 
         status, condition = self._n.optimize.solve_model(**kwargs)
 
@@ -511,18 +501,14 @@ class OptimizationAbstractMGAMixin:
             **model_kwargs,
         )
 
-        # Build budget constraint and objective in the model's scaled units.
-        factors = self._n._scaler
-        with factors.applied(self._n) if factors else nullcontext():
-            self._n.optimize._add_near_opt_constraint(multi_investment_periods, slack)
-            # Build objective as linear combination of direction and
-            # dimensions. Flip the sign in order to maximize in the given
-            # direction.
-            m.objective = -sum(
-                direction[key]
-                * self.build_linexpr_from_weights(dimensions[key], model=m)
-                for key in direction.keys()
-            )
+        self._n.optimize._add_near_opt_constraint(multi_investment_periods, slack)
+        # Build objective as linear combination of direction and
+        # dimensions. Flip the sign in order to maximize in the given
+        # direction.
+        m.objective = -sum(
+            direction[key] * self.build_linexpr_from_weights(dimensions[key], model=m)
+            for key in direction.keys()
+        )
 
         status, condition = self._n.optimize.solve_model(**kwargs)
         coordinates = self.project_solved(dimensions) if status == "ok" else None
