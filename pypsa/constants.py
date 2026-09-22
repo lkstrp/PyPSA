@@ -13,7 +13,7 @@ import pandas as pd
 PYPSA_DATA_DIR = importlib.resources.files("pypsa") / "data"
 
 DEFAULT_EPSG = 4326
-DEFAULT_TIMESTAMP = "now"
+DEFAULT_TIMESTAMP = 0
 EARTH_RADIUS = 6378137.0  # equitorial radius in meters
 HOURS_PER_YEAR = 8760.0
 

@@ -130,21 +130,13 @@ class _ImporterExcel(_Importer):
         except KeyError:
             return None
         df = df.set_index(df.columns[0])
-        # Convert snapshot and timestep to datetime (if possible)
-        if (
-            "snapshot" in df
-            and df.snapshot.iloc[0] != "now"
-            and df.snapshot.dtype.kind != "i"
-        ):
+        # Convert snapshot and timestep to datetime (if possible), unless already integer
+        if "snapshot" in df and df.snapshot.dtype.kind != "i":
             try:
                 df["snapshot"] = pd.to_datetime(df.snapshot)
             except (ValueError, ParserError):
                 pass
-        if (
-            "timestep" in df
-            and df.timestep.iloc[0] != "now"
-            and df.timestep.dtype.kind != "i"
-        ):
+        if "timestep" in df and df.timestep.dtype.kind != "i":
             try:
                 df["timestep"] = pd.to_datetime(df.timestep)
             except (ValueError, ParserError):

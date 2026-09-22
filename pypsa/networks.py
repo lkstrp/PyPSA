@@ -1076,7 +1076,6 @@ class Network(
             "_committable_big_m",
             "_objective",
             "_objective_constant",
-            "now",
         ]:
             if attr in vars(self):
                 setattr(n, attr, copy.deepcopy(vars(self)[attr]))
