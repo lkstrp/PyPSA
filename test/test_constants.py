@@ -27,8 +27,8 @@ class TestConstants:
 
     def test_default_timestamp(self):
         """Test DEFAULT_TIMESTAMP constant."""
-        assert DEFAULT_TIMESTAMP == "now"
-        assert isinstance(DEFAULT_TIMESTAMP, str)
+        assert DEFAULT_TIMESTAMP == 0
+        assert isinstance(DEFAULT_TIMESTAMP, int)
 
 
 class TestRegexPatterns:

@@ -32,6 +32,25 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _validate_level_dtype(
+    index: pd.Index, level: str, *, datetime_allowed: bool
+) -> None:
+    """Validate that a snapshot index level is integer- or (optionally) datetime-typed."""
+    is_int = index.dtype.kind in "iu"
+    is_datetime = datetime_allowed and isinstance(index, pd.DatetimeIndex)
+    if not (is_int or is_datetime):
+        msg = (
+            f"Invalid dtype '{index.dtype}' for snapshot level '{level}': "
+            f"first offending label is {index[0]!r}. "
+            + (
+                "Must be integer- or datetime-typed."
+                if datetime_allowed
+                else "Must be integer-typed."
+            )
+        )
+        raise ValueError(msg)
+
+
 class NetworkIndexMixin(_NetworkABC):
     """Mixin class for network index methods.
 
@@ -107,6 +126,16 @@ class NetworkIndexMixin(_NetworkABC):
         if len(sns) == 0:
             msg = "Snapshots must not be empty."
             raise ValueError(msg)
+
+        if isinstance(sns, pd.MultiIndex):
+            _validate_level_dtype(
+                sns.get_level_values("period"), "period", datetime_allowed=False
+            )
+            _validate_level_dtype(
+                sns.get_level_values("timestep"), "timestep", datetime_allowed=True
+            )
+        else:
+            _validate_level_dtype(sns, "snapshot", datetime_allowed=True)
 
         self._snapshots_data = self._snapshots_data.reindex(
             sns, fill_value=default_snapshot_weightings

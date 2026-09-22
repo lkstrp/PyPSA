@@ -1024,7 +1024,6 @@ class Network(
             "_committable_big_m",
             "_objective",
             "_objective_constant",
-            "now",
         ]:
             if hasattr(self, attr):
                 setattr(n, attr, getattr(self, attr))

@@ -89,8 +89,9 @@ time-varying nature of the network, such as the availability of renewable energy
 sources, the demand for electricity, or the state of charge of storage units.
 All time-dependent series quantities are indexed by
 [`n.snapshots`][pypsa.network.index.NetworkIndexMixin.snapshots]. Networks
-default to a single snapshot called "now" and can be set with
-[`n.set_snapshots()`][pypsa.Network.set_snapshots].
+default to a single integer snapshot `0` and can be set with
+[`n.set_snapshots()`][pypsa.Network.set_snapshots]. Snapshot labels must be
+integer- or datetime-typed.
 
 
 ``` py
