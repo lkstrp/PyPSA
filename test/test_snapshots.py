@@ -68,6 +68,17 @@ def test_set_snapshots_rejects_string_period_in_multiindex():
         n.set_snapshots(mi)
 
 
+def test_csv_import_rejects_legacy_now_snapshot(tmp_path):
+    # Legacy PyPSA exported a "now" default snapshot label. Importing it
+    # must raise, not silently resolve to the current wall-clock time.
+    (tmp_path / "snapshots.csv").write_text(
+        ",snapshot,objective,stores,generators\n0,now,1.0,1.0,1.0\n"
+    )
+    n = pypsa.Network()
+    with pytest.raises(ValueError, match="snapshot"):
+        n.import_from_csv_folder(tmp_path)
+
+
 def test_csv_roundtrip_keeps_integer_snapshots(tmp_path):
     n = pypsa.Network()
     n.set_snapshots([0, 1, 2])
