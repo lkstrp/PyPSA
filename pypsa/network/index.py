@@ -41,7 +41,7 @@ def _validate_level_dtype(
     if not (is_int or is_datetime):
         msg = (
             f"Invalid dtype '{index.dtype}' for snapshot level '{level}': "
-            f"first offending label is {index[0]!r}. "
+            f"first label is {index[0]!r}. "
             + (
                 "Must be integer- or datetime-typed."
                 if datetime_allowed
