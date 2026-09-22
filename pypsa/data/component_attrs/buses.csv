@@ -10,7 +10,7 @@ location,string,n/a,n/a,Location of the bus. Does not influence the optimisation
 v_mag_pu_set,static or series,per unit,1,"Voltage magnitude set point, per unit of `v_nom`.",Input (optional)
 v_mag_pu_min,float,per unit,0,"Minimum desired voltage, per unit of `v_nom`. Placeholder attribute not currently used by any functions.",Input (optional)
 v_mag_pu_max,float,per unit,inf,"Maximum desired voltage, per unit of `v_nom`.  Placeholder attribute not currently used by any functions.",Input (optional)
-control,string,n/a,PQ,"P,Q,V control strategy for power flow, must be ""PQ"", ""PV"" or ""Slack"". Note that this attribute is an output inherited from the controls of the generators attached to the bus. Do not set by hand.",Output
+control,string,n/a,PQ,"P,Q,V control strategy for power flow, must be ""PQ"", ""PV"" or ""Slack"". Do not set by hand.",Input (optional)
 generator,string,n/a,n/a,Name of slack generator attached to slack bus.,Output
 sub_network,string,n/a,n/a,Name of connected sub-network to which bus belongs. This attribute is set by `n.determine_network_topology()`. Do not set by hand.,Output
 p,series,MW,0.,active power at bus (positive if net generation at bus),Output

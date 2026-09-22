@@ -69,6 +69,7 @@ DEFAULT_BUS_STRATEGIES = {
     "v_mag_pu_max": "min",
     "v_mag_pu_min": "max",
     "generator": lambda x: "",
+    "control": lambda x: "",  # recomputed by find_bus_controls() on power flow
 }
 
 DEFAULT_LINE_STRATEGIES = {
