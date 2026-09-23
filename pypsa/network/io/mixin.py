@@ -1580,7 +1580,7 @@ class NetworkIOMixin(_NetworkABC):
     def to_datarecord(self) -> Any:
         """Present this network as a datarecord `Record` (export only).
 
-        <!-- md:badge-version -->
+        <!-- md:badge-version v2.0.0 -->
 
         !!! warning "Experimental"
             The datarecord format is experimental and its layout may change.
@@ -1599,6 +1599,11 @@ class NetworkIOMixin(_NetworkABC):
         >>> n = pypsa.Network()  # doctest: +SKIP
         >>> record = n.to_datarecord()  # doctest: +SKIP
 
+        See Also
+        --------
+        [pypsa.Network.export_to_datarecord][], [pypsa.Network.from_datarecord][],
+        [pypsa.Network.import_from_datarecord][]
+
         """
         self._require_datarecord()
         from pypsa.network.io.datarecord.record import NetworkRecord  # noqa: PLC0415
@@ -1608,7 +1613,7 @@ class NetworkIOMixin(_NetworkABC):
     def export_to_datarecord(self, path: str | Path) -> None:
         """Export this network to the datarecord format.
 
-        <!-- md:badge-version -->
+        <!-- md:badge-version v2.0.0 -->
 
         !!! warning "Experimental"
             The datarecord format is experimental and its layout may change.
@@ -1628,6 +1633,11 @@ class NetworkIOMixin(_NetworkABC):
         >>> n = pypsa.Network()  # doctest: +SKIP
         >>> n.export_to_datarecord("network")  # doctest: +SKIP
 
+        See Also
+        --------
+        [pypsa.Network.import_from_datarecord][], [pypsa.Network.to_datarecord][],
+        [pypsa.Network.from_datarecord][]
+
         """
         self._require_datarecord()
         from datarecord.duck import connect  # noqa: PLC0415
@@ -1643,7 +1653,7 @@ class NetworkIOMixin(_NetworkABC):
     def from_datarecord(cls, record: RecordLike) -> Network:
         """Build a network from a datarecord `Record` (import only).
 
-        <!-- md:badge-version -->
+        <!-- md:badge-version v2.0.0 -->
 
         !!! warning "Experimental"
             The datarecord format is experimental and its layout may change.
@@ -1666,6 +1676,11 @@ class NetworkIOMixin(_NetworkABC):
         >>> record = n.to_datarecord()  # doctest: +SKIP
         >>> n2 = pypsa.Network.from_datarecord(record)  # doctest: +SKIP
 
+        See Also
+        --------
+        [pypsa.Network.to_datarecord][], [pypsa.Network.import_from_datarecord][],
+        [pypsa.Network.export_to_datarecord][]
+
         """
         cls._require_datarecord()
         from pypsa.network.io.datarecord.build import (  # noqa: PLC0415
@@ -1679,7 +1694,7 @@ class NetworkIOMixin(_NetworkABC):
     def import_from_datarecord(self, path: str | Path) -> None:
         """Import a network from the datarecord format.
 
-        <!-- md:badge-version -->
+        <!-- md:badge-version v2.0.0 -->
 
         !!! warning "Experimental"
             The datarecord format is experimental and its layout may change.
@@ -1696,6 +1711,11 @@ class NetworkIOMixin(_NetworkABC):
         Examples
         --------
         >>> n.import_from_datarecord("network")  # doctest: +SKIP
+
+        See Also
+        --------
+        [pypsa.Network.export_to_datarecord][], [pypsa.Network.to_datarecord][],
+        [pypsa.Network.from_datarecord][]
 
         """
         self._require_datarecord()
