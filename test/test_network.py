@@ -810,10 +810,11 @@ def test_rename_component_names(use_component):
 
 
 def test_rename_component_names_of_non_bus_type_does_not_raise():
-    """Renaming names of a component type other than `Bus` raised `KeyError`:
-    the cross-reference update built column names from every port label found
-    on the OTHER component's own bus columns (e.g. Line's "0"/"1"), combined
-    with the renamed type's name (e.g. "generator0"), a column no type
+    """Renaming names of a component type other than `Bus` raised `KeyError`.
+
+    The cross-reference update built column names from every port label found
+    on the other component's own bus columns (e.g. Line's `0`/`1`), combined
+    with the renamed type's name (e.g. `generator0`), a column no type
     actually carries.
     """
     n = pypsa.examples.ac_dc_meshed()

@@ -28,7 +28,7 @@ except ImportError:
 
 
 # `pypsa.examples`' cached networks still carry a stray `now` scalar from an
-# older PyPSA version; CSV/netCDF preserve it via `dir(n)` reflection but the
+# older PyPSA version. CSV/netCDF preserve it via `dir(n)` reflection but the
 # datarecord network-attribute allow-list does not, by design.
 _LEGACY_EXAMPLE_ATTRS = ["now"]
 
@@ -66,8 +66,8 @@ def custom_equals(n1, n2, ignore_attrs=None):
             if obj is None:
                 continue
             # A stray attribute one side carries and the other never set (e.g.
-            # a legacy example network's ad hoc scalar) is dropped outright:
-            # nulling it would still leave the key missing from the other
+            # a legacy example network's ad hoc scalar) is dropped outright.
+            # Nulling it would still leave the key missing from the other
             # side's `__dict__`, which `equals` compares key by key.
             if last in getattr(obj, "__dict__", {}):
                 del obj.__dict__[last]
@@ -883,7 +883,7 @@ def _record_twin(n: pypsa.Network) -> pypsa.Network:
     """A copy of `n` with every cross-type name collision renamed away.
 
     A record scopes names across every component type, while PyPSA scopes
-    them per type - so a name two types share is renamed on every claiming
+    them per type, so a name two types share is renamed on every claiming
     type, `<Type> <name>`, before the network can be exported.
 
     Dynamic column order carries no PyPSA semantics, but the datarecord
@@ -938,7 +938,7 @@ class TestDatarecord:
         pytest.importorskip("datarecord", reason="datarecord not installed")
 
     def test_collision_raises(self, ac_dc_network):
-        # The raw fixture already collides: every Bus name is also a Load name.
+        # The raw fixture already collides, every Bus name is also a Load name.
         from pypsa.network.io.datarecord.record import DatarecordExportError
 
         with pytest.warns(UserWarning, match="experimental"):

@@ -137,7 +137,7 @@ def test_varying_attributes_carry_period_when_multiperiod() -> None:
 
 def test_snapshot_weightings_stay_on_the_timestep_axis_when_multiperiod() -> None:
     """A snapshot weighting is addressed by `timestep` alone in both schema
-    variants: `timestep` already carries `period` through `within` (the axis
+    variants. `timestep` already carries `period` through `within` (the axis
     key is `(period, timestep)`), so the weighting stays a declared column of
     `dims/timestep.parquet` rather than becoming a long attribute.
     """

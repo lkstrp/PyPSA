@@ -11,7 +11,7 @@ an input or output across all component types that define it.
 
 from pypsa.components.types import all_components
 
-# Types the datarecord schema (Task 4) does not export: templates/library rows
+# Types the datarecord schema does not export: templates/library rows
 # (LineType, TransformerType) and derived, non-schema types (SubNetwork, Network).
 _SCHEMA_EXCLUDED_TYPES = {"LineType", "TransformerType", "SubNetwork", "Network"}
 
