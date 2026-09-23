@@ -984,6 +984,22 @@ class TestDatarecord:
         assert "period" in p_max_pu.columns
         assert set(p_max_pu["period"].dropna().unique()) == {2020, 2030}
 
+    def test_multiperiod_network_exports_to_disk_and_reopens(self, tmp_path):
+        from datarecord import Record, connect
+
+        n = pypsa.examples.ac_dc_meshed()
+        n.snapshots = pd.MultiIndex.from_product([[2020, 2030], n.snapshots])
+        n.investment_periods = [2020, 2030]
+        n = _record_twin(n)
+
+        path = tmp_path / "record"
+        with pytest.warns(UserWarning, match="experimental"):
+            n.export_to_datarecord(path)
+        assert (path / "manifest.json").exists()
+
+        opened = Record.at(str(path), connect())
+        assert "period" in opened.dims["timestep"].to_native().columns
+
     def test_piecewise_breakpoints_are_written(self, piecewise_network):
         n = _record_twin(piecewise_network)
         with pytest.warns(UserWarning, match="experimental"):

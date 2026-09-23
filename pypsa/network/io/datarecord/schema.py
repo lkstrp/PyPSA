@@ -303,16 +303,13 @@ def build_schema(*, multiperiod: bool, timestep_dtype: str) -> Schema:
         "period_objective": "Weight of this period in the objective function.",
         "years": "Number of years this period represents.",
     }
-    snapshot_dims = (
-        frozenset({TIMESTEP, PERIOD}) if multiperiod else frozenset({TIMESTEP})
-    )
     for name in SNAPSHOT_WEIGHTINGS:
         _register(
             attributes,
             name,
             AttributeSpec(
                 dtype=nw.Float64(),
-                dims=snapshot_dims,
+                dims=frozenset({TIMESTEP}),
                 default=1.0,
                 description=_weighting_descriptions[name],
             ),
