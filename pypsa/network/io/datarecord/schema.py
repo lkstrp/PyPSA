@@ -94,18 +94,6 @@ def pypsa_name(ctype: str, record_attr: str) -> str:
     return _PYPSA_NAME_OVERRIDES.get((ctype, record_attr), record_attr)
 
 
-def _column_record_name(ctype: str, stem: str, port: str | None) -> str:
-    """Resolve the record-wide name for one column, `record_name` unless it is a port column.
-
-    A `_RECORD_NAME_OVERRIDES` entry disambiguates a type's own,
-    component-addressed column from the connection-addressed one every
-    per-port flow shares (`Link.p` -> `p_activity`, leaving per-port `p0`/`p1`
-    named plain `p`). Applying it to a port column instead would rename the
-    connection-addressed flow away, so it is scoped to `port is None`.
-    """
-    return record_name(ctype, stem) if port is None else stem
-
-
 def _ports(defaults: pd.DataFrame) -> list[str]:
     """Port labels from a type's `bus`/`bus0`/`bus1`/... columns."""
     return [m.group(1) for col in defaults.index if (m := _BUS_RE.match(col))]
@@ -127,13 +115,13 @@ def _port_stems(ctype: str, defaults: pd.DataFrame) -> dict[str, tuple[str, str]
     result: dict[str, tuple[str, str]] = {}
     coefficient_attr = _COEFFICIENT_ATTR.get(ctype)
     single_port = ports == [""]
+    if single_port and coefficient_attr is None and "efficiency" in defaults.index:
+        result["efficiency"] = ("efficiency", ports[0])
     for port in ports:
         for stem in ("bus", "p", "q"):
             col = f"{stem}{port}"
             if col in defaults.index:
                 result[col] = (stem, port)
-        if single_port and coefficient_attr is None and "efficiency" in defaults.index:
-            result["efficiency"] = ("efficiency", port)
         if coefficient_attr is None:
             continue
         # Only Link leaves port "1" unsuffixed (`efficiency`, not `efficiency1`).
@@ -152,9 +140,10 @@ def _port_stems(ctype: str, defaults: pd.DataFrame) -> dict[str, tuple[str, str]
 def port_columns(c: Components) -> dict[str, tuple[str, str]]:
     """PyPSA column -> (record stem, port label) for one component type's ports.
 
-    E.g. `{"bus0": ("bus", "0"), "efficiency": ("efficiency", "1"), "p": ("p", "")}`
-    for a Link, or `{"bus": ("bus", ""), "p": ("p", ""), "q": ("q", "")}` for a
-    single-port type such as Generator.
+    E.g. `{"bus0": ("bus", "0"), "bus1": ("bus", "1"), "efficiency": ("efficiency", "1"),
+    "p0": ("p", "0"), "p1": ("p", "1")}` for a Link, whose entity-addressed `p`
+    is not a port column, or `{"bus": ("bus", ""), "p": ("p", ""), "q": ("q", "")}`
+    for a single-port type such as Generator.
     """
     return _port_stems(c.name, c.defaults)
 
@@ -263,7 +252,10 @@ def build_schema(*, multiperiod: bool, timestep_dtype: str) -> Schema:
             if attr == "name":
                 continue
             stem, port = stems.get(attr, (attr, None))
-            name = _column_record_name(ctype, stem, port)
+            # A `_RECORD_NAME_OVERRIDES` entry disambiguates a type's own,
+            # component-addressed column from the connection-addressed one
+            # every per-port flow shares, so it is scoped to `port is None`.
+            name = record_name(ctype, stem) if port is None else stem
             dims = {_CONNECTION if port is not None else _ENTITY, SCENARIO}
             if row["varying"]:
                 dims.add(TIMESTEP)
@@ -282,8 +274,8 @@ def build_schema(*, multiperiod: bool, timestep_dtype: str) -> Schema:
                 name,
                 TypeAttribute(
                     default=_default(row["default"]),
-                    unit=_text(row.get("unit")),
-                    description=_text(row.get("description")),
+                    unit=_text(row["unit"]),
+                    description=_text(row["description"]),
                 ),
             )
         if stems:

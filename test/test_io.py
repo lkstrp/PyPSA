@@ -879,18 +879,30 @@ def test_version_warning(caplog):
     assert "Importing network from PyPSA version v0.10.0" in caplog.text
 
 
+def _canonical_dynamic_order(n: pypsa.Network) -> pypsa.Network:
+    """Reindex every component's dynamic frame columns to its static index order, in place.
+
+    Dynamic column order carries no PyPSA semantics, but the datarecord
+    import recovers it from the static index order, so a network is
+    normalised this way before comparing it against a re-imported twin.
+    """
+    for c in n.components:
+        order = c.static.index
+        for attr, series in c.dynamic.items():
+            if series.empty:
+                continue
+            c.dynamic[attr] = series.reindex(columns=order[order.isin(series.columns)])
+    return n
+
+
 def _record_twin(n: pypsa.Network) -> pypsa.Network:
     """A copy of `n` with every cross-type name collision renamed away.
 
     A record scopes names across every component type, while PyPSA scopes
     them per type, so a name two types share is renamed on every claiming
-    type, `<Type> <name>`, before the network can be exported.
-
-    Dynamic column order carries no PyPSA semantics, but the datarecord
-    import recovers it from the static index order, so it is normalised
-    here the same way for an exact round-trip comparison. `rename` can also
-    turn a plain-index dtype (e.g. object) into pandas' `str` dtype, which
-    is restored here too.
+    type, `<Type> <name>`, before the network can be exported. `rename` can
+    also turn a plain-index dtype (e.g. object) into pandas' `str` dtype,
+    which is restored here too.
     """
     n = n.copy()
     dtypes = {
@@ -919,12 +931,7 @@ def _record_twin(n: pypsa.Network) -> pypsa.Network:
     for c in n.components:
         if c.name in dtypes and c.static.index.dtype != dtypes[c.name]:
             c.static.index = c.static.index.astype(dtypes[c.name])
-        order = c.static.index
-        for attr, series in c.dynamic.items():
-            if series.empty:
-                continue
-            c.dynamic[attr] = series.reindex(columns=order[order.isin(series.columns)])
-    return n
+    return _canonical_dynamic_order(n)
 
 
 @pytest.mark.skipif(
@@ -953,15 +960,6 @@ class TestDatarecord:
         n.add("Link", "l0", bus0="b0", bus1="b0")
         with pytest.warns(UserWarning, match="experimental"):
             with pytest.raises(DatarecordExportError, match="b0"):
-                n.to_datarecord()
-
-    def test_string_snapshots_raise(self, ac_dc_network):
-        from pypsa.network.io.datarecord.record import DatarecordExportError
-
-        n = _record_twin(ac_dc_network)
-        n._snapshots_data.index = n._snapshots_data.index.astype(str)
-        with pytest.warns(UserWarning, match="experimental"):
-            with pytest.raises(DatarecordExportError, match="dtype"):
                 n.to_datarecord()
 
     def test_experimental_warning_once_per_call(self, ac_dc_network):
@@ -1008,6 +1006,10 @@ class TestDatarecord:
 
         efficiency = rec.attributes["efficiency"].to_native()
         assert not efficiency.empty
+
+        from pypsa.network.io.datarecord.schema import TIMESTEP
+
+        assert rec.flags("Link")["p"].varies == frozenset({TIMESTEP})
 
     def test_multiperiod_series_carry_period_column(self):
         n = pypsa.examples.ac_dc_meshed()
@@ -1197,3 +1199,47 @@ class TestDatarecord:
         n.my_custom_attr = "some-value"
         _n, n2 = self._round_trip(n, tmp_path)
         assert not hasattr(n2, "my_custom_attr")
+
+    def test_round_trip_ac_dc_meshed_example(self, tmp_path):
+        """The shipped example, renamed but not collapsed to `_record_twin`'s
+        per-scenario handling, round-trips strictly once its own dynamic
+        column order is normalised to the datarecord import's contract.
+
+        Solving triggers `n.determine_network_topology()`, so `SubNetwork`
+        (out of scope for the datarecord allow-list, like the legacy example's
+        stray `now` attribute) is ignored the same way
+        `test_round_trip_networks_including_solved` already does for a
+        solved network.
+        """
+        n = pypsa.examples.ac_dc_meshed()
+        n.optimize(solver_name="highs", log_to_console=False)
+        n.model.solver_model = None
+        for ctype in ("Line", "Link", "Generator", "Load"):
+            c = n.components[ctype]
+            n.rename_component_names(
+                ctype, **{name: f"{ctype} {name}" for name in c.static.index}
+            )
+        _canonical_dynamic_order(n)
+        ignore = [
+            *_LEGACY_EXAMPLE_ATTRS,
+            "_components.sub_networks",
+            "_linearized_uc",
+            "_committable_big_m",
+        ]
+
+        path = tmp_path / "record"
+        with pytest.warns(UserWarning, match="experimental"):
+            n.export_to_datarecord(path)
+        with pytest.warns(UserWarning, match="experimental"):
+            n2 = pypsa.Network(path)
+        assert custom_equals(n, n2, ignore_attrs=ignore)
+
+        with pytest.warns(UserWarning, match="experimental"):
+            record = n.to_datarecord()
+        with pytest.warns(UserWarning, match="experimental"):
+            n3 = pypsa.Network.from_datarecord(record)
+        assert custom_equals(n, n3, ignore_attrs=ignore)
+
+        assert list(pypsa.Network().snapshots) == [0]
+
+        assert list(pypsa.Network().snapshots) == [0]

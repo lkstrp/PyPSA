@@ -139,7 +139,9 @@ n_import = pypsa.Network("foo/bar")
 
     Component names must be unique across component types, since the datarecord
     schema keys components by name alone. Snapshots must be integer- or
-    datetime-typed.
+    datetime-typed. After import, a time-series frame's columns follow the
+    component's static index order, which can differ from the order they had
+    in the source network.
 
 `path` may also be a remote URI, resolved through datarecord's own connection rather
 than `cloudpathlib`.
