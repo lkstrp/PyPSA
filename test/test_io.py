@@ -948,3 +948,77 @@ class TestDatarecord:
         assert set(opened.schema.types) == set(
             opened.schema.dimensions[ENTITY_TYPE].dtype.categories
         )
+
+    def test_outputs_and_per_port_attributes_are_written(self, ac_dc_solved):
+        # Non-default efficiency, so the scalar rows are not dropped as defaults.
+        n = _record_twin(ac_dc_solved)
+        n.c.links.static["efficiency"] = 0.9
+        with pytest.warns(UserWarning, match="experimental"):
+            rec = n.to_datarecord()
+
+        p = rec.outputs["p"].to_native()
+        gen = n.c.generators.static.index[0]
+        assert not p[p["entity"] == gen].empty
+
+        link = n.c.links.static.index[0]
+        link_rows = p[p["entity"] == link]
+        assert not link_rows.empty
+        expected_buses = {
+            n.c.links.static.at[link, "bus0"],
+            n.c.links.static.at[link, "bus1"],
+        }
+        assert set(link_rows["bus"]) == expected_buses
+
+        efficiency = rec.attributes["efficiency"].to_native()
+        assert not efficiency.empty
+
+    def test_multiperiod_series_carry_period_column(self):
+        n = pypsa.examples.ac_dc_meshed()
+        n.snapshots = pd.MultiIndex.from_product([[2020, 2030], n.snapshots])
+        n.investment_periods = [2020, 2030]
+        n = _record_twin(n)
+        with pytest.warns(UserWarning, match="experimental"):
+            rec = n.to_datarecord()
+
+        p_max_pu = rec.attributes["p_max_pu"].to_native()
+        assert "period" in p_max_pu.columns
+        assert set(p_max_pu["period"].dropna().unique()) == {2020, 2030}
+
+    def test_piecewise_breakpoints_are_written(self, piecewise_network):
+        n = _record_twin(piecewise_network)
+        with pytest.warns(UserWarning, match="experimental"):
+            rec = n.to_datarecord()
+
+        marginal_cost = rec.attributes["marginal_cost"].to_native()
+        assert marginal_cost["breakpoint"].notna().any()
+
+        efficiency = rec.attributes["efficiency"].to_native()
+        assert efficiency["breakpoint"].notna().any()
+
+    def test_stochastic_static_and_series_do_not_overlap(self, stochastic_network):
+        n = _record_twin(stochastic_network)
+        gen = n.c.generators.static.index.get_level_values("name").unique()[0]
+        scenarios = n.c.generators.static.index.get_level_values("scenario").unique()
+        cols = pd.MultiIndex.from_product(
+            [scenarios, [gen]], names=["scenario", "name"]
+        )
+        n.c.generators.dynamic["marginal_cost"] = pd.DataFrame(
+            1.0, index=n.snapshots, columns=cols
+        )
+        with pytest.warns(UserWarning, match="experimental"):
+            rec = n.to_datarecord()
+
+        marginal_cost = rec.attributes["marginal_cost"].to_native()
+        entity_rows = marginal_cost[marginal_cost["entity"] == gen]
+        assert not entity_rows.empty
+        assert not entity_rows["timestep"].isna().any()
+
+    def test_entity_types_omit_varying_and_deleted_columns(self, ac_dc_network):
+        n = _record_twin(ac_dc_network)
+        with pytest.warns(UserWarning, match="experimental"):
+            rec = n.to_datarecord()
+
+        generators = rec.entity_types["Generator"].to_native()
+        assert "marginal_cost" not in generators.columns
+        assert "p_max_pu" not in generators.columns
+        assert "deleted" not in generators.columns

@@ -32,6 +32,7 @@ from pypsa.network.io.datarecord.schema import (
     PORT,
     SCENARIO,
     SCENARIO_WEIGHTINGS,
+    SNAPSHOT_WEIGHTINGS,
     TIMESTEP,
     build_schema,
     port_columns,
@@ -55,8 +56,8 @@ class DatarecordExportError(ValueError):
     """A network cannot be exported to the datarecord format as-is."""
 
 
-def _exported_components(n: Network, export_standard_types: bool) -> list[Components]:
-    """Component types with data to write: non-empty, standard types opt-in.
+def _exported_components(n: Network) -> list[Components]:
+    """Component types with data to write: non-empty, standard types excluded.
 
     `_EXCLUDED_TYPES` (templates and derived, non-schema types) are never
     exported: the schema grants no entity-type label for them.
@@ -66,7 +67,7 @@ def _exported_components(n: Network, export_standard_types: bool) -> list[Compon
         for c in n.components
         if not c.static.empty
         and c.name not in _EXCLUDED_TYPES
-        and (export_standard_types or c.name not in n.standard_type_components)
+        and c.name not in n.standard_type_components
     ]
 
 
@@ -194,9 +195,6 @@ class NetworkRecord:
     ----------
     n
         The network to present.
-    export_standard_types
-        Whether to also write standard-type components (`LineType`,
-        `TransformerType`), normally reconstructed on import instead.
 
     Examples
     --------
@@ -205,11 +203,10 @@ class NetworkRecord:
 
     """
 
-    def __init__(self, n: Network, export_standard_types: bool = False) -> None:
+    def __init__(self, n: Network) -> None:
         """Present `n` as a `Record`, validating eagerly."""
         self.n = n
-        self.export_standard_types = export_standard_types
-        self._components = _exported_components(n, export_standard_types)
+        self._components = _exported_components(n)
         _check_collisions(self._components)
         _check_same_bus_twice(self._components)
         _check_snapshots(n)
@@ -238,6 +235,10 @@ class NetworkRecord:
         timestep = n.snapshot_weightings.reset_index()
         if "snapshot" in timestep.columns:
             timestep = timestep.rename(columns={"snapshot": TIMESTEP})
+        if n.has_periods:
+            # Weighting values are varying (period, timestep) rows once
+            # multiperiod, per `build_schema`; the axis file keeps only its key.
+            timestep = timestep[[PERIOD, TIMESTEP]]
         axes[TIMESTEP] = timestep
 
         if n.has_periods:
@@ -293,7 +294,7 @@ class NetworkRecord:
         )
 
     def _member_frame(self, c: Components) -> pd.DataFrame:
-        """One type's non-port, non-output static columns, defaults dropped."""
+        """One type's non-port, non-output, non-varying static columns, defaults dropped."""
         defaults = c.defaults
         ports = port_columns(c)
         columns = []
@@ -304,6 +305,10 @@ class NetworkRecord:
                 columns.append(col)
                 continue
             if str(defaults.at[col, "status"]).startswith("Output"):
+                continue
+            if defaults.at[col, "varying"]:
+                # Addressed beyond `entity` too, so it lives in its long
+                # file only (`inputs/<attr>.parquet`), not here as well.
                 continue
             columns.append(col)
         columns = [x for x in columns if x not in _scenario_varying(c, columns)]
@@ -330,7 +335,6 @@ class NetworkRecord:
             frame["geometry"] = frame["geometry"].to_wkt()
         if c.name == "SubNetwork" and "obj" in frame.columns:
             frame = frame.drop(columns=["obj"])
-        frame["deleted"] = False
         return frame
 
     @cached_property
@@ -377,10 +381,27 @@ class NetworkRecord:
                 names.setdefault(attr, []).append(c)
             if c.ports:
                 names.setdefault(PORT, []).append(c)
-        return LazyFrames(
-            tuple(names),
-            lambda attr: nw.from_native(self._long_frame(attr, names[attr])).lazy(),
-        )
+        weightings = SNAPSHOT_WEIGHTINGS if self.n.has_periods else ()
+        keys = (*names, *weightings)
+
+        def build(attr: str) -> Any:
+            if attr in weightings:
+                return nw.from_native(self._weighting_long_frame(attr)).lazy()
+            return nw.from_native(self._long_frame(attr, names[attr])).lazy()
+
+        return LazyFrames(keys, build)
+
+    def _weighting_long_frame(self, name: str) -> pd.DataFrame:
+        """`(period, timestep, attribute, breakpoint, value)` rows for one snapshot weighting."""
+        columns = list(self.schema.long_columns_for(name))
+        weightings = self.n.snapshot_weightings.reset_index()
+        long = weightings[[PERIOD, TIMESTEP, name]].rename(columns={name: "value"})
+        long["attribute"] = name
+        long["breakpoint"] = None
+        for col in columns:
+            if col not in long.columns:
+                long[col] = None
+        return long[columns]
 
     @cached_property
     def outputs(self) -> LazyFrames:
@@ -514,34 +535,10 @@ class NetworkRecord:
         attr = self._source_attr(c, attribute)
         if attr is None:
             return None
-        defaults = c.defaults
-        frames = []
-        series = c.dynamic.get(attr)
-        if series is not None and not series.empty:
-            frames.append(self._stack_series(c, series))
-        if attr in c.static.columns:
-            exclude = series.columns if series is not None else pd.Index([])
-            static = c.static[attr]
-            if isinstance(static.index, pd.MultiIndex):
-                scalars = static.reset_index().rename(
-                    columns={"name": _ENTITY, "scenario": SCENARIO, attr: "value"}
-                )
-            else:
-                scalars = static.reset_index().rename(
-                    columns={"name": _ENTITY, attr: "value"}
-                )
-            if len(exclude):
-                scalars = scalars[~scalars[_ENTITY].isin(exclude)]
-            if attr in defaults.index:
-                default = _default(defaults.at[attr, "default"])
-                scalars = _drop_default(scalars, default)
-            frames.append(scalars)
-        if not frames:
+        long = self._stack_column(c, attr)
+        if long is None:
             return None
-        long = pd.concat(frames, ignore_index=True)
-        long[_ENTITY] = long[_ENTITY].astype(str)
         long["attribute"] = attribute
-        long["breakpoint"] = None
         return long
 
     def _per_port_rows(
@@ -561,7 +558,7 @@ class NetworkRecord:
             bus_col = f"bus{port}"
             if bus_col not in static.columns:
                 continue
-            rows = self._entity_rows(c, col, is_output=is_output)
+            rows = self._stack_column(c, col)
             if rows is None or rows.empty:
                 continue
             buses = static[bus_col]
@@ -569,7 +566,6 @@ class NetworkRecord:
                 buses = buses.droplevel(SCENARIO)
                 buses = buses[~buses.index.duplicated()]
             buses.index = buses.index.astype(str)
-            rows = rows.rename(columns={"entity": _ENTITY})
             rows[_BUS] = rows[_ENTITY].map(buses)
             rows = rows[rows[_BUS].astype(str) != ""]
             rows["attribute"] = attribute
@@ -579,6 +575,63 @@ class NetworkRecord:
                 columns=[_ENTITY, _BUS, "attribute", "breakpoint", "value"]
             )
         return pd.concat(frames, ignore_index=True)
+
+    def _stack_column(self, c: Components, attr: str) -> pd.DataFrame | None:
+        """`(entity, breakpoint, value)` rows for one raw PyPSA column: series, static and piecewise data, stacked."""
+        defaults = c.defaults
+        frames = []
+        series = c.dynamic.get(attr)
+        if series is not None and not series.empty:
+            frames.append(self._stack_series(c, series))
+        if attr in c.static.columns:
+            if series is not None and isinstance(series.columns, pd.MultiIndex):
+                exclude = series.columns.get_level_values("name")
+            elif series is not None:
+                exclude = series.columns
+            else:
+                exclude = pd.Index([])
+            static = c.static[attr]
+            if isinstance(static.index, pd.MultiIndex):
+                scalars = static.reset_index().rename(
+                    columns={"name": _ENTITY, "scenario": SCENARIO, attr: "value"}
+                )
+            else:
+                scalars = static.reset_index().rename(
+                    columns={"name": _ENTITY, attr: "value"}
+                )
+            if len(exclude):
+                scalars = scalars[~scalars[_ENTITY].isin(exclude)]
+            if attr in defaults.index:
+                default = _default(defaults.at[attr, "default"])
+                scalars = _drop_default(scalars, default)
+            frames.append(scalars)
+        piecewise = self._piecewise_long(c, attr)
+        if piecewise is not None and not piecewise.empty:
+            frames.append(piecewise)
+        if not frames:
+            return None
+        long = pd.concat(frames, ignore_index=True)
+        long[_ENTITY] = long[_ENTITY].astype(str)
+        if "breakpoint" not in long.columns:
+            long["breakpoint"] = None
+        return long
+
+    def _piecewise_long(self, c: Components, attr: str) -> pd.DataFrame | None:
+        """`(entity, breakpoint, value)` rows from one piecewise curve, NaN padding dropped."""
+        pw = c.piecewise.get(attr)
+        if pw is None or pw.empty:
+            return None
+        x_attr = c._piecewise_schema(attr).x
+        x = pw.xs(x_attr, level="attribute", axis=1).rename_axis(index="_row")
+        y = pw.xs(attr, level="attribute", axis=1).rename_axis(index="_row")
+        x_long = x.stack(future_stack=True).rename("breakpoint")
+        y_long = y.stack(future_stack=True).rename("value")
+        long = pd.concat([x_long, y_long], axis=1).reset_index().drop(columns="_row")
+        long = long.rename(columns={"name": _ENTITY}).dropna(
+            subset=["breakpoint", "value"]
+        )
+        long[_ENTITY] = long[_ENTITY].astype(str)
+        return long
 
     def _source_attr(self, c: Components, record_attr: str) -> str | None:
         """Which of `c`'s own columns writes `record_attr` (undo `record_name`)."""

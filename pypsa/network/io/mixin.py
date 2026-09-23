@@ -1557,7 +1557,7 @@ class NetworkIOMixin(_NetworkABC):
             component.static.replace({"bus0": to_replace}, inplace=True)
             component.static.replace({"bus1": to_replace}, inplace=True)
 
-    def to_datarecord(self, export_standard_types: bool = False) -> Any:
+    def to_datarecord(self) -> Any:
         """Present this network as a datarecord `Record` (export only).
 
         <!-- md:badge-version -->
@@ -1568,12 +1568,6 @@ class NetworkIOMixin(_NetworkABC):
         Requires the `datarecord` extra (Python 3.12+,
         `pip install pypsa[datarecord]`). Names must be unique across
         component types and snapshots must be integer- or datetime-typed.
-
-        Parameters
-        ----------
-        export_standard_types : bool, default False
-            Also present standard-type components (`LineType`,
-            `TransformerType`), normally reconstructed on import instead.
 
         Returns
         -------
@@ -1597,13 +1591,9 @@ class NetworkIOMixin(_NetworkABC):
         )
         from pypsa.network.io.datarecord.record import NetworkRecord  # noqa: PLC0415
 
-        return NetworkRecord(
-            cast("Network", self), export_standard_types=export_standard_types
-        )
+        return NetworkRecord(cast("Network", self))
 
-    def export_to_datarecord(
-        self, path: str | Path, export_standard_types: bool = False
-    ) -> None:
+    def export_to_datarecord(self, path: str | Path) -> None:
         """Export this network to the datarecord format.
 
         <!-- md:badge-version -->
@@ -1620,9 +1610,6 @@ class NetworkIOMixin(_NetworkABC):
         path : str | Path
             Directory to write the record to. Remote URIs work through
             datarecord's own connection.
-        export_standard_types : bool, default False
-            Also export standard-type components (`LineType`,
-            `TransformerType`), normally reconstructed on import instead.
 
         Examples
         --------
@@ -1644,8 +1631,6 @@ class NetworkIOMixin(_NetworkABC):
 
         from pypsa.network.io.datarecord.record import NetworkRecord  # noqa: PLC0415
 
-        record = NetworkRecord(
-            cast("Network", self), export_standard_types=export_standard_types
-        )
+        record = NetworkRecord(cast("Network", self))
         con = connect()
         write_record(None, record, con, uri=str(path))
