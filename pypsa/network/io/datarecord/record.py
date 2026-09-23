@@ -32,7 +32,6 @@ from pypsa.network.io.datarecord.schema import (
     PORT,
     SCENARIO,
     SCENARIO_WEIGHTINGS,
-    SNAPSHOT_WEIGHTINGS,
     TIMESTEP,
     build_schema,
     port_columns,
@@ -235,10 +234,6 @@ class NetworkRecord:
         timestep = n.snapshot_weightings.reset_index()
         if "snapshot" in timestep.columns:
             timestep = timestep.rename(columns={"snapshot": TIMESTEP})
-        if n.has_periods:
-            # Weighting values are varying (period, timestep) rows once
-            # multiperiod, per `build_schema`; the axis file keeps only its key.
-            timestep = timestep[[PERIOD, TIMESTEP]]
         axes[TIMESTEP] = timestep
 
         if n.has_periods:
@@ -381,27 +376,10 @@ class NetworkRecord:
                 names.setdefault(attr, []).append(c)
             if c.ports:
                 names.setdefault(PORT, []).append(c)
-        weightings = SNAPSHOT_WEIGHTINGS if self.n.has_periods else ()
-        keys = (*names, *weightings)
-
-        def build(attr: str) -> Any:
-            if attr in weightings:
-                return nw.from_native(self._weighting_long_frame(attr)).lazy()
-            return nw.from_native(self._long_frame(attr, names[attr])).lazy()
-
-        return LazyFrames(keys, build)
-
-    def _weighting_long_frame(self, name: str) -> pd.DataFrame:
-        """`(period, timestep, attribute, breakpoint, value)` rows for one snapshot weighting."""
-        columns = list(self.schema.long_columns_for(name))
-        weightings = self.n.snapshot_weightings.reset_index()
-        long = weightings[[PERIOD, TIMESTEP, name]].rename(columns={name: "value"})
-        long["attribute"] = name
-        long["breakpoint"] = None
-        for col in columns:
-            if col not in long.columns:
-                long[col] = None
-        return long[columns]
+        return LazyFrames(
+            tuple(names),
+            lambda attr: nw.from_native(self._long_frame(attr, names[attr])).lazy(),
+        )
 
     @cached_property
     def outputs(self) -> LazyFrames:

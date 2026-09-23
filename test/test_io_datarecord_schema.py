@@ -135,20 +135,17 @@ def test_varying_attributes_carry_period_when_multiperiod() -> None:
     assert spec.dims == frozenset({"entity", "scenario", "timestep"})
 
 
-def test_snapshot_weightings_carry_period_when_multiperiod() -> None:
-    """A snapshot weighting is entity-less but still varies with `period`
-    once the schema is multiperiod, so it moves from a `timestep` axis
-    column to a long, `(period, timestep)`-addressed attribute.
+def test_snapshot_weightings_stay_on_the_timestep_axis_when_multiperiod() -> None:
+    """A snapshot weighting is addressed by `timestep` alone in both schema
+    variants: `timestep` already carries `period` through `within` (the axis
+    key is `(period, timestep)`), so the weighting stays a declared column of
+    `dims/timestep.parquet` rather than becoming a long attribute.
     """
-    schema = build_schema(multiperiod=True, timestep_dtype="Int64")
-    spec = schema.attributes["objective"]
-    assert spec.dims == frozenset({"timestep", "period"})
-    assert spec.varying
-
-    schema = build_schema(multiperiod=False, timestep_dtype="Int64")
-    spec = schema.attributes["objective"]
-    assert spec.dims == frozenset({"timestep"})
-    assert not spec.varying
+    for multiperiod in (True, False):
+        schema = build_schema(multiperiod=multiperiod, timestep_dtype="Int64")
+        spec = schema.attributes["objective"]
+        assert spec.dims == frozenset({"timestep"})
+        assert not spec.varying
 
 
 def test_conflicting_record_name_spec_raises() -> None:
