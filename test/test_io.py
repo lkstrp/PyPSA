@@ -1240,6 +1240,5 @@ class TestDatarecord:
             n3 = pypsa.Network.from_datarecord(record)
         assert custom_equals(n, n3, ignore_attrs=ignore)
 
-        assert list(pypsa.Network().snapshots) == [0]
-
+        # Importing must not leak into the default snapshot index.
         assert list(pypsa.Network().snapshots) == [0]
