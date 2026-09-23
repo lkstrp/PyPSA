@@ -1038,3 +1038,19 @@ class TestDatarecord:
         assert "marginal_cost" not in generators.columns
         assert "p_max_pu" not in generators.columns
         assert "deleted" not in generators.columns
+
+    def test_piecewise_on_non_varying_attribute_is_written(self):
+        # capital_cost is not a `varying` attribute, but a piecewise curve on
+        # it must still land in a long file, not silently as a scalar.
+        n = pypsa.Network()
+        n.add("Bus", "b0")
+        n.add(
+            "StorageUnit", "s1", bus="b0", capital_cost={0.0: 0.0, 10: 10.0, 20: 15.0}
+        )
+        with pytest.warns(UserWarning, match="experimental"):
+            rec = n.to_datarecord()
+
+        assert "capital_cost" in rec.attributes
+        rows = rec.attributes["capital_cost"].to_native()
+        assert rows["breakpoint"].notna().any()
+        assert "capital_cost" not in rec.entity_types["StorageUnit"].to_native().columns

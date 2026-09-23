@@ -301,7 +301,7 @@ class NetworkRecord:
                 continue
             if str(defaults.at[col, "status"]).startswith("Output"):
                 continue
-            if defaults.at[col, "varying"]:
+            if defaults.at[col, "varying"] or c.has_piecewise(col):
                 # Addressed beyond `entity` too, so it lives in its long
                 # file only (`inputs/<attr>.parquet`), not here as well.
                 continue
@@ -390,9 +390,7 @@ class NetworkRecord:
                 names.setdefault(attr, []).append(c)
         return LazyFrames(
             tuple(names),
-            lambda attr: nw.from_native(
-                self._long_frame(attr, names[attr], is_output=True)
-            ).lazy(),
+            lambda attr: nw.from_native(self._long_frame(attr, names[attr])).lazy(),
         )
 
     def flags(self, ctype: str) -> dict[str, Flags]:
@@ -401,11 +399,14 @@ class NetworkRecord:
         c = by_name.get(ctype)
         if c is None:
             return {}
+        multiperiod = isinstance(self.n.snapshots, pd.MultiIndex)
         result: dict[str, Flags] = {}
         for attr in (*self._input_attrs(c), *self._output_attrs(c)):
-            varies = (
-                {TIMESTEP} if attr in c.dynamic and not c.dynamic[attr].empty else set()
-            )
+            varies: set[str] = set()
+            if attr in c.dynamic and not c.dynamic[attr].empty:
+                varies.add(TIMESTEP)
+                if multiperiod:
+                    varies.add(PERIOD)
             broadcast = {TIMESTEP} if attr in c.static.columns else set()
             breakpoints = attr in c.piecewise and not c.piecewise[attr].empty
             result[attr] = Flags(
@@ -430,7 +431,11 @@ class NetworkRecord:
                 continue
             stem, port = ports.get(attr, (attr, None))
             name = record_name(c.name, stem) if port is None else stem
-            if not defaults.at[attr, "varying"] and attr not in diverging:
+            if (
+                not defaults.at[attr, "varying"]
+                and attr not in diverging
+                and not c.has_piecewise(attr)
+            ):
                 continue
             if name not in seen:
                 seen.append(name)
@@ -451,9 +456,7 @@ class NetworkRecord:
 
     # -- long frames ------------------------------------------------------
 
-    def _long_frame(
-        self, attribute: str, components: list[Components], *, is_output: bool = False
-    ) -> pd.DataFrame:
+    def _long_frame(self, attribute: str, components: list[Components]) -> pd.DataFrame:
         columns = list(self.schema.long_columns_for(attribute))
         frames = []
         for c in components:
@@ -465,11 +468,9 @@ class NetworkRecord:
                     col for col, (stem, port) in ports.items() if stem == attribute
                 ]
                 if per_port:
-                    rows = self._per_port_rows(
-                        c, attribute, per_port, is_output=is_output
-                    )
+                    rows = self._per_port_rows(c, attribute, per_port)
                 else:
-                    rows = self._entity_rows(c, attribute, is_output=is_output)
+                    rows = self._entity_rows(c, attribute)
             if rows is not None and not rows.empty:
                 frames.append(rows)
         if not frames:
@@ -478,6 +479,10 @@ class NetworkRecord:
         for col in columns:
             if col not in long.columns:
                 long[col] = None
+        if PERIOD in long.columns:
+            # Scalar rows lack `period`; the concat upcasts the column to
+            # float64 unless it is cast back to a nullable integer here.
+            long[PERIOD] = long[PERIOD].astype("Int64")
         return long[columns]
 
     def _port_rows(self, c: Components) -> pd.DataFrame:
@@ -506,9 +511,7 @@ class NetworkRecord:
         rows["breakpoint"] = None
         return rows
 
-    def _entity_rows(
-        self, c: Components, attribute: str, *, is_output: bool
-    ) -> pd.DataFrame | None:
+    def _entity_rows(self, c: Components, attribute: str) -> pd.DataFrame | None:
         """Component-addressed long rows for one attribute, series and scalar."""
         attr = self._source_attr(c, attribute)
         if attr is None:
@@ -520,12 +523,7 @@ class NetworkRecord:
         return long
 
     def _per_port_rows(
-        self,
-        c: Components,
-        attribute: str,
-        columns: list[str],
-        *,
-        is_output: bool,
+        self, c: Components, attribute: str, columns: list[str]
     ) -> pd.DataFrame:
         """Connection-addressed long rows for a per-port attribute."""
         ports = port_columns(c)
