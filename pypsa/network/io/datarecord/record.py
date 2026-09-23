@@ -45,8 +45,17 @@ if TYPE_CHECKING:
     from pypsa.components.components import Components
 
 # The network-attribute allow-list the datarecord path round-trips; anything
-# else PyPSA carries stays off the record (no `dir(n)` scan).
-NETWORK_ATTRS = ("name", "pypsa_version", "_multi_invest")
+# else PyPSA carries stays off the record (no `dir(n)` scan). `_objective` and
+# `_objective_constant` are user-visible optimize() results, kept like every
+# other export format; a plain instance attribute defaulting to None, so an
+# unsolved network round-trips it as absent, same as the other formats.
+NETWORK_ATTRS = (
+    "name",
+    "pypsa_version",
+    "_multi_invest",
+    "_objective",
+    "_objective_constant",
+)
 
 _ENTITY, _BUS, _CONNECTION = "entity", "bus", "connection"
 

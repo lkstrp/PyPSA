@@ -53,7 +53,8 @@ def _apply_meta(record: Record, n: Network) -> None:
         if key not in attrs or attrs[key] is None:
             continue
         # `pypsa_version` has no public setter; every other allow-listed
-        # attribute (`name`, `_multi_invest`) does.
+        # attribute (`name`, `_multi_invest`, `_objective`, `_objective_constant`)
+        # does, or is itself a plain private attribute.
         if key == "pypsa_version":
             n._pypsa_version = attrs[key]
         else:
@@ -129,12 +130,8 @@ def _pivot_buses(
 
 def _broadcast_scenarios(static: pd.DataFrame, scenarios: pd.Index) -> pd.DataFrame:
     """One row per entity -> one row per `(scenario, entity)`, scenario-major."""
-    frames = []
-    for scenario in scenarios:
-        frame = static.copy()
-        frame.insert(0, "scenario", scenario)
-        frames.append(frame)
-    return pd.concat(frames, ignore_index=True)
+    broadcast = pd.concat(dict.fromkeys(scenarios, static), names=["scenario"])
+    return broadcast.reset_index("scenario").reset_index(drop=True)
 
 
 def _piecewise_wide(rows: pd.DataFrame, c: Components, attr: str) -> pd.DataFrame:
@@ -153,20 +150,31 @@ def _piecewise_wide(rows: pd.DataFrame, c: Components, attr: str) -> pd.DataFram
     return pd.concat([x_wide, y_wide], axis=1)
 
 
-def _series_wide(rows: pd.DataFrame, n: Network, *, multiperiod: bool) -> pd.DataFrame:
-    """Long rows pivoted to `n.snapshots x entity`, original column order restored.
+def _is_stochastic(rows: pd.DataFrame) -> bool:
+    """Whether `rows` is scenario-keyed; raise if it mixes keyed and null rows."""
+    if "scenario" not in rows.columns:
+        return False
+    keyed = rows["scenario"].notna()
+    if keyed.any() and not keyed.all():
+        msg = (
+            "rows mix scenario-keyed and scenario-null values in the 'scenario' column"
+        )
+        raise ValueError(msg)
+    return bool(keyed.all())
 
-    `pivot` sorts its result columns alphabetically. `rows`' own first-occurrence
-    entity order (a parquet scan preserves the dynamic frame's original column
-    order, `_stack_series`'s `.stack()` visiting it column by column) recovers
-    the entity order; a scenario level cannot be recovered the same way, since
-    a scenario-partial row's read path may regroup rows by scenario, so it is
-    ordered by `n.scenarios` (the scenario axis, whose member order the format
-    does guarantee) instead.
+
+def _series_wide(
+    rows: pd.DataFrame, n: Network, c: Components, *, multiperiod: bool
+) -> pd.DataFrame:
+    """Long rows pivoted to `n.snapshots x entity`, columns ordered by the static index.
+
+    `pivot` sorts its result columns alphabetically, and the format guarantees
+    member order only for axes and groups, never attribute files, so the
+    column order is recovered from `c.static.index` instead (the entity and,
+    for a stochastic network, the `(scenario, name)` order).
     """
-    stochastic = "scenario" in rows.columns and rows["scenario"].notna().any()
+    stochastic = _is_stochastic(rows)
     key_cols = [SCENARIO, _ENTITY] if stochastic else [_ENTITY]
-    entity_order = rows[_ENTITY].drop_duplicates()
     if multiperiod:
         wide = rows.pivot(index=[PERIOD, TIMESTEP], columns=key_cols, values="value")
         wide.index = wide.index.set_names(["period", "timestep"])
@@ -174,21 +182,16 @@ def _series_wide(rows: pd.DataFrame, n: Network, *, multiperiod: bool) -> pd.Dat
         wide = rows.pivot(index=TIMESTEP, columns=key_cols, values="value")
         wide.index = wide.index.rename("snapshot")
     wide = wide.reindex(n.snapshots)
-    if stochastic:
-        wide.columns = wide.columns.set_names(["scenario", "name"])
-        keep = pd.MultiIndex.from_product(
-            [n.scenarios, entity_order], names=["scenario", "name"]
-        )
-        keep = keep[keep.isin(wide.columns)]
-    else:
-        wide.columns = wide.columns.set_names("name")
-        keep = pd.Index(entity_order, name="name")
-    return wide.reindex(columns=keep)
+    wide.columns = wide.columns.set_names(
+        ["scenario", "name"] if stochastic else "name"
+    )
+    order = c.static.index[c.static.index.isin(wide.columns)]
+    return wide.reindex(columns=order)
 
 
 def _scalar_values(rows: pd.DataFrame, *, stochastic: bool) -> pd.Series:
     """Scalar rows as an `entity`- or `(scenario, entity)`-indexed value series."""
-    if stochastic and "scenario" in rows.columns and rows["scenario"].notna().any():
+    if stochastic and _is_stochastic(rows):
         indexed = rows.set_index(["scenario", _ENTITY])["value"]
     else:
         indexed = rows.set_index(_ENTITY)["value"]
@@ -290,7 +293,7 @@ def _add_component_type(
 
     for attr, series, piecewise in deferred:
         if not series.empty:
-            wide = _series_wide(series, n, multiperiod=multiperiod)
+            wide = _series_wide(series, n, c, multiperiod=multiperiod)
             n._import_series_from_df(wide, ctype, attr)
         if not piecewise.empty:
             wide = _piecewise_wide(piecewise, c, attr)
@@ -347,7 +350,7 @@ def _add_outputs(
             c.static[attr] = key.map(values).to_numpy()
             c.static[attr] = c.static[attr].fillna(default)
         if not series.empty:
-            wide = _series_wide(series, n, multiperiod=multiperiod)
+            wide = _series_wide(series, n, c, multiperiod=multiperiod)
             n._import_series_from_df(wide, ctype, attr, overwrite=True)
 
 
@@ -401,14 +404,4 @@ def network_from_record(record: Record, n: Network) -> None:
         )
         _add_outputs(n, c, cache, record, multiperiod=multiperiod)
 
-    _broadcast_standard_types(n)
-
-
-def _broadcast_standard_types(n: Network) -> None:
-    """Broadcast standard-type static tables across scenarios after import."""
-    for component in n.standard_type_components:
-        comp = n.components[component]
-        if n.has_scenarios and not isinstance(comp.static.index, pd.MultiIndex):
-            comp.static = pd.concat(
-                dict.fromkeys(n.scenarios, comp.static), names=["scenario"]
-            )
+    n._broadcast_standard_types()

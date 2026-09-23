@@ -885,8 +885,19 @@ def _record_twin(n: pypsa.Network) -> pypsa.Network:
     A record scopes names across every component type, while PyPSA scopes
     them per type - so a name two types share is renamed on every claiming
     type, `<Type> <name>`, before the network can be exported.
+
+    Dynamic column order carries no PyPSA semantics, but the datarecord
+    import recovers it from the static index order, so it is normalised
+    here the same way for an exact round-trip comparison. `rename` can also
+    turn a plain-index dtype (e.g. object) into pandas' `str` dtype, which
+    is restored here too.
     """
     n = n.copy()
+    dtypes = {
+        c.name: c.static.index.dtype
+        for c in n.components
+        if not c.static.empty and not isinstance(c.static.index, pd.MultiIndex)
+    }
     owners: dict[str, list[str]] = {}
     for c in n.components:
         if c.static.empty:
@@ -904,6 +915,15 @@ def _record_twin(n: pypsa.Network) -> pypsa.Network:
             continue
         for ctype in ctypes:
             n.rename_component_names(ctype, **{name: f"{ctype} {name}"})
+
+    for c in n.components:
+        if c.name in dtypes and c.static.index.dtype != dtypes[c.name]:
+            c.static.index = c.static.index.astype(dtypes[c.name])
+        order = c.static.index
+        for attr, series in c.dynamic.items():
+            if series.empty:
+                continue
+            c.dynamic[attr] = series.reindex(columns=order[order.isin(series.columns)])
     return n
 
 
@@ -1085,35 +1105,15 @@ class TestDatarecord:
         return n, n2
 
     def test_round_trip_networks_including_solved(
-        self, networks_including_solved, request, tmp_path
+        self, networks_including_solved, tmp_path
     ):
         n = networks_including_solved
-        if request.node.callspec.id == "stochastic_network":
-            request.applymarker(
-                pytest.mark.xfail(
-                    reason=(
-                        "Flaky: entity column order within a scenario-invariant "
-                        "series (e.g. p_max_pu shared identically across "
-                        "scenarios) is recovered from the long attribute "
-                        "file's own row order, which the datarecord format "
-                        "does not guarantee for ordinary attribute frames "
-                        "(only entity/dim/group axes promise member order); "
-                        "a parallel parquet scan over the larger stochastic "
-                        "series occasionally returns rows in a different "
-                        "order, swapping e.g. (high, Generator solar) and "
-                        "(high, Generator wind) column positions."
-                    ),
-                    strict=False,
-                )
-            )
         n, n2 = self._round_trip(n, tmp_path)
         # Derived data (`SubNetwork`) and optimizer-internal scalars are out of
         # scope for the datarecord network-attribute allow-list.
         ignore = _LEGACY_EXAMPLE_ATTRS + (
             [
                 "_components.sub_networks",
-                "_objective",
-                "_objective_constant",
                 "_linearized_uc",
                 "_committable_big_m",
             ]
@@ -1141,7 +1141,6 @@ class TestDatarecord:
             n.c.shapes.static,
             n2.c.shapes.static,
             check_less_precise=True,
-            check_index_type=False,
         )
         n.c.shapes.static["geometry"] = n2.c.shapes.static["geometry"]
         assert custom_equals(n, n2, ignore_attrs=_LEGACY_EXAMPLE_ATTRS)
@@ -1150,20 +1149,6 @@ class TestDatarecord:
         n, n2 = self._round_trip(piecewise_network, tmp_path)
         assert custom_equals(n, n2)
 
-    @pytest.mark.xfail(
-        reason=(
-            "Flaky: entity column order within a scenario-invariant series "
-            "(e.g. p_max_pu shared identically across scenarios) is recovered "
-            "from the long attribute file's own row order, which the "
-            "datarecord format does not guarantee for ordinary attribute "
-            "frames (only entity/dim/group axes promise member order); a "
-            "parallel parquet scan over the larger stochastic series "
-            "occasionally returns rows in a different order, swapping e.g. "
-            "(high, Generator solar) and (high, Generator wind) column "
-            "positions."
-        ),
-        strict=False,
-    )
     def test_round_trip_stochastic(self, stochastic_network, tmp_path):
         n, n2 = self._round_trip(stochastic_network, tmp_path)
         assert (n.scenario_weightings == n2.scenario_weightings).all().all()

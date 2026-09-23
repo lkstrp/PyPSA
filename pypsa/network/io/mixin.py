@@ -354,20 +354,22 @@ class NetworkIOMixin(_NetworkABC):
 
             imported_components.append(list_name)
 
-        for component in self.standard_type_components:
-            if self.has_scenarios and not isinstance(
-                self.components[component].static.index, pd.MultiIndex
-            ):
-                self.components[component].static = pd.concat(
-                    dict.fromkeys(self.scenarios, self.components[component].static),
-                    names=["scenario"],
-                )
+        self._broadcast_standard_types()
 
         logger.info(
             "Imported network '%s' has %s",
             self.name,
             ", ".join(imported_components),
         )
+
+    def _broadcast_standard_types(self) -> None:
+        """Broadcast each standard-type static table across scenarios, once per import."""
+        for component in self.standard_type_components:
+            comp = self.components[component]
+            if self.has_scenarios and not isinstance(comp.static.index, pd.MultiIndex):
+                comp.static = pd.concat(
+                    dict.fromkeys(self.scenarios, comp.static), names=["scenario"]
+                )
 
     def import_from_csv_folder(
         self,
@@ -1558,6 +1560,23 @@ class NetworkIOMixin(_NetworkABC):
             component.static.replace({"bus0": to_replace}, inplace=True)
             component.static.replace({"bus1": to_replace}, inplace=True)
 
+    @staticmethod
+    def _require_datarecord() -> None:
+        """Check the `datarecord` extra is installed and warn once it is experimental.
+
+        `stacklevel=3` points the warning at the public `*_datarecord` call
+        that invoked this helper, not at this helper itself.
+        """
+        check_optional_dependency(
+            "datarecord",
+            "Install with `pip install pypsa[datarecord]` (Python 3.12+).",
+        )
+        warnings.warn(
+            "The datarecord format is experimental and its layout may change.",
+            UserWarning,
+            stacklevel=3,
+        )
+
     def to_datarecord(self) -> Any:
         """Present this network as a datarecord `Record` (export only).
 
@@ -1581,15 +1600,7 @@ class NetworkIOMixin(_NetworkABC):
         >>> record = n.to_datarecord()  # doctest: +SKIP
 
         """
-        check_optional_dependency(
-            "datarecord",
-            "Install with `pip install pypsa[datarecord]` (Python 3.12+).",
-        )
-        warnings.warn(
-            "The datarecord format is experimental and its layout may change.",
-            UserWarning,
-            stacklevel=2,
-        )
+        self._require_datarecord()
         from pypsa.network.io.datarecord.record import NetworkRecord  # noqa: PLC0415
 
         return NetworkRecord(cast("Network", self))
@@ -1618,15 +1629,7 @@ class NetworkIOMixin(_NetworkABC):
         >>> n.export_to_datarecord("network")  # doctest: +SKIP
 
         """
-        check_optional_dependency(
-            "datarecord",
-            "Install with `pip install pypsa[datarecord]` (Python 3.12+).",
-        )
-        warnings.warn(
-            "The datarecord format is experimental and its layout may change.",
-            UserWarning,
-            stacklevel=2,
-        )
+        self._require_datarecord()
         from datarecord.duck import connect  # noqa: PLC0415
         from datarecord.layered.write import write_record  # noqa: PLC0415
 
@@ -1664,15 +1667,7 @@ class NetworkIOMixin(_NetworkABC):
         >>> n2 = pypsa.Network.from_datarecord(record)  # doctest: +SKIP
 
         """
-        check_optional_dependency(
-            "datarecord",
-            "Install with `pip install pypsa[datarecord]` (Python 3.12+).",
-        )
-        warnings.warn(
-            "The datarecord format is experimental and its layout may change.",
-            UserWarning,
-            stacklevel=2,
-        )
+        cls._require_datarecord()
         from pypsa.network.io.datarecord.build import (  # noqa: PLC0415
             network_from_record,
         )
@@ -1703,15 +1698,7 @@ class NetworkIOMixin(_NetworkABC):
         >>> n.import_from_datarecord("network")  # doctest: +SKIP
 
         """
-        check_optional_dependency(
-            "datarecord",
-            "Install with `pip install pypsa[datarecord]` (Python 3.12+).",
-        )
-        warnings.warn(
-            "The datarecord format is experimental and its layout may change.",
-            UserWarning,
-            stacklevel=2,
-        )
+        self._require_datarecord()
         from datarecord import Record, connect  # noqa: PLC0415
 
         from pypsa.network.io.datarecord.build import (  # noqa: PLC0415
