@@ -122,6 +122,35 @@ def test_efficiency_is_connection_addressed_across_types() -> None:
     assert spec.dims == frozenset({"connection", "scenario", "timestep"})
 
 
+def test_varying_attributes_carry_period_when_multiperiod() -> None:
+    """A varying attribute's `dims` gains `period` once the schema is
+    multiperiod, so its long rows carry both coordinates.
+    """
+    schema = build_schema(multiperiod=True, timestep_dtype="Int64")
+    spec = schema.attributes["p_max_pu"]
+    assert spec.dims == frozenset({"entity", "scenario", "timestep", "period"})
+
+    schema = build_schema(multiperiod=False, timestep_dtype="Int64")
+    spec = schema.attributes["p_max_pu"]
+    assert spec.dims == frozenset({"entity", "scenario", "timestep"})
+
+
+def test_snapshot_weightings_carry_period_when_multiperiod() -> None:
+    """A snapshot weighting is entity-less but still varies with `period`
+    once the schema is multiperiod, so it moves from a `timestep` axis
+    column to a long, `(period, timestep)`-addressed attribute.
+    """
+    schema = build_schema(multiperiod=True, timestep_dtype="Int64")
+    spec = schema.attributes["objective"]
+    assert spec.dims == frozenset({"timestep", "period"})
+    assert spec.varying
+
+    schema = build_schema(multiperiod=False, timestep_dtype="Int64")
+    spec = schema.attributes["objective"]
+    assert spec.dims == frozenset({"timestep"})
+    assert not spec.varying
+
+
 def test_conflicting_record_name_spec_raises() -> None:
     """A name declared with two different shapes is a schema bug, not a
     silent first-wins.

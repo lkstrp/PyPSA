@@ -267,6 +267,8 @@ def build_schema(*, multiperiod: bool, timestep_dtype: str) -> Schema:
             dims = {_CONNECTION if port is not None else _ENTITY, SCENARIO}
             if row["varying"]:
                 dims.add(TIMESTEP)
+                if multiperiod:
+                    dims.add(PERIOD)
             spec = AttributeSpec(
                 dtype=_DTYPES.get(row["typ"], nw.String()),
                 dims=frozenset(dims),
@@ -301,13 +303,16 @@ def build_schema(*, multiperiod: bool, timestep_dtype: str) -> Schema:
         "period_objective": "Weight of this period in the objective function.",
         "years": "Number of years this period represents.",
     }
+    snapshot_dims = (
+        frozenset({TIMESTEP, PERIOD}) if multiperiod else frozenset({TIMESTEP})
+    )
     for name in SNAPSHOT_WEIGHTINGS:
         _register(
             attributes,
             name,
             AttributeSpec(
                 dtype=nw.Float64(),
-                dims=frozenset({TIMESTEP}),
+                dims=snapshot_dims,
                 default=1.0,
                 description=_weighting_descriptions[name],
             ),
