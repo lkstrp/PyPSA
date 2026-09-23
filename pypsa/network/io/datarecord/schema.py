@@ -47,15 +47,15 @@ SNAPSHOT_WEIGHTINGS = ("objective", "generators", "stores")
 PERIOD_WEIGHTINGS = {"objective": "period_objective", "years": "years"}
 SCENARIO_WEIGHTINGS = {"weight": "scenario_weight"}
 
-# Dims and groups not part of the public interface: the entity axis and its
-# bus attachment, addressed record-wide only through the `connection` group.
+# The entity axis and its bus attachment aren't part of the public interface,
+# addressed record-wide only through the `connection` group.
 _ENTITY, _BUS, _CONNECTION = "entity", "bus", "connection"
 
 # Component types the schema does not export: templates/library rows and
-# derived, non-schema types (test/test_registry_invariants.py excludes the same).
+# derived, non-schema types.
 _EXCLUDED_TYPES = {"LineType", "TransformerType", "SubNetwork", "Network"}
 
-# PyPSA's `defaults["typ"]` mapped to the narwhals type the record stores;
+# PyPSA's `defaults["typ"]` mapped to the narwhals type the record stores.
 # `String` for anything unlisted, which covers `geometry` (WKT text) too.
 _DTYPES: dict[Any, nw.dtypes.DType] = {
     bool: nw.Boolean(),
@@ -69,9 +69,9 @@ _COEFFICIENT_ATTR = {"Link": "efficiency", "Process": "rate"}
 
 _BUS_RE = re.compile(r"^bus(\d*)$")
 
-# Record-wide name conflicts: one name has one address, so Bus's own p/q and
-# Link/Process's aggregate p (component-addressed) are renamed away from the
-# name every per-port flow uses (connection-addressed).
+# One name has one record-wide address, so Bus's own p/q and Link/Process's
+# aggregate p (component-addressed) are renamed away from the name every
+# per-port flow uses (connection-addressed).
 _RECORD_NAME_OVERRIDES = {
     ("Bus", "p"): "p_balance",
     ("Bus", "q"): "q_balance",
@@ -95,7 +95,7 @@ def pypsa_name(ctype: str, record_attr: str) -> str:
 
 
 def _column_record_name(ctype: str, stem: str, port: str | None) -> str:
-    """Resolve the record-wide name for one column: `record_name` for a non-port column.
+    """Resolve the record-wide name for one column, `record_name` unless it is a port column.
 
     A `_RECORD_NAME_OVERRIDES` entry disambiguates a type's own,
     component-addressed column from the connection-addressed one every
@@ -118,8 +118,8 @@ def _port_stems(ctype: str, defaults: pd.DataFrame) -> dict[str, tuple[str, str]
     registry's `ComponentType.defaults`), since both only need column names.
 
     A single-port type (one bus, labelled `""`) also maps its own
-    `efficiency` column to that port: it is the same connection-addressed
-    quantity as Link's per-port `efficiency`, not a per-component one.
+    `efficiency` column to that port, the same connection-addressed quantity
+    as Link's per-port `efficiency`, not a per-component one.
     """
     ports = _ports(defaults)
     if not ports:
@@ -136,8 +136,8 @@ def _port_stems(ctype: str, defaults: pd.DataFrame) -> dict[str, tuple[str, str]
             result["efficiency"] = ("efficiency", port)
         if coefficient_attr is None:
             continue
-        # Only Link leaves port "1" unsuffixed (`efficiency`, not `efficiency1`);
-        # every other port, and Process's own port "1", suffixes with the label.
+        # Only Link leaves port "1" unsuffixed (`efficiency`, not `efficiency1`).
+        # Every other port, and Process's own port "1", suffixes with the label.
         suffix = "" if ctype == "Link" and port == "1" else port
         col = f"{coefficient_attr}{suffix}"
         if col in defaults.index:

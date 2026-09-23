@@ -69,7 +69,7 @@ def test_set_snapshots_rejects_string_period_in_multiindex():
 
 
 def test_csv_import_rejects_legacy_now_snapshot(tmp_path):
-    # Legacy PyPSA exported a "now" default snapshot label. Importing it
+    # Legacy PyPSA exported a `now` default snapshot label. Importing it
     # must raise, not silently resolve to the current wall-clock time.
     (tmp_path / "snapshots.csv").write_text(
         ",snapshot,objective,stores,generators\n0,now,1.0,1.0,1.0\n"

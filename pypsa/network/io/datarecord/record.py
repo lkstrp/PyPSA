@@ -44,11 +44,11 @@ if TYPE_CHECKING:
     from pypsa import Network
     from pypsa.components.components import Components
 
-# The network-attribute allow-list the datarecord path round-trips; anything
+# The network-attribute allow-list the datarecord path round-trips, anything
 # else PyPSA carries stays off the record (no `dir(n)` scan). `_objective` and
-# `_objective_constant` are user-visible optimize() results, kept like every
-# other export format; a plain instance attribute defaulting to None, so an
-# unsolved network round-trips it as absent, same as the other formats.
+# `_objective_constant` are kept as user-visible `optimize()` results, like
+# every other export format, defaulting to None so an unsolved network
+# round-trips them as absent.
 NETWORK_ATTRS = (
     "name",
     "pypsa_version",
@@ -336,9 +336,9 @@ class NetworkRecord:
                 frame.loc[~keep, col] = np.nan
 
         if c.name == "Shape" and "geometry" in frame.columns:
-            # Plain `pd.DataFrame` before the WKT swap: `frame` is still a
-            # `GeoDataFrame` here, and assigning text into its geometry column
-            # warns that the column no longer holds geometries.
+            # Cast to plain DataFrame before the WKT swap. Assigning text into
+            # a GeoDataFrame's geometry column warns that it no longer holds
+            # geometries.
             wkt = frame["geometry"].to_wkt()
             frame = pd.DataFrame(frame)
             frame["geometry"] = wkt
@@ -494,7 +494,7 @@ class NetworkRecord:
             if col not in long.columns:
                 long[col] = None
         if PERIOD in long.columns:
-            # Scalar rows lack `period`; the concat upcasts the column to
+            # Scalar rows lack `period`, and the concat upcasts the column to
             # float64 unless it is cast back to a nullable integer here.
             long[PERIOD] = long[PERIOD].astype("Int64")
         return long[columns]

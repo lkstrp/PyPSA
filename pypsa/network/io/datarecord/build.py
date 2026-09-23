@@ -52,7 +52,7 @@ def _apply_meta(record: Record, n: Network) -> None:
     for key in NETWORK_ATTRS:
         if key not in attrs or attrs[key] is None:
             continue
-        # `pypsa_version` has no public setter; every other allow-listed
+        # `pypsa_version` has no public setter. Every other allow-listed
         # attribute (`name`, `_multi_invest`, `_objective`, `_objective_constant`)
         # does, or is itself a plain private attribute.
         if key == "pypsa_version":
@@ -66,7 +66,7 @@ def _apply_meta(record: Record, n: Network) -> None:
 
 
 def _apply_axes(record: Record, n: Network) -> tuple[bool, bool]:
-    """Set snapshots, investment periods and scenarios; report their shape."""
+    """Set snapshots, investment periods and scenarios, and report their shape."""
     dims = record.dims
     timestep = _collect(dims[TIMESTEP])
     multiperiod = PERIOD in dims and not _collect(dims[PERIOD]).empty
@@ -119,7 +119,7 @@ def _pivot_buses(
     if mine.empty:
         return static
     # A connection's bus never varies by scenario, but a stochastic record's
-    # read path broadcasts a scenario-partial row once per scenario; collapse
+    # read path broadcasts a scenario-partial row once per scenario. Collapse
     # back to one row per (entity, port) before pivoting.
     mine = mine.drop_duplicates(subset=[_ENTITY, "value"])
     wide = mine.pivot(index=_ENTITY, columns="value", values=_BUS)
@@ -151,7 +151,7 @@ def _piecewise_wide(rows: pd.DataFrame, c: Components, attr: str) -> pd.DataFram
 
 
 def _is_stochastic(rows: pd.DataFrame) -> bool:
-    """Whether `rows` is scenario-keyed; raise if it mixes keyed and null rows."""
+    """Whether `rows` is scenario-keyed, raise if it mixes keyed and null rows."""
     if "scenario" not in rows.columns:
         return False
     keyed = rows["scenario"].notna()
@@ -232,7 +232,7 @@ def _filter_rows(
     if bus is None:
         return rows
     # `entities`/`bus` may be scenario-broadcast (one row per (scenario, entity)),
-    # repeating each (entity, bus) pair once per scenario; a connection's bus
+    # repeating each (entity, bus) pair once per scenario. A connection's bus
     # itself never varies by scenario, so drop the repeats before joining.
     wanted = pd.DataFrame(
         {_ENTITY: entities.to_numpy(), _BUS: bus.astype(str).to_numpy()}
@@ -386,7 +386,7 @@ def network_from_record(record: Record, n: Network) -> None:
         if not stochastic and "scenario" in static.columns:
             static = static.drop(columns=["scenario"])
         # An all-default column is written all-NaN, with no concrete dtype for
-        # parquet to record; dropping it here lets `_import_components_from_df`
+        # parquet to record. Dropping it here lets `_import_components_from_df`
         # recreate it from the registry default, with the right dtype.
         all_null = [
             col for col in static.columns if col != _ENTITY and static[col].isna().all()
