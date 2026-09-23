@@ -11,6 +11,7 @@ itself never touches it.
 
 from __future__ import annotations
 
+from pypsa.network.io.datarecord.build import network_from_record
 from pypsa.network.io.datarecord.record import (
     NETWORK_ATTRS,
     DatarecordExportError,
@@ -46,6 +47,7 @@ __all__ = [
     "DatarecordExportError",
     "NetworkRecord",
     "build_schema",
+    "network_from_record",
     "port_columns",
     "pypsa_name",
     "record_name",
