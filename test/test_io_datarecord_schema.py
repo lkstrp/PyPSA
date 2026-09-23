@@ -16,6 +16,7 @@ if sys.version_info < (3, 12):
 from pypsa.components.types import all_components  # noqa: E402
 from pypsa.network.io.datarecord.schema import (  # noqa: E402
     TIMESTEP_DTYPES,
+    _column_record_name,
     _port_stems,
     build_schema,
     port_columns,
@@ -87,3 +88,56 @@ def test_record_name_round_trips() -> None:
             if attr == "name":
                 continue
             assert pypsa_name(ct.name, record_name(ct.name, attr)) == attr
+
+
+def test_record_name_override_scoped_to_non_port_columns() -> None:
+    """A `_RECORD_NAME_OVERRIDES` entry renames a type's own aggregate column,
+    never a per-port one: Link's connection-addressed `p0`/`p1` keep the plain
+    `p` name that every per-port flow shares, only Link's own entity-wide `p`
+    becomes `p_activity`.
+    """
+    assert _column_record_name("Link", "p", None) == "p_activity"
+    assert _column_record_name("Link", "p", "0") == "p"
+    assert _column_record_name("Link", "p", "1") == "p"
+
+
+def test_link_process_p_stays_connection_addressed() -> None:
+    """Link/Process's per-port `p` joins the record-wide, connection-addressed
+    `p` spec; only their own entity-wide `p` is renamed to `p_activity`.
+    """
+    schema = build_schema(multiperiod=False, timestep_dtype="Int64")
+    assert schema.results["p"].dims == frozenset({"connection", "scenario", "timestep"})
+    assert schema.results["p_activity"].dims == frozenset(
+        {"entity", "scenario", "timestep"}
+    )
+
+
+def test_efficiency_is_connection_addressed_across_types() -> None:
+    """Generator's single-port `efficiency` and Link's per-port `efficiency`
+    resolve to one connection-addressed spec, not Generator's entity-addressed
+    one winning by declaration order.
+    """
+    schema = build_schema(multiperiod=False, timestep_dtype="Int64")
+    spec = schema.attributes["efficiency"]
+    assert spec.dims == frozenset({"connection", "scenario", "timestep"})
+
+
+def test_conflicting_record_name_spec_raises() -> None:
+    """A name declared with two different shapes is a schema bug, not a
+    silent first-wins.
+    """
+    import narwhals as nw
+    from datarecord.schema import AttributeSpec
+
+    from pypsa.network.io.datarecord.schema import _register
+
+    attributes: dict = {}
+    _register(
+        attributes, "x", AttributeSpec(dtype=nw.Float64(), dims=frozenset({"entity"}))
+    )
+    with pytest.raises(ValueError, match="x"):
+        _register(
+            attributes,
+            "x",
+            AttributeSpec(dtype=nw.String(), dims=frozenset({"entity"})),
+        )
