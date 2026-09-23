@@ -327,7 +327,12 @@ class NetworkRecord:
                 frame.loc[~keep, col] = np.nan
 
         if c.name == "Shape" and "geometry" in frame.columns:
-            frame["geometry"] = frame["geometry"].to_wkt()
+            # Plain `pd.DataFrame` before the WKT swap: `frame` is still a
+            # `GeoDataFrame` here, and assigning text into its geometry column
+            # warns that the column no longer holds geometries.
+            wkt = frame["geometry"].to_wkt()
+            frame = pd.DataFrame(frame)
+            frame["geometry"] = wkt
         if c.name == "SubNetwork" and "obj" in frame.columns:
             frame = frame.drop(columns=["obj"])
         return frame

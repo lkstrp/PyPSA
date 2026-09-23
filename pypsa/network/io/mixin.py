@@ -37,6 +37,7 @@ try:
 except ImportError:
     from pathlib import Path
 if TYPE_CHECKING:
+    from datarecord.record import RecordLike
     from pandapower.auxiliary import pandapowerNet
 
     from pypsa import Network
@@ -1634,3 +1635,88 @@ class NetworkIOMixin(_NetworkABC):
         record = NetworkRecord(cast("Network", self))
         con = connect()
         write_record(None, record, con, uri=str(path))
+
+    @classmethod
+    def from_datarecord(cls, record: RecordLike) -> Network:
+        """Build a network from a datarecord `Record` (import only).
+
+        <!-- md:badge-version -->
+
+        !!! warning "Experimental"
+            The datarecord format is experimental and its layout may change.
+
+        Requires the `datarecord` extra (Python 3.12+,
+        `pip install pypsa[datarecord]`).
+
+        Parameters
+        ----------
+        record : datarecord.Record
+            A record built by `Network.to_datarecord` (or an equivalent one).
+
+        Returns
+        -------
+        Network
+            The network the record describes.
+
+        Examples
+        --------
+        >>> record = n.to_datarecord()  # doctest: +SKIP
+        >>> n2 = pypsa.Network.from_datarecord(record)  # doctest: +SKIP
+
+        """
+        check_optional_dependency(
+            "datarecord",
+            "Install with `pip install pypsa[datarecord]` (Python 3.12+).",
+        )
+        warnings.warn(
+            "The datarecord format is experimental and its layout may change.",
+            UserWarning,
+            stacklevel=2,
+        )
+        from pypsa.network.io.datarecord.build import (  # noqa: PLC0415
+            network_from_record,
+        )
+
+        n = cast("Network", cls())
+        network_from_record(record, n)
+        return n
+
+    def import_from_datarecord(self, path: str | Path) -> None:
+        """Import a network from the datarecord format.
+
+        <!-- md:badge-version -->
+
+        !!! warning "Experimental"
+            The datarecord format is experimental and its layout may change.
+
+        Requires the `datarecord` extra (Python 3.12+,
+        `pip install pypsa[datarecord]`).
+
+        Parameters
+        ----------
+        path : str | Path
+            Directory to read the record from. Remote URIs work through
+            datarecord's own connection.
+
+        Examples
+        --------
+        >>> n.import_from_datarecord("network")  # doctest: +SKIP
+
+        """
+        check_optional_dependency(
+            "datarecord",
+            "Install with `pip install pypsa[datarecord]` (Python 3.12+).",
+        )
+        warnings.warn(
+            "The datarecord format is experimental and its layout may change.",
+            UserWarning,
+            stacklevel=2,
+        )
+        from datarecord import Record, connect  # noqa: PLC0415
+
+        from pypsa.network.io.datarecord.build import (  # noqa: PLC0415
+            network_from_record,
+        )
+
+        record = Record.at(str(path), connect())
+        network_from_record(record, cast("Network", self))

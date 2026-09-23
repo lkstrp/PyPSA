@@ -201,9 +201,15 @@ class Network(
             elif str(import_name).endswith((".xls", ".xlsx", ".xlsm", ".xlsb")):
                 self.import_from_excel(import_name)
             elif isinstance(import_name, Path) and import_name.is_dir():
-                self.import_from_csv_folder(import_name)
+                if (import_name / "manifest.json").exists():
+                    self.import_from_datarecord(import_name)
+                else:
+                    self.import_from_csv_folder(import_name)
             else:
-                msg = f"import_name '{import_name}' is not a valid .h5 file, .nc file or directory."
+                msg = (
+                    f"import_name '{import_name}' is not a valid .h5 file, .nc file, "
+                    "CSV folder or datarecord directory."
+                )
                 raise ValueError(msg)
 
         for key, value in kwargs.items():
