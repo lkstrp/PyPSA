@@ -11,12 +11,18 @@ itself never touches it.
 
 from __future__ import annotations
 
+from pypsa.network.io.datarecord.record import (
+    NETWORK_ATTRS,
+    DatarecordExportError,
+    NetworkRecord,
+)
 from pypsa.network.io.datarecord.schema import (
     ENTITY_TYPE,
     PERIOD,
     PERIOD_WEIGHTINGS,
     PORT,
     SCENARIO,
+    SCENARIO_WEIGHTINGS,
     SNAPSHOT_WEIGHTINGS,
     TIMESTEP,
     TIMESTEP_DTYPES,
@@ -28,13 +34,17 @@ from pypsa.network.io.datarecord.schema import (
 
 __all__ = [
     "ENTITY_TYPE",
+    "NETWORK_ATTRS",
     "PERIOD",
     "PERIOD_WEIGHTINGS",
     "PORT",
     "SCENARIO",
+    "SCENARIO_WEIGHTINGS",
     "SNAPSHOT_WEIGHTINGS",
     "TIMESTEP",
     "TIMESTEP_DTYPES",
+    "DatarecordExportError",
+    "NetworkRecord",
     "build_schema",
     "port_columns",
     "pypsa_name",
