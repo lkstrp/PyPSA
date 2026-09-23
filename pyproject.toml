@@ -64,6 +64,7 @@ gurobipy = ["gurobipy"]
 cloudpath = ["cloudpathlib"]
 dotenv = ["python-dotenv"]
 tsam = ["tsam"]
+datarecord = ["datarecord; python_version >= '3.12'"]
 test = [
     "pytest",
     "pytest-cov",
@@ -84,6 +85,7 @@ dev = [
     "jupyter>=1.1.1",
     "typing-extensions>=4.14.0",
     "reuse>=5.1.1",
+    "datarecord; python_version >= '3.12'",
 ]
 docs = [
     "mkdocs-material",
@@ -117,9 +119,15 @@ include = ["pypsa"]
 [tool.setuptools.package-data]
 "pypsa" = ["py.typed"]
 
+# Development-only path pin for the datarecord clone. Replace with a
+# `datarecord>=0.1` version pin before merging.
+[tool.uv.sources]
+datarecord = { path = "datarecord-repo", editable = true }
+
 # Pytest settings
 
 [tool.pytest.ini_options]
+norecursedirs = ["datarecord-repo"]
 filterwarnings = [
     # Raise warnings as errors
     "error::DeprecationWarning",
