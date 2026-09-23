@@ -860,3 +860,91 @@ def test_version_warning(caplog):
     n.export_to_netcdf("test.nc")
     pypsa.Network("test.nc")
     assert "Importing network from PyPSA version v0.10.0" in caplog.text
+
+
+def _record_twin(n: pypsa.Network) -> pypsa.Network:
+    """A copy of `n` with every cross-type name collision renamed away.
+
+    A record scopes names across every component type, while PyPSA scopes
+    them per type - so a name two types share is renamed on every claiming
+    type, `<Type> <name>`, before the network can be exported.
+    """
+    n = n.copy()
+    owners: dict[str, list[str]] = {}
+    for c in n.components:
+        if c.static.empty:
+            continue
+        index = c.static.index
+        names = (
+            index.get_level_values("name")
+            if isinstance(index, pd.MultiIndex)
+            else index
+        )
+        for name in names.unique():
+            owners.setdefault(str(name), []).append(c.name)
+    for name, ctypes in owners.items():
+        if len(ctypes) < 2:
+            continue
+        for ctype in ctypes:
+            n.rename_component_names(ctype, **{name: f"{ctype} {name}"})
+    return n
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 12), reason="datarecord requires Python 3.12+"
+)
+class TestDatarecord:
+    """Export to the datarecord format: errors, warnings and the schema shape."""
+
+    @pytest.fixture(autouse=True)
+    def _require_datarecord(self):
+        pytest.importorskip("datarecord", reason="datarecord not installed")
+
+    def test_collision_raises(self, ac_dc_network):
+        # The raw fixture already collides: every Bus name is also a Load name.
+        from pypsa.network.io.datarecord.record import DatarecordExportError
+
+        with pytest.warns(UserWarning, match="experimental"):
+            with pytest.raises(DatarecordExportError, match="Bus, Load"):
+                ac_dc_network.to_datarecord()
+
+    def test_same_bus_twice_raises(self):
+        from pypsa.network.io.datarecord.record import DatarecordExportError
+
+        n = pypsa.Network()
+        n.add("Bus", "b0")
+        n.add("Link", "l0", bus0="b0", bus1="b0")
+        with pytest.warns(UserWarning, match="experimental"):
+            with pytest.raises(DatarecordExportError, match="b0"):
+                n.to_datarecord()
+
+    def test_string_snapshots_raise(self, ac_dc_network):
+        from pypsa.network.io.datarecord.record import DatarecordExportError
+
+        n = _record_twin(ac_dc_network)
+        n._snapshots_data.index = n._snapshots_data.index.astype(str)
+        with pytest.warns(UserWarning, match="experimental"):
+            with pytest.raises(DatarecordExportError, match="dtype"):
+                n.to_datarecord()
+
+    def test_experimental_warning_once_per_call(self, ac_dc_network):
+        n = _record_twin(ac_dc_network)
+        with pytest.warns(UserWarning, match="experimental") as record:
+            n.to_datarecord()
+        matches = [w for w in record if "experimental" in str(w.message)]
+        assert len(matches) == 1
+
+    def test_export_opens_as_directory_record(self, ac_dc_network, tmp_path):
+        from datarecord import Record, connect
+
+        from pypsa.network.io.datarecord.schema import ENTITY_TYPE
+
+        n = _record_twin(ac_dc_network)
+        path = tmp_path / "record"
+        with pytest.warns(UserWarning, match="experimental"):
+            n.export_to_datarecord(path)
+        assert (path / "manifest.json").exists()
+        opened = Record.at(str(path), connect())
+        assert set(opened.schema.types) == set(
+            opened.schema.dimensions[ENTITY_TYPE].dtype.categories
+        )

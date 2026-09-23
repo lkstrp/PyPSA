@@ -45,6 +45,7 @@ TIMESTEP_DTYPES = ("Int64", "Datetime")
 
 SNAPSHOT_WEIGHTINGS = ("objective", "generators", "stores")
 PERIOD_WEIGHTINGS = {"objective": "period_objective", "years": "years"}
+SCENARIO_WEIGHTINGS = {"weight": "scenario_weight"}
 
 # Dims and groups not part of the public interface: the entity axis and its
 # bus attachment, addressed record-wide only through the `connection` group.
@@ -293,21 +294,38 @@ def build_schema(*, multiperiod: bool, timestep_dtype: str) -> Schema:
             grants[PORT] = TypeAttribute()
         types[ctype] = TypeSpec(attributes=grants, description=_text(ct.description))
 
+    _weighting_descriptions = {
+        "objective": "Weight of this snapshot in the objective function.",
+        "generators": "Weight of this snapshot for generator energy sums.",
+        "stores": "Weight of this snapshot for storage energy sums.",
+        "period_objective": "Weight of this period in the objective function.",
+        "years": "Number of years this period represents.",
+    }
     for name in SNAPSHOT_WEIGHTINGS:
         _register(
             attributes,
             name,
-            AttributeSpec(dtype=nw.Float64(), dims=frozenset({TIMESTEP})),
+            AttributeSpec(
+                dtype=nw.Float64(),
+                dims=frozenset({TIMESTEP}),
+                default=1.0,
+                description=_weighting_descriptions[name],
+            ),
         )
     for name in PERIOD_WEIGHTINGS.values():
         _register(
             attributes,
             name,
-            AttributeSpec(dtype=nw.Float64(), dims=frozenset({PERIOD})),
+            AttributeSpec(
+                dtype=nw.Float64(),
+                dims=frozenset({PERIOD}),
+                default=1.0,
+                description=_weighting_descriptions[name],
+            ),
         )
     _register(
         attributes,
-        "scenario_weight",
+        SCENARIO_WEIGHTINGS["weight"],
         AttributeSpec(dtype=nw.Float64(), dims=frozenset({SCENARIO})),
     )
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import math
 import warnings
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import geopandas as gpd
 import numpy as np
@@ -18,7 +18,7 @@ import xarray as xr
 from packaging.version import parse as parse_version
 from pyproj import CRS
 
-from pypsa.common import _check_for_update
+from pypsa.common import _check_for_update, check_optional_dependency
 from pypsa.consistency import check_for_unknown_buses
 from pypsa.constants import piecewise_attrs
 from pypsa.descriptors import (
@@ -38,6 +38,8 @@ except ImportError:
     from pathlib import Path
 if TYPE_CHECKING:
     from pandapower.auxiliary import pandapowerNet
+
+    from pypsa import Network
 logger = logging.getLogger(__name__)
 
 
@@ -1554,3 +1556,96 @@ class NetworkIOMixin(_NetworkABC):
                 continue
             component.static.replace({"bus0": to_replace}, inplace=True)
             component.static.replace({"bus1": to_replace}, inplace=True)
+
+    def to_datarecord(self, export_standard_types: bool = False) -> Any:
+        """Present this network as a datarecord `Record` (export only).
+
+        <!-- md:badge-version -->
+
+        !!! warning "Experimental"
+            The datarecord format is experimental and its layout may change.
+
+        Requires the `datarecord` extra (Python 3.12+,
+        `pip install pypsa[datarecord]`). Names must be unique across
+        component types and snapshots must be integer- or datetime-typed.
+
+        Parameters
+        ----------
+        export_standard_types : bool, default False
+            Also present standard-type components (`LineType`,
+            `TransformerType`), normally reconstructed on import instead.
+
+        Returns
+        -------
+        pypsa.network.io.datarecord.record.NetworkRecord
+            A lazy `Record` view over this network.
+
+        Examples
+        --------
+        >>> n = pypsa.Network()  # doctest: +SKIP
+        >>> record = n.to_datarecord()  # doctest: +SKIP
+
+        """
+        check_optional_dependency(
+            "datarecord",
+            "Install with `pip install pypsa[datarecord]` (Python 3.12+).",
+        )
+        warnings.warn(
+            "The datarecord format is experimental and its layout may change.",
+            UserWarning,
+            stacklevel=2,
+        )
+        from pypsa.network.io.datarecord.record import NetworkRecord  # noqa: PLC0415
+
+        return NetworkRecord(
+            cast("Network", self), export_standard_types=export_standard_types
+        )
+
+    def export_to_datarecord(
+        self, path: str | Path, export_standard_types: bool = False
+    ) -> None:
+        """Export this network to the datarecord format.
+
+        <!-- md:badge-version -->
+
+        !!! warning "Experimental"
+            The datarecord format is experimental and its layout may change.
+
+        Requires the `datarecord` extra (Python 3.12+,
+        `pip install pypsa[datarecord]`). Names must be unique across
+        component types and snapshots must be integer- or datetime-typed.
+
+        Parameters
+        ----------
+        path : str | Path
+            Directory to write the record to. Remote URIs work through
+            datarecord's own connection.
+        export_standard_types : bool, default False
+            Also export standard-type components (`LineType`,
+            `TransformerType`), normally reconstructed on import instead.
+
+        Examples
+        --------
+        >>> n = pypsa.Network()  # doctest: +SKIP
+        >>> n.export_to_datarecord("network")  # doctest: +SKIP
+
+        """
+        check_optional_dependency(
+            "datarecord",
+            "Install with `pip install pypsa[datarecord]` (Python 3.12+).",
+        )
+        warnings.warn(
+            "The datarecord format is experimental and its layout may change.",
+            UserWarning,
+            stacklevel=2,
+        )
+        from datarecord.duck import connect  # noqa: PLC0415
+        from datarecord.layered.write import write_record  # noqa: PLC0415
+
+        from pypsa.network.io.datarecord.record import NetworkRecord  # noqa: PLC0415
+
+        record = NetworkRecord(
+            cast("Network", self), export_standard_types=export_standard_types
+        )
+        con = connect()
+        write_record(None, record, con, uri=str(path))
