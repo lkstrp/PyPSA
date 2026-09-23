@@ -127,7 +127,7 @@ datarecord = { path = "datarecord-repo", editable = true }
 # Pytest settings
 
 [tool.pytest.ini_options]
-norecursedirs = ["datarecord-repo"]
+testpaths = ["test"]
 filterwarnings = [
     # Raise warnings as errors
     "error::DeprecationWarning",

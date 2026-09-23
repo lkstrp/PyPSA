@@ -93,20 +93,21 @@ def pypsa_name(ctype: str, record_attr: str) -> str:
     return _PYPSA_NAME_OVERRIDES.get((ctype, record_attr), record_attr)
 
 
+def _column_record_name(ctype: str, stem: str, port: str | None) -> str:
+    """Resolve the record-wide name for one column: `record_name` for a non-port column.
+
+    A `_RECORD_NAME_OVERRIDES` entry disambiguates a type's own,
+    component-addressed column from the connection-addressed one every
+    per-port flow shares (`Link.p` -> `p_activity`, leaving per-port `p0`/`p1`
+    named plain `p`). Applying it to a port column instead would rename the
+    connection-addressed flow away, so it is scoped to `port is None`.
+    """
+    return record_name(ctype, stem) if port is None else stem
+
+
 def _ports(defaults: pd.DataFrame) -> list[str]:
     """Port labels from a type's `bus`/`bus0`/`bus1`/... columns."""
     return [m.group(1) for col in defaults.index if (m := _BUS_RE.match(col))]
-
-
-def _port_suffix(ctype: str, port: str) -> str:
-    """Return the suffix a per-port coefficient/delay attribute carries at `port`.
-
-    Link's port "1" is unsuffixed (`efficiency`, not `efficiency1`); every
-    other port and every other type suffixes with the port label itself.
-    """
-    if ctype in _COEFFICIENT_ATTR and port == "1":
-        return ""
-    return port
 
 
 def _port_stems(ctype: str, defaults: pd.DataFrame) -> dict[str, tuple[str, str]]:
@@ -114,20 +115,29 @@ def _port_stems(ctype: str, defaults: pd.DataFrame) -> dict[str, tuple[str, str]
 
     Shared by `port_columns` (a live `Components`) and `build_schema` (the
     registry's `ComponentType.defaults`), since both only need column names.
+
+    A single-port type (one bus, labelled `""`) also maps its own
+    `efficiency` column to that port: it is the same connection-addressed
+    quantity as Link's per-port `efficiency`, not a per-component one.
     """
     ports = _ports(defaults)
     if not ports:
         return {}
     result: dict[str, tuple[str, str]] = {}
     coefficient_attr = _COEFFICIENT_ATTR.get(ctype)
+    single_port = ports == [""]
     for port in ports:
         for stem in ("bus", "p", "q"):
             col = f"{stem}{port}"
             if col in defaults.index:
                 result[col] = (stem, port)
+        if single_port and coefficient_attr is None and "efficiency" in defaults.index:
+            result["efficiency"] = ("efficiency", port)
         if coefficient_attr is None:
             continue
-        suffix = _port_suffix(ctype, port)
+        # Only Link leaves port "1" unsuffixed (`efficiency`, not `efficiency1`);
+        # every other port, and Process's own port "1", suffixes with the label.
+        suffix = "" if ctype == "Link" and port == "1" else port
         col = f"{coefficient_attr}{suffix}"
         if col in defaults.index:
             result[col] = (coefficient_attr, port)
@@ -161,6 +171,23 @@ def _text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _register(
+    attributes: dict[str, AttributeSpec], name: str, spec: AttributeSpec
+) -> None:
+    """Add `name` -> `spec`, or raise if a prior type already declared it differently.
+
+    Record-wide attributes are declared once and shared by every type that
+    carries them (`AttributeSpec` is flat, per the datarecord schema), so two
+    types disagreeing on one name's shape is a schema bug, not a shadowing to
+    resolve silently.
+    """
+    existing = attributes.get(name)
+    if existing is not None and existing != spec:
+        msg = f"{name!r} already declared as {existing!r}, conflicting with {spec!r}"
+        raise ValueError(msg)
+    attributes[name] = spec
 
 
 def _timestep_dtype(name: str) -> nw.dtypes.DType:
@@ -235,7 +262,7 @@ def build_schema(*, multiperiod: bool, timestep_dtype: str) -> Schema:
             if attr == "name":
                 continue
             stem, port = stems.get(attr, (attr, None))
-            name = record_name(ctype, stem)
+            name = _column_record_name(ctype, stem, port)
             dims = {_CONNECTION if port is not None else _ENTITY, SCENARIO}
             if row["varying"]:
                 dims.add(TIMESTEP)
@@ -245,10 +272,9 @@ def build_schema(*, multiperiod: bool, timestep_dtype: str) -> Schema:
                 breakpoints=stem in breakpoint_stems,
             )
             is_output = row["status"].startswith("Output")
+            _register(results if is_output else attributes, name, spec)
             if is_output:
-                results.setdefault(name, spec)
                 continue
-            attributes.setdefault(name, spec)
             grants.setdefault(
                 name,
                 TypeAttribute(
@@ -267,9 +293,23 @@ def build_schema(*, multiperiod: bool, timestep_dtype: str) -> Schema:
             grants[PORT] = TypeAttribute()
         types[ctype] = TypeSpec(attributes=grants, description=_text(ct.description))
 
-    # A name declared as both an input and a result is one file, one `value`
-    # column, so it is an input or a result and not both.
-    results = {a: s for a, s in results.items() if a not in attributes}
+    for name in SNAPSHOT_WEIGHTINGS:
+        _register(
+            attributes,
+            name,
+            AttributeSpec(dtype=nw.Float64(), dims=frozenset({TIMESTEP})),
+        )
+    for name in PERIOD_WEIGHTINGS.values():
+        _register(
+            attributes,
+            name,
+            AttributeSpec(dtype=nw.Float64(), dims=frozenset({PERIOD})),
+        )
+    _register(
+        attributes,
+        "scenario_weight",
+        AttributeSpec(dtype=nw.Float64(), dims=frozenset({SCENARIO})),
+    )
 
     return Schema(
         dimensions=dimensions,
