@@ -34,20 +34,26 @@ def test_custom_component_registration():
     }
 
     defaults_df = pd.DataFrame(defaults_data)
-    pypsa.components.types.add_component_type(
-        name="CustomComponent",
-        list_name="custom_components",
-        description="A custom component example",
-        category="custom",
-        defaults_df=defaults_df,
-    )
+    try:
+        pypsa.components.types.add_component_type(
+            name="CustomComponent",
+            list_name="custom_components",
+            description="A custom component example",
+            category="custom",
+            defaults_df=defaults_df,
+        )
 
-    custom_component = get("custom_components")
-    assert custom_component.name == "CustomComponent"
-    assert custom_component.list_name == "custom_components"
-    assert custom_component.description == "A custom component example"
-    assert custom_component.category == "custom"
-    assert custom_component.defaults.equals(defaults_df)
+        custom_component = get("custom_components")
+        assert custom_component.name == "CustomComponent"
+        assert custom_component.list_name == "custom_components"
+        assert custom_component.description == "A custom component example"
+        assert custom_component.category == "custom"
+        assert custom_component.defaults.equals(defaults_df)
+    finally:
+        # Registration is global state on `all_components`. Left in place, a
+        # later test building a schema over every registered type (e.g.
+        # `build_schema`) crashes on `CustomComponent`'s non-string RangeIndex.
+        pypsa.components.types.all_components.pop("custom_components", None)
 
 
 # def test_unregistered_custom_components():

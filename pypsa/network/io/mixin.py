@@ -1669,7 +1669,9 @@ class NetworkIOMixin(_NetworkABC):
         Returns
         -------
         Network
-            The network the record describes.
+            The network the record describes. A time-series frame's columns
+            follow the component's static index order, which can differ from
+            the order they had in the network the record was built from.
 
         Examples
         --------
@@ -1707,6 +1709,11 @@ class NetworkIOMixin(_NetworkABC):
         path : str | Path
             Directory to read the record from. Remote URIs work through
             datarecord's own connection.
+
+        Notes
+        -----
+        A time-series frame's columns follow the component's static index
+        order, which can differ from the order they had in the source network.
 
         Examples
         --------

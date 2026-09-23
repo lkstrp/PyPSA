@@ -19,6 +19,8 @@ from pyproj import CRS
 from pypsa.descriptors import _update_ports_component_attrs
 from pypsa.network.io.datarecord.record import NETWORK_ATTRS
 from pypsa.network.io.datarecord.schema import (
+    _BUS,
+    _ENTITY,
     ENTITY_TYPE,
     PERIOD,
     PERIOD_WEIGHTINGS,
@@ -36,8 +38,6 @@ if TYPE_CHECKING:
 
     from pypsa import Network
     from pypsa.components.components import Components
-
-_ENTITY, _BUS = "entity", "bus"
 
 
 def _collect(frame: Any) -> pd.DataFrame:
@@ -185,6 +185,10 @@ def _series_wide(
     wide.columns = wide.columns.set_names(
         ["scenario", "name"] if stochastic else "name"
     )
+    missing = wide.columns.difference(c.static.index)
+    if not missing.empty:
+        msg = f"{c.name} series rows reference entities missing from its static index: {list(missing)}"
+        raise ValueError(msg)
     order = c.static.index[c.static.index.isin(wide.columns)]
     return wide.reindex(columns=order)
 

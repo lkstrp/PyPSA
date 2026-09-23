@@ -7,9 +7,9 @@
 The export side of the datarecord format: `NetworkRecord` implements the
 `datarecord.Record` protocol over a live `Network`, undoing PyPSA's
 static/dynamic split into the record's wide member frames and long rows.
-Validated eagerly on construction, so a network that cannot be represented
-(name collisions, a component on the same bus twice, unsupported snapshots)
-fails before any frame is built.
+Validated eagerly on construction for shapes it cannot represent (name
+collisions, a component on the same bus twice); unsupported snapshot dtypes
+surface lazily, the first time `schema` is accessed.
 """
 
 from __future__ import annotations
@@ -23,8 +23,10 @@ import numpy as np
 import pandas as pd
 from datarecord.record import Flags, LazyFrames
 
-from pypsa.network.index import _validate_level_dtype
 from pypsa.network.io.datarecord.schema import (
+    _BUS,
+    _CONNECTION,
+    _ENTITY,
     _EXCLUDED_TYPES,
     ENTITY_TYPE,
     PERIOD,
@@ -56,8 +58,6 @@ NETWORK_ATTRS = (
     "_objective",
     "_objective_constant",
 )
-
-_ENTITY, _BUS, _CONNECTION = "entity", "bus", "connection"
 
 
 class DatarecordExportError(ValueError):
@@ -102,29 +102,45 @@ def _check_collisions(components: list[Components]) -> None:
         raise DatarecordExportError(msg)
 
 
+def _attached_buses(c: Components, port: str) -> pd.Series:
+    """One port's bus attachments, indexed by entity name.
+
+    The scenario level is dropped and scenario-broadcast duplicates removed
+    (a connection's bus never varies by scenario), and unattached (empty
+    string) entries are filtered out. Empty if the port has no `bus<port>`
+    column at all.
+    """
+    col = f"bus{port}"
+    static = c.static
+    if col not in static.columns:
+        return pd.Series(dtype=object)
+    buses = static[col]
+    if isinstance(buses.index, pd.MultiIndex):
+        buses = buses.droplevel(SCENARIO)
+        buses = buses[~buses.index.duplicated()]
+    return buses[buses.astype(str) != ""]
+
+
 def _check_same_bus_twice(components: list[Components]) -> None:
     """Raise if a component attaches to the same bus on two of its ports."""
     offenders: list[str] = []
     for c in components:
-        if not c.ports:
+        if len(c.ports) < 2:
             continue
-        static = c.static
-        bus_cols = [f"bus{p}" for p in c.ports if f"bus{p}" in static.columns]
-        if len(bus_cols) < 2:
+        buses = {
+            port: s for port in c.ports if not (s := _attached_buses(c, port)).empty
+        }
+        if len(buses) < 2:
             continue
-        buses = static[bus_cols]
-        if isinstance(buses.index, pd.MultiIndex):
-            buses = buses.droplevel(SCENARIO)
-            buses = buses[~buses.index.duplicated()]
-        for name, row in buses.iterrows():
-            seen: set[str] = set()
-            for bus in row:
-                bus = str(bus)
-                if bus == "":
-                    continue
-                if bus in seen:
-                    offenders.append(f"{c.name} {name} -> {bus}")
-                seen.add(bus)
+        frame = pd.DataFrame(buses)
+        ports = list(frame.columns)
+        for i, left in enumerate(ports):
+            for right in ports[i + 1 :]:
+                dup = frame[left].notna() & (frame[left] == frame[right])
+                offenders += [
+                    f"{c.name} {name} -> {bus}"
+                    for name, bus in frame.loc[dup, left].items()
+                ]
     if offenders:
         msg = f"component attached to the same bus on two ports: {'; '.join(offenders)}"
         raise DatarecordExportError(msg)
@@ -144,23 +160,6 @@ def _timestep_dtype_name(n: Network) -> str:
         return "Datetime"
     msg = f"unsupported snapshot dtype {level.dtype!r}; must be integer- or datetime-typed"
     raise DatarecordExportError(msg)
-
-
-def _check_snapshots(n: Network) -> None:
-    """Raise if a snapshot or timestep level is neither integer nor datetime."""
-    snapshots = n.snapshots
-    try:
-        if isinstance(snapshots, pd.MultiIndex):
-            _validate_level_dtype(
-                snapshots.get_level_values(PERIOD), PERIOD, datetime_allowed=False
-            )
-            _validate_level_dtype(
-                snapshots.get_level_values(TIMESTEP), TIMESTEP, datetime_allowed=True
-            )
-        else:
-            _validate_level_dtype(snapshots, TIMESTEP, datetime_allowed=True)
-    except ValueError as e:
-        raise DatarecordExportError(str(e)) from e
 
 
 def _scalar(value: Any) -> Any:
@@ -196,8 +195,9 @@ class NetworkRecord:
 
     Validates eagerly on construction and raises `DatarecordExportError` for a
     shape the record cannot hold: names claimed by more than one exported
-    type, a component on the same bus twice, or snapshots that are neither
-    integer- nor datetime-typed.
+    type, or a component on the same bus twice. Snapshots that are neither
+    integer- nor datetime-typed raise the same error, but only once `schema`
+    is accessed.
 
     Parameters
     ----------
@@ -217,7 +217,6 @@ class NetworkRecord:
         self._components = _exported_components(n)
         _check_collisions(self._components)
         _check_same_bus_twice(self._components)
-        _check_snapshots(n)
 
     # -- Record protocol ----------------------------------------------------
 
@@ -342,8 +341,6 @@ class NetworkRecord:
             wkt = frame["geometry"].to_wkt()
             frame = pd.DataFrame(frame)
             frame["geometry"] = wkt
-        if c.name == "SubNetwork" and "obj" in frame.columns:
-            frame = frame.drop(columns=["obj"])
         return frame
 
     @cached_property
@@ -354,29 +351,9 @@ class NetworkRecord:
         )
 
     def _connection_frame(self) -> pd.DataFrame:
-        frames = []
-        for c in self._components:
-            if not c.ports:
-                continue
-            static = c.static
-            for port in c.ports:
-                col = f"bus{port}"
-                if col not in static.columns:
-                    continue
-                buses = static[col]
-                if isinstance(buses.index, pd.MultiIndex):
-                    buses = buses.droplevel(SCENARIO)
-                    buses = buses[~buses.index.duplicated()]
-                attached = buses[buses.astype(str) != ""]
-                if attached.empty:
-                    continue
-                rows = (
-                    attached.rename(_BUS)
-                    .reset_index()
-                    .rename(columns={"name": _ENTITY})
-                )
-                rows[_ENTITY] = rows[_ENTITY].astype(str)
-                frames.append(rows[[_ENTITY, _BUS]])
+        frames = [
+            self._port_rows(c)[[_ENTITY, _BUS]] for c in self._components if c.ports
+        ]
         if not frames:
             return pd.DataFrame(columns=[_ENTITY, _BUS])
         return pd.concat(frames, ignore_index=True).drop_duplicates()
@@ -414,15 +391,25 @@ class NetworkRecord:
         if c is None:
             return {}
         multiperiod = isinstance(self.n.snapshots, pd.MultiIndex)
+        ports = port_columns(c)
         result: dict[str, Flags] = {}
         for attr in (*self._input_attrs(c), *self._output_attrs(c)):
+            per_port = [col for col, (stem, _port) in ports.items() if stem == attr]
+            source = per_port or [
+                x for x in [self._source_attr(c, attr)] if x is not None
+            ]
             varies: set[str] = set()
-            if attr in c.dynamic and not c.dynamic[attr].empty:
-                varies.add(TIMESTEP)
-                if multiperiod:
-                    varies.add(PERIOD)
-            broadcast = {TIMESTEP} if attr in c.static.columns else set()
-            breakpoints = attr in c.piecewise and not c.piecewise[attr].empty
+            broadcast: set[str] = set()
+            breakpoints = False
+            for col in source:
+                if col in c.dynamic and not c.dynamic[col].empty:
+                    varies.add(TIMESTEP)
+                    if multiperiod:
+                        varies.add(PERIOD)
+                if col in c.static.columns:
+                    broadcast.add(TIMESTEP)
+                if col in c.piecewise and not c.piecewise[col].empty:
+                    breakpoints = True
             result[attr] = Flags(
                 varies=frozenset(varies),
                 broadcast=frozenset(broadcast),
@@ -502,16 +489,8 @@ class NetworkRecord:
     def _port_rows(self, c: Components) -> pd.DataFrame:
         """`(entity, bus, attribute="port", breakpoint=None, value=<port label>)`."""
         frames = []
-        static = c.static
         for port in c.ports:
-            col = f"bus{port}"
-            if col not in static.columns:
-                continue
-            buses = static[col]
-            if isinstance(buses.index, pd.MultiIndex):
-                buses = buses.droplevel(SCENARIO)
-                buses = buses[~buses.index.duplicated()]
-            attached = buses[buses.astype(str) != ""]
+            attached = _attached_buses(c, port)
             if attached.empty:
                 continue
             rows = attached.rename(_BUS).reset_index().rename(columns={"name": _ENTITY})
@@ -541,23 +520,19 @@ class NetworkRecord:
     ) -> pd.DataFrame:
         """Connection-addressed long rows for a per-port attribute."""
         ports = port_columns(c)
-        static = c.static
         frames = []
         for col in columns:
             _stem, port = ports[col]
-            bus_col = f"bus{port}"
-            if bus_col not in static.columns:
+            buses = _attached_buses(c, port)
+            if buses.empty:
                 continue
             rows = self._stack_column(c, col)
             if rows is None or rows.empty:
                 continue
-            buses = static[bus_col]
-            if isinstance(buses.index, pd.MultiIndex):
-                buses = buses.droplevel(SCENARIO)
-                buses = buses[~buses.index.duplicated()]
+            buses = buses.copy()
             buses.index = buses.index.astype(str)
             rows[_BUS] = rows[_ENTITY].map(buses)
-            rows = rows[rows[_BUS].astype(str) != ""]
+            rows = rows[rows[_BUS].notna()]
             rows["attribute"] = attribute
             frames.append(rows)
         if not frames:
@@ -641,8 +616,6 @@ class NetworkRecord:
         wide = wide.rename_axis(columns=[SCENARIO, _ENTITY] if stochastic else _ENTITY)
         stacked = wide.stack(level=list(range(wide.columns.nlevels)), future_stack=True)
         long = stacked.rename("value").reset_index()
-        if isinstance(c.snapshots, pd.MultiIndex):
-            long = long.rename(columns={"timestep": TIMESTEP, "period": PERIOD})
-        else:
+        if not isinstance(c.snapshots, pd.MultiIndex):
             long = long.rename(columns={"snapshot": TIMESTEP})
         return long

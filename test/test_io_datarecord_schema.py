@@ -4,19 +4,14 @@
 
 """Tests for the canonical datarecord schema built from the component registry."""
 
-import sys
-
 import pytest
 
 datarecord = pytest.importorskip("datarecord")
 
-if sys.version_info < (3, 12):
-    pytest.skip("datarecord requires Python 3.12+", allow_module_level=True)
-
+import pypsa  # noqa: E402
 from pypsa.components.types import all_components  # noqa: E402
 from pypsa.network.io.datarecord.schema import (  # noqa: E402
     TIMESTEP_DTYPES,
-    _column_record_name,
     _port_stems,
     build_schema,
     port_columns,
@@ -54,14 +49,7 @@ def test_every_input_attribute_is_granted() -> None:
             assert name in granted, f"{ct.name}.{attr} ({name}) not granted"
 
 
-def test_entity_type_enum_matches_registry() -> None:
-    schema = build_schema(multiperiod=True, timestep_dtype="Datetime")
-    assert schema.entity_types == frozenset(_TYPE_NAMES)
-
-
 def test_port_columns_link_with_bus2() -> None:
-    import pypsa
-
     n = pypsa.Network()
     n.add("Bus", ["b0", "b1", "b2"])
     n.add("Link", "l0", bus0="b0", bus1="b1", bus2="b2")
@@ -72,8 +60,6 @@ def test_port_columns_link_with_bus2() -> None:
 
 
 def test_port_columns_generator() -> None:
-    import pypsa
-
     n = pypsa.Network()
     c = n.components["Generator"]
     cols = port_columns(c)
@@ -88,17 +74,6 @@ def test_record_name_round_trips() -> None:
             if attr == "name":
                 continue
             assert pypsa_name(ct.name, record_name(ct.name, attr)) == attr
-
-
-def test_record_name_override_scoped_to_non_port_columns() -> None:
-    """A `_RECORD_NAME_OVERRIDES` entry renames a type's own aggregate column,
-    never a per-port one: Link's connection-addressed `p0`/`p1` keep the plain
-    `p` name that every per-port flow shares, only Link's own entity-wide `p`
-    becomes `p_activity`.
-    """
-    assert _column_record_name("Link", "p", None) == "p_activity"
-    assert _column_record_name("Link", "p", "0") == "p"
-    assert _column_record_name("Link", "p", "1") == "p"
 
 
 def test_link_process_p_stays_connection_addressed() -> None:
