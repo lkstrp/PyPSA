@@ -110,6 +110,40 @@ n.export_to_hdf5("foo/bar.h5")
 n_import = pypsa.Network("foo/bar.h5")
 ```
 
+## datarecord
+
+<!-- md:badge-version v2.0.0 -->
+
+!!! warning "Experimental"
+
+    The datarecord format is experimental and its layout may change.
+
+[datarecord](https://energy-models.github.io/datarecord/) is a layered, parquet-based
+record format for energy system data, built around a schema shared across energy
+modelling tools rather than one owned by PyPSA. Before using it, install the
+`datarecord` extra on Python 3.12+ with `pip install pypsa[datarecord]`.
+
+To **export** a network, run [`n.export_to_datarecord()`][pypsa.network.io.NetworkIOMixin.export_to_datarecord]
+or get a lazy `Record` view without writing to disk with [`n.to_datarecord()`][pypsa.network.io.NetworkIOMixin.to_datarecord].
+To **import** a network, run [`n.import_from_datarecord()`][pypsa.network.io.NetworkIOMixin.import_from_datarecord],
+build one from an existing `Record` with [`pypsa.Network.from_datarecord()`][pypsa.network.io.NetworkIOMixin.from_datarecord],
+or simply provide the path in the [`pypsa.Network`][] constructor, which dispatches
+to datarecord for any directory holding a `manifest.json`.
+
+``` py
+n.export_to_datarecord("foo/bar")
+n_import = pypsa.Network("foo/bar")
+```
+
+!!! note
+
+    Component names must be unique across component types, since the datarecord
+    schema keys components by name alone. Snapshots must be integer- or
+    datetime-typed.
+
+`path` may also be a remote URI, resolved through datarecord's own connection rather
+than `cloudpathlib`.
+
 ## PYPOWER
 
 To **import** a network from the [PYPOWER](https://github.com/rwl/PYPOWER)  ppc dictionary/`numpy.array` format
