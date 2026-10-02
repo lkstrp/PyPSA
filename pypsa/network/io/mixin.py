@@ -25,7 +25,12 @@ from pypsa.descriptors import (
     _update_ports_component_attrs,
 )
 from pypsa.network.abstract import _NetworkABC
-from pypsa.network.io._common import _coerce_string_dtypes, _Exporter, _sort_attrs
+from pypsa.network.io._common import (
+    _coerce_string_dtypes,
+    _Exporter,
+    _legacy_snapshots,
+    _sort_attrs,
+)
 from pypsa.network.io.csv import _ExporterCSV, _ImporterCSV
 from pypsa.network.io.excel import _ExporterExcel, _ImporterExcel
 from pypsa.network.io.hdf5 import _ExporterHDF5, _ImporterHDF5
@@ -267,6 +272,9 @@ class NetworkIOMixin(_NetworkABC):
             pypsa_version = parse_version("0.0.0")
 
         for attr, val in attrs.items():
+            if attr == "now":
+                # Stray legacy network attribute, superseded by snapshot conversion below.
+                continue
             if attr in ["model", "objective", "objective_constant"]:
                 setattr(self, f"_{attr}", val)
             else:
@@ -299,6 +307,7 @@ class NetworkIOMixin(_NetworkABC):
                 df.columns
             ):
                 df = df.set_index(sorted(snapshot_levels))
+            df.index = _legacy_snapshots(df.index)
             self.set_snapshots(df.index)
 
             cols = ["objective", "stores", "generators"]

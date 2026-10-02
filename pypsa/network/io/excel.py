@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 import validators
-from pandas.errors import ParserError
 
 from pypsa.common import check_optional_dependency
 from pypsa.network.io._common import (
@@ -129,27 +128,7 @@ class _ImporterExcel(_Importer):
             df = self.sheets["snapshots"]
         except KeyError:
             return None
-        df = df.set_index(df.columns[0])
-        # Convert snapshot and timestep to datetime (if possible)
-        if (
-            "snapshot" in df
-            and df.snapshot.iloc[0] != "now"
-            and df.snapshot.dtype.kind != "i"
-        ):
-            try:
-                df["snapshot"] = pd.to_datetime(df.snapshot)
-            except (ValueError, ParserError):
-                pass
-        if (
-            "timestep" in df
-            and df.timestep.iloc[0] != "now"
-            and df.timestep.dtype.kind != "i"
-        ):
-            try:
-                df["timestep"] = pd.to_datetime(df.timestep)
-            except (ValueError, ParserError):
-                pass
-        return df
+        return df.set_index(df.columns[0])
 
     def get_investment_periods(self) -> pd.Series:
         """Get investment periods data."""

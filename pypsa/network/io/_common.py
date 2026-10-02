@@ -90,6 +90,56 @@ def _coerce_string_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _legacy_snapshots(index: pd.Index) -> pd.Index:
+    """Convert legacy snapshot labels to a form `set_snapshots` accepts.
+
+    Older PyPSA files may carry a single `"now"` label, string date labels, or
+    other arbitrary string labels. For a `MultiIndex` only the `timestep`
+    level is converted, period labels are left untouched so a non-integer
+    period still raises from `set_snapshots`.
+    """
+    if isinstance(index, pd.MultiIndex):
+        period = index.get_level_values("period")
+        timestep = _legacy_snapshot_level(index.get_level_values("timestep"), by=period)
+        return pd.MultiIndex.from_arrays([period, timestep], names=index.names)
+    return _legacy_snapshot_level(index)
+
+
+def _legacy_snapshot_level(level: pd.Index, by: pd.Index | None = None) -> pd.Index:
+    """Convert one snapshot index level to integer or datetime labels.
+
+    Integer and datetime levels pass through unchanged. A single `"now"`
+    label maps to `0`. Other labels are tried as dates, and if that fails,
+    replaced by positions (per `by` group, for a multi-period timestep level)
+    with a warning listing the original labels.
+    """
+    if level.dtype.kind in "iuM":
+        return level
+
+    if len(level) == 1 and level[0] == "now":
+        return pd.Index([0], name=level.name)
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            parsed = pd.to_datetime(pd.Index(level))
+        return pd.DatetimeIndex(parsed, name=level.name)
+    except (ValueError, TypeError):
+        pass
+
+    logger.warning(
+        "Converting legacy snapshot labels to positions: %s",
+        ", ".join(map(str, level)),
+    )
+    if by is None:
+        positions = range(len(level))
+    else:
+        positions = (
+            pd.Series(range(len(level))).groupby(by.to_numpy(), sort=False).cumcount()
+        )
+    return pd.Index(positions, name=level.name)
+
+
 def _get_safe_excel_sheet_name(sheet_name: str) -> str:
     """Convert sheet name to/from safe version for Excel's 31-character limit.
 
