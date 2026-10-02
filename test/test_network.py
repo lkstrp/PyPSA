@@ -828,6 +828,89 @@ def test_rename_component_names_of_non_bus_type_does_not_raise():
     assert f"{line}_renamed" in n.c.lines.static.index
 
 
+def test_rename_component_names_refuses_name_taken_by_other_type():
+    n = pypsa.Network()
+    n.add("Bus", "bus1")
+    n.add("Load", "load1", bus="bus1")
+
+    with pytest.raises(ValueError, match="Bus") as exc_info:
+        n.rename_component_names("Load", load1="bus1")
+    assert "Load" in str(exc_info.value)
+
+
+def test_rename_component_names_refuses_name_taken_within_same_type():
+    n = pypsa.Network()
+    n.add("Bus", "bus1")
+    n.add("Generator", ["gen1", "gen2"], bus="bus1")
+
+    with pytest.raises(ValueError):
+        n.rename_component_names("Generator", gen1="gen2")
+
+
+def test_rename_component_names_exempt_type_may_reuse_other_types_name():
+    n = pypsa.Network()
+    n.add("Bus", "bus1")
+    n.add("Generator", "gen1", bus="bus1")
+    n.add("Carrier", "wind")
+
+    n.rename_component_names("Carrier", wind="gen1")
+
+    assert "gen1" in n.c.carriers.static.index
+    assert "gen1" in n.c.generators.static.index
+
+
+def test_rename_component_names_keeps_piecewise_curve():
+    n = pypsa.Network()
+    n.add("Bus", "bus1")
+    n.add("Generator", "gen1", bus="bus1", marginal_cost={0.0: 1.0, 1.0: 2.0})
+
+    n.rename_component_names("Generator", gen1="gen2")
+
+    pw = n.c.generators.piecewise["marginal_cost"]
+    assert "gen1" not in pw.columns.get_level_values("name")
+    assert "gen2" in pw.columns.get_level_values("name")
+
+
+def test_rename_component_names_keeps_shape_reference():
+    from shapely.geometry import Point
+
+    n = pypsa.Network()
+    n.add("Bus", ["bus1", "bus2"])
+    n.add("Line", "line1", bus0="bus1", bus1="bus2", x=0.1, r=0.01)
+    n.add("Shape", "shape1", geometry=Point(0, 0), component="Line", idx="line1")
+
+    n.rename_component_names("Line", line1="line2")
+
+    assert n.c.shapes.static.loc["shape1", "idx"] == "line2"
+
+
+def test_rename_component_names_follows_slack_generator_reference():
+    n = pypsa.Network()
+    n.add("Bus", "bus1")
+    n.add("Generator", "gen1", bus="bus1")
+    n.c.buses.static.loc["bus1", "generator"] = "gen1"
+
+    n.rename_component_names("Generator", gen1="gen2")
+
+    assert n.c.buses.static.loc["bus1", "generator"] == "gen2"
+
+
+def test_rename_component_names_stochastic_leaves_scenario_label_unchanged():
+    n = pypsa.Network()
+    n.add("Bus", "bus1")
+    n.add("Generator", "gen1", bus="bus1")
+    n.set_scenarios(["gen1", "other"])
+
+    n.rename_component_names("Generator", gen1="gen2")
+
+    assert list(n.scenarios) == ["gen1", "other"]
+    idx = n.c.generators.static.index
+    assert idx.names == ["scenario", "name"]
+    assert ("gen1", "gen2") in idx
+    assert ("other", "gen2") in idx
+    assert "gen1" not in idx.get_level_values("name")
+
+
 def test_components_repr(ac_dc_network):
     n = ac_dc_network
 

@@ -16,10 +16,12 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+import pandas as pd
+
+from pypsa.network.names import NAMESPACE_ORDER, format_clashes, name_owners
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-    import pandas as pd
 
     from pypsa.definitions.structures import Dict
 
@@ -206,14 +208,21 @@ class ComponentsTransformMixin:
             msg = "New names must be strings."
             raise ValueError(msg)
 
-        # Rename component name definitions
-        self.static = self.static.rename(index=kwargs)
+        self._refuse_taken_target_names(kwargs)
+
+        # Rename component name definitions. `level="name"` renames the name
+        # level only, so a stochastic scenario label equal to a renamed name
+        # stays untouched.
+        self.static = self.static.rename(index=kwargs, level="name")
         for k, v in self.dynamic.items():  # Modify in place
-            self.dynamic[k] = v.rename(columns=kwargs)
+            self.dynamic[k] = v.rename(columns=kwargs, level="name")
+        for k, v in self.piecewise.items():  # Modify in place
+            self.piecewise[k] = v.rename(columns=kwargs, level="name")
 
         # Rename cross references in network (if attached to one)
         if self.attached:
-            for component in self.n_save.components:
+            n = self.n_save
+            for component in n.components:
                 col_name = self.name.lower()  # TODO: Generalize
                 cols = [
                     f"{col_name}{port}"
@@ -222,3 +231,46 @@ class ComponentsTransformMixin:
                 ]
                 if cols and not component.static.empty:
                     component.static[cols] = component.static[cols].replace(kwargs)
+
+            # Bus.generator names the slack generator attached to a bus.
+            if self.name == "Generator":
+                buses = n.components["Bus"].static
+                if not buses.empty and "generator" in buses.columns:
+                    buses["generator"] = buses["generator"].replace(kwargs)
+
+            # Shape.idx names the component a shape describes.
+            shapes = n.components["Shape"].static
+            if not shapes.empty:
+                own_shapes = shapes["component"] == self.name
+                if own_shapes.any():
+                    shapes.loc[own_shapes, "idx"] = shapes.loc[
+                        own_shapes, "idx"
+                    ].replace(kwargs)
+
+    def _refuse_taken_target_names(self, kwargs: dict[str, str]) -> None:
+        """Raise if a rename target name is already taken.
+
+        Every type refuses a target already present within its own type.
+        Namespace types (Generator, Bus, ...) additionally refuse a target
+        already held by another namespace type, since Carrier, Shape and the
+        other exempt types sit outside that namespace.
+        """
+        own_names = self.static.index
+        if isinstance(own_names, pd.MultiIndex):
+            own_names = own_names.get_level_values("name")
+        own_names = own_names.unique().difference(kwargs.keys())
+        same_type_clashes = own_names.intersection(kwargs.values())
+        if not same_type_clashes.empty:
+            names = ", ".join(sorted(same_type_clashes))
+            msg = f"name(s) already present in '{self.name}': {names}"
+            raise ValueError(msg)
+
+        if self.attached and self.name in NAMESPACE_ORDER:
+            targets = pd.Index(kwargs.values())
+            owners = name_owners(self.n_save, targets, exclude=self.name)
+            if owners:
+                owners = {
+                    name: sorted({self.name, *types}) for name, types in owners.items()
+                }
+                msg = format_clashes(owners)
+                raise ValueError(msg)
