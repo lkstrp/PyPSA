@@ -997,6 +997,56 @@ def test_deduplicate_names_follows_namespace_order():
     assert "a-Load" in n.c.loads.static.index
 
 
+def test_deduplicate_names_applies_renames_in_reverse_namespace_order():
+    """A later type's rename target can be a name an earlier type still holds.
+
+    Line "x" is renamed to "x-Line", but Load already holds "x-Line". Applying
+    renames in `NAMESPACE_ORDER` (Line, then Load) claims "x-Line" for Line
+    while Load still has it, which raises. Applying in reverse order frees
+    "x-Line" (Load renamed first) before Line claims it.
+    """
+    from pypsa.network.names import deduplicate_names
+
+    n = pypsa.Network()
+    n.add("Bus", ["x", "b1"])
+    n.add("Line", "x", bus0="x", bus1="b1")
+    n.add("Load", "x-Line", bus="x")
+
+    result = deduplicate_names(n)
+
+    assert result == {"Line": {"x": "x-Line"}, "Load": {"x-Line": "x-Line-Load"}}
+    assert "x-Line" in n.c.lines.static.index
+    assert "x-Line-Load" in n.c.loads.static.index
+
+
+def test_deduplicate_names_applies_three_type_chain_in_reverse_order():
+    """Same cascade one level deeper: Line, Load and Store all chain.
+
+    Line "x" clashes with Bus "x" and is renamed to "x-Line". Load already
+    holds "x-Line" and is renamed to "x-Line-Load". Store already holds
+    "x-Line-Load" and is renamed to "x-Line-Load-Store". Reverse order
+    (Store, then Load, then Line) frees each target before it is claimed.
+    """
+    from pypsa.network.names import deduplicate_names
+
+    n = pypsa.Network()
+    n.add("Bus", ["x", "b1"])
+    n.add("Line", "x", bus0="x", bus1="b1")
+    n.add("Load", "x-Line", bus="x")
+    n.add("Store", "x-Line-Load", bus="x")
+
+    result = deduplicate_names(n)
+
+    assert result == {
+        "Line": {"x": "x-Line"},
+        "Load": {"x-Line": "x-Line-Load"},
+        "Store": {"x-Line-Load": "x-Line-Load-Store"},
+    }
+    assert "x-Line" in n.c.lines.static.index
+    assert "x-Line-Load" in n.c.loads.static.index
+    assert "x-Line-Load-Store" in n.c.stores.static.index
+
+
 def test_deduplicate_names_keeps_shape_reference():
     from shapely.geometry import Point
 

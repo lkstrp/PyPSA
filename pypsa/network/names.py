@@ -92,8 +92,11 @@ def deduplicate_names(n: Network) -> dict[str, dict[str, str]]:
     names, or by a candidate already assigned to another name of the same
     type in this call.
 
-    Renames are applied one type at a time, in `NAMESPACE_ORDER`, so that by
-    the time a type's renames are applied, their target names are free.
+    Renames are applied one type at a time, in reverse `NAMESPACE_ORDER`, so
+    that by the time a type's renames are applied, their target names are
+    free. A later type's target can still be held by an earlier type at
+    planning time (e.g. Line renamed to "x-Line" while Load still holds
+    "x-Line"), and reverse order renames Load away first.
 
     Returns a map `{type: {old: new}}` for every type it renamed, empty if
     nothing clashed. Logs one warning with the total and per-type counts
@@ -127,7 +130,7 @@ def deduplicate_names(n: Network) -> dict[str, dict[str, str]]:
         taken.update(type_map.values())
 
     if renames:
-        for type_name, type_map in renames.items():
+        for type_name, type_map in reversed(renames.items()):
             n.rename_component_names(type_name, **type_map)
 
         total = sum(len(type_map) for type_map in renames.values())
