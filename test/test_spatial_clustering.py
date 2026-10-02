@@ -285,6 +285,32 @@ def test_aggregate_one_ports_no_time_series():
     assert C.n.storage_units_t.p.empty
 
 
+def test_clustering_deduplicates_line_names_clashing_with_bus_names():
+    """Clustered line names are sequential group ids, which can equal cluster labels.
+
+    Here the busmap groups buses into clusters "0", "1", "2", and the two
+    surviving inter-cluster lines land in groups "0" and "1", so both would
+    clash with same-named buses without deduplication.
+    """
+    n = pypsa.Network()
+    n.add("Bus", ["b0", "b1", "b2", "b3", "b4", "b5"])
+    n.add("Line", "L_a", bus0="b0", bus1="b1", x=0.1, r=0.01)
+    n.add("Line", "L_b", bus0="b2", bus1="b3", x=0.1, r=0.01)
+
+    busmap = pd.Series(
+        ["0", "1", "0", "2", "1", "2"],
+        index=["b0", "b1", "b2", "b3", "b4", "b5"],
+    )
+
+    C = get_clustering_from_busmap(n, busmap)
+
+    assert "0" in C.n.c.buses.static.index
+    assert "1" in C.n.c.buses.static.index
+    assert "0-Line" in C.n.c.lines.static.index
+    assert "1-Line" in C.n.c.lines.static.index
+    assert set(C.linemap.values).issubset(set(C.n.c.lines.static.index))
+
+
 def test_890():
     """
     See https://github.com/PyPSA/PyPSA/issues/890.

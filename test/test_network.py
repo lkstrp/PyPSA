@@ -1032,6 +1032,88 @@ def test_rename_component_names_dynamic_frame_with_unnamed_columns():
     assert "gen2" in n.c.generators.dynamic["p_min_pu"].columns
 
 
+def test_deduplicate_names_no_clash_returns_empty_without_warning(caplog):
+    from pypsa.network.names import deduplicate_names
+
+    n = pypsa.Network()
+    n.add("Bus", "bus1")
+    n.add("Generator", "gen1", bus="bus1")
+
+    with caplog.at_level("WARNING"):
+        result = deduplicate_names(n)
+
+    assert result == {}
+    assert caplog.records == []
+    assert "gen1" in n.c.generators.static.index
+
+
+def test_deduplicate_names_renames_clash_and_warns(caplog):
+    from pypsa.network.names import deduplicate_names
+
+    n = pypsa.Network()
+    n.add("Bus", "bus1")
+    n.add("Load", "bus1", bus="bus1")
+
+    with caplog.at_level("WARNING"):
+        result = deduplicate_names(n)
+
+    assert result == {"Load": {"bus1": "bus1-Load"}}
+    assert "bus1-Load" in n.c.loads.static.index
+    assert "bus1" in n.c.buses.static.index
+    assert len(caplog.records) == 1
+    assert "Load 1" in caplog.records[0].message
+    assert "Renamed 1 component names" in caplog.records[0].message
+
+
+def test_deduplicate_names_counter_path():
+    """A candidate name already present in the clashing type gets a counter suffix."""
+    from pypsa.network.names import deduplicate_names
+
+    n = pypsa.Network()
+    n.add("Bus", ["x", "x-Load"])
+    n.add("Load", "x", bus="x")
+
+    result = deduplicate_names(n)
+
+    assert result == {"Load": {"x": "x-Load-2"}}
+    assert "x-Load-2" in n.c.loads.static.index
+
+
+def test_deduplicate_names_follows_namespace_order():
+    """The first type in NAMESPACE_ORDER to claim a name keeps it.
+
+    Line comes before Load, so a Line named "a" keeps its name and the
+    clashing Load is the one renamed.
+    """
+    from pypsa.network.names import deduplicate_names
+
+    n = pypsa.Network()
+    n.add("Bus", ["b0", "b1"])
+    n.add("Line", "a", bus0="b0", bus1="b1")
+    n.add("Load", "a", bus="b0")
+
+    result = deduplicate_names(n)
+
+    assert "a" in n.c.lines.static.index
+    assert result == {"Load": {"a": "a-Load"}}
+    assert "a-Load" in n.c.loads.static.index
+
+
+def test_deduplicate_names_keeps_shape_reference():
+    from shapely.geometry import Point
+
+    from pypsa.network.names import deduplicate_names
+
+    n = pypsa.Network()
+    n.add("Bus", ["bus0", "bus1"])
+    n.add("Line", "bus0", bus0="bus0", bus1="bus1")
+    n.add("Shape", "shape1", geometry=Point(0, 0), component="Line", idx="bus0")
+
+    deduplicate_names(n)
+
+    assert n.c.shapes.static.loc["shape1", "idx"] == "bus0-Line"
+
+
 def test_components_repr(ac_dc_network):
     n = ac_dc_network
 

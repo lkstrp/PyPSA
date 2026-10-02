@@ -9,7 +9,7 @@ import pytest
 def test_optimize_losses(scipy_network, transmission_losses):
     n = scipy_network
     n.c.lines.static.s_max_pu = 0.7
-    n.c.lines.static.loc[["316", "527", "602"], "s_nom"] = 1715
+    n.c.lines.static.loc[["316-Line", "527", "602"], "s_nom"] = 1715
 
     with pytest.warns(FutureWarning, match="transmission_losses"):
         n.optimize(

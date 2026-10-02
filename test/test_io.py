@@ -792,6 +792,40 @@ def test_import_from_pandapower_network(
         assert len(n.c.shunt_impedances.static) == len(net.shunt)
 
 
+@pytest.mark.skipif(
+    sys.version_info < (3, 12), reason="Test requires Python 3.12 or higher"
+)
+def test_import_from_pandapower_network_deduplicates_clashing_names(caplog):
+    pp = pytest.importorskip("pandapower", reason="pandapower not installed")
+
+    net = pp.create_empty_network()
+    bus0 = pp.create_bus(net, vn_kv=20.0, name="clash")
+    bus1 = pp.create_bus(net, vn_kv=0.4, name="other")
+    pp.create_ext_grid(net, bus=bus0, vm_pu=1.02)
+    pp.create_load(net, bus=bus1, p_mw=0.1, q_mvar=0.05, name="clash")
+    pp.create_line(
+        net,
+        from_bus=bus0,
+        to_bus=bus1,
+        length_km=0.1,
+        std_type="NAYY 4x50 SE",
+        name="line",
+    )
+
+    n = pypsa.Network()
+    with caplog.at_level("WARNING"):
+        n.import_from_pandapower_net(net)
+
+    assert len(n.c.buses.static.index) == len(set(n.c.buses.static.index)) == 2
+    assert len(n.c.loads.static.index) == len(set(n.c.loads.static.index)) == 1
+    assert "clash" in n.c.buses.static.index
+    assert "clash" not in n.c.loads.static.index
+    assert "clash-Load" in n.c.loads.static.index
+    assert any(
+        "Renamed 1 component names" in record.message for record in caplog.records
+    )
+
+
 def test_io_time_dependent_efficiencies(tmpdir):
     n = pypsa.Network()
     s = [1, 0.95, 0.99]
@@ -944,13 +978,16 @@ class TestDatarecord:
     def _require_datarecord(self):
         pytest.importorskip("datarecord", reason="datarecord not installed")
 
-    def test_collision_raises(self, ac_dc_network):
-        # The raw fixture already collides, every Bus name is also a Load name.
+    def test_collision_raises(self):
         from pypsa.network.io.datarecord.record import DatarecordExportError
+
+        n = pypsa.Network()
+        n.add("Bus", "b0")
+        n.add("Load", "b0", bus="b0")
 
         with pytest.warns(UserWarning, match="experimental"):
             with pytest.raises(DatarecordExportError, match="Bus, Load"):
-                ac_dc_network.to_datarecord()
+                n.to_datarecord()
 
     def test_same_bus_twice_raises(self):
         from pypsa.network.io.datarecord.record import DatarecordExportError

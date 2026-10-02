@@ -13,7 +13,7 @@ def n_full(scipy_network):
 @pytest.fixture
 def n_filtered(scipy_network):
     n = scipy_network.copy()
-    n.c.lines.static.loc["2", "active"] = False
+    n.c.lines.static.loc["2-Line", "active"] = False
     return n
 
 
