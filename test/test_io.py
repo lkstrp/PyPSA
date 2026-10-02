@@ -155,6 +155,21 @@ class TestCSVDir:
             check_less_precise=True,
         )
 
+    def test_csv_io_deduplicates_clashing_shape_reference(self, tmp_path):
+        from shapely.geometry import Point
+
+        n = pypsa.Network()
+        n.add("Bus", ["bus0", "bus1"])
+        n.add("Line", "bus0", bus0="bus0", bus1="bus1")
+        n.add("Shape", "shape1", geometry=Point(0, 0), component="Line", idx="bus0")
+        fn = tmp_path / "csv_export"
+        n.export_to_csv_folder(fn)
+
+        m = pypsa.Network(fn)
+
+        assert "bus0-Line" in m.c.lines.static.index
+        assert m.c.shapes.static.loc["shape1", "idx"] == "bus0-Line"
+
     @pytest.mark.skipif(
         sys.version_info < (3, 13) or sys.platform not in ["linux", "darwin"],
         reason="Unstable test in CI. Remove with 1.0",
@@ -290,6 +305,18 @@ class TestNetcdf:
         assert_geodataframe_equal(
             m.c.shapes.static, n.c.shapes.static, check_less_precise=True
         )
+
+    def test_netcdf_io_deduplicates_clashing_names(self, tmp_path):
+        n = pypsa.Network()
+        n.add("Bus", ["x", "x-Load"])
+        n.add("Load", "x", bus="x")
+        fn = tmp_path / "netcdf_export.nc"
+        n.export_to_netcdf(fn)
+
+        m = pypsa.Network(fn)
+
+        assert set(m.c.buses.static.index) == {"x", "x-Load"}
+        assert "x-Load-2" in m.c.loads.static.index
 
     def test_netcdf_from_url(self):
         url = "https://data.pypsa.org/networks/examples/latest/scigrid_de.nc"
