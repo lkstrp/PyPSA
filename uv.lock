@@ -889,21 +889,12 @@ wheels = [
 [[package]]
 name = "datarecord"
 version = "0.0.0"
-source = { editable = "datarecord-repo" }
+source = { git = "https://github.com/lkstrp/datarecord?branch=dev-lkstrp#8d90e97fee6629009a368efb22643f9beee96047" }
 dependencies = [
     { name = "duckdb", marker = "python_full_version >= '3.12'" },
     { name = "narwhals", marker = "python_full_version >= '3.12'" },
     { name = "pydantic", marker = "python_full_version >= '3.12'" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "duckdb", specifier = ">=1.5.4" },
-    { name = "narwhals", specifier = ">=2,!=2.21.0,<3" },
-    { name = "pydantic", specifier = ">=2" },
-    { name = "pypsa", marker = "extra == 'pypsa'" },
-]
-provides-extras = ["pypsa"]
 
 [[package]]
 name = "debugpy"
@@ -3889,8 +3880,8 @@ requires-dist = [
     { name = "cloudpathlib", marker = "extra == 'cloudpath'" },
     { name = "coverage", marker = "extra == 'dev'" },
     { name = "coverage", marker = "extra == 'test'" },
-    { name = "datarecord", marker = "python_full_version >= '3.12' and extra == 'datarecord'", editable = "datarecord-repo" },
-    { name = "datarecord", marker = "python_full_version >= '3.12' and extra == 'dev'", editable = "datarecord-repo" },
+    { name = "datarecord", marker = "python_full_version >= '3.12' and extra == 'datarecord'", git = "https://github.com/lkstrp/datarecord?branch=dev-lkstrp" },
+    { name = "datarecord", marker = "python_full_version >= '3.12' and extra == 'dev'", git = "https://github.com/lkstrp/datarecord?branch=dev-lkstrp" },
     { name = "deprecation" },
     { name = "geopandas", specifier = ">=0.9" },
     { name = "gurobipy", marker = "extra == 'docs'" },

@@ -122,6 +122,11 @@ and pandapower.
 
 Unit testing is also performed in the CI/CD pipeline, similar to the linting and formatting.
 
+The optional `datarecord` extra is pinned in `uv.lock` to the `dev-lkstrp` branch of
+[lkstrp/datarecord](https://github.com/lkstrp/datarecord). To develop against a local
+clone instead, run tests with `uv run --with-editable ./datarecord-repo pytest ...`.
+This local override is never committed.
+
 ## Documentation
 
 The documentation is built with [MkDocs](https://www.mkdocs.org) and the
