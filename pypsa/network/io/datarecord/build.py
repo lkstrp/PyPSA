@@ -20,7 +20,9 @@ from pypsa.descriptors import _update_ports_component_attrs
 from pypsa.network.io.datarecord.record import NETWORK_ATTRS
 from pypsa.network.io.datarecord.schema import (
     _BUS,
+    _DIM_ATTRS,
     _ENTITY,
+    DIM_TYPES,
     ENTITY_TYPE,
     PERIOD,
     PERIOD_WEIGHTINGS,
@@ -358,6 +360,87 @@ def _add_outputs(
             n._import_series_from_df(wide, ctype, attr, overwrite=True)
 
 
+def _import_entity_type(
+    n: Network,
+    ctype: str,
+    record: Record,
+    ports: pd.DataFrame,
+    cache: dict[str, pd.DataFrame],
+    *,
+    multiperiod: bool,
+    stochastic: bool,
+) -> None:
+    """Import one entity type's wide frame, then its series and piecewise data."""
+    c = n.components[ctype]
+    static = _collect(record.entity_types[ctype])
+    if ENTITY_TYPE in static.columns:
+        static = static.drop(columns=[ENTITY_TYPE])
+    if not stochastic and "scenario" in static.columns:
+        static = static.drop(columns=["scenario"])
+    # An all-default column is written all-NaN, with no concrete dtype for
+    # parquet to record. Dropping it here lets `_import_components_from_df`
+    # recreate it from the registry default, with the right dtype.
+    all_null = [
+        col for col in static.columns if col != _ENTITY and static[col].isna().all()
+    ]
+    static = static.drop(columns=all_null)
+    static = _pivot_buses(static, ports, c)
+    if stochastic:
+        static = _broadcast_scenarios(static, n.scenarios)
+
+    if ctype in ("Link", "Process"):
+        _update_ports_component_attrs(n, where=static.columns, c_name=ctype)
+
+    _add_component_type(
+        n, c, static, cache, record, multiperiod=multiperiod, stochastic=stochastic
+    )
+    _add_outputs(n, c, cache, record, multiperiod=multiperiod)
+
+
+def _dim_attr_values(rows: pd.DataFrame, dim: str) -> pd.Series:
+    """One carrier/shape attribute's long rows as a `(scenario, name)`-indexed value series.
+
+    The read path returns rows duplicated on `(scenario, dim)` for these,
+    dropped here before indexing.
+    """
+    return rows.drop_duplicates(subset=[SCENARIO, dim]).set_index([SCENARIO, dim])[
+        "value"
+    ]
+
+
+def _add_dim_component(
+    n: Network, ctype: str, dim: str, record: Record, *, stochastic: bool
+) -> None:
+    """Rebuild Carrier or Shape from its `dim` axis frame.
+
+    A non-stochastic frame carries every attribute as a column already; a
+    stochastic one carries only the names, overlaid here with each
+    attribute's per-scenario long rows.
+    """
+    if dim not in record.dims:
+        return
+    frame = _collect(record.dims[dim])
+    if frame.empty:
+        return
+    if stochastic:
+        frame = _broadcast_scenarios(frame, n.scenarios)
+        for attr in _DIM_ATTRS[dim]:
+            if attr not in record.attributes:
+                continue
+            rows = _collect(record.attributes[attr])
+            if rows.empty:
+                continue
+            values = _dim_attr_values(rows, dim)
+            key = pd.MultiIndex.from_frame(frame[[SCENARIO, dim]])
+            frame[attr] = key.map(values)
+        frame = frame.set_index([SCENARIO, dim])
+        frame.index.names = ["scenario", "name"]
+    else:
+        frame = frame.set_index(dim)
+        frame.index.name = "name"
+    n._import_components_from_df(frame, ctype)
+
+
 def network_from_record(record: Record, n: Network) -> None:
     """Fill an empty `n` in place from `record`.
 
@@ -379,33 +462,30 @@ def network_from_record(record: Record, n: Network) -> None:
     )
     cache: dict[str, pd.DataFrame] = {}
 
-    remaining = sorted(set(record.entity_types) - {"Bus", "Carrier"})
-    ctypes = [t for t in ("Bus", "Carrier") if t in record.entity_types] + remaining
-
-    for ctype in ctypes:
-        c = n.components[ctype]
-        static = _collect(record.entity_types[ctype])
-        if ENTITY_TYPE in static.columns:
-            static = static.drop(columns=[ENTITY_TYPE])
-        if not stochastic and "scenario" in static.columns:
-            static = static.drop(columns=["scenario"])
-        # An all-default column is written all-NaN, with no concrete dtype for
-        # parquet to record. Dropping it here lets `_import_components_from_df`
-        # recreate it from the registry default, with the right dtype.
-        all_null = [
-            col for col in static.columns if col != _ENTITY and static[col].isna().all()
-        ]
-        static = static.drop(columns=all_null)
-        static = _pivot_buses(static, ports, c)
-        if stochastic:
-            static = _broadcast_scenarios(static, n.scenarios)
-
-        if ctype in ("Link", "Process"):
-            _update_ports_component_attrs(n, where=static.columns, c_name=ctype)
-
-        _add_component_type(
-            n, c, static, cache, record, multiperiod=multiperiod, stochastic=stochastic
+    if "Bus" in record.entity_types:
+        _import_entity_type(
+            n,
+            "Bus",
+            record,
+            ports,
+            cache,
+            multiperiod=multiperiod,
+            stochastic=stochastic,
         )
-        _add_outputs(n, c, cache, record, multiperiod=multiperiod)
+    for dim, ctype in DIM_TYPES.items():
+        _add_dim_component(n, ctype, dim, record, stochastic=stochastic)
+
+    for ctype in sorted(set(record.entity_types) - {"Bus"}):
+        _import_entity_type(
+            n,
+            ctype,
+            record,
+            ports,
+            cache,
+            multiperiod=multiperiod,
+            stochastic=stochastic,
+        )
+
+    n._broadcast_standard_types()
 
     n._broadcast_standard_types()

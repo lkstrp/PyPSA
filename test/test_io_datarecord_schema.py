@@ -19,7 +19,14 @@ from pypsa.network.io.datarecord.schema import (  # noqa: E402
     record_name,
 )
 
-_EXCLUDED_TYPES = {"LineType", "TransformerType", "SubNetwork", "Network"}
+_EXCLUDED_TYPES = {
+    "LineType",
+    "TransformerType",
+    "SubNetwork",
+    "Network",
+    "Carrier",
+    "Shape",
+}
 _TYPE_NAMES = sorted(
     {ct.name for ct in all_components.values() if ct.name not in _EXCLUDED_TYPES}
 )
@@ -29,13 +36,25 @@ _TYPE_NAMES = sorted(
 @pytest.mark.parametrize("timestep_dtype", TIMESTEP_DTYPES)
 def test_build_schema_constructs(multiperiod: bool, timestep_dtype: str) -> None:
     """All four (multiperiod, timestep_dtype) variants validate cleanly."""
-    schema = build_schema(multiperiod=multiperiod, timestep_dtype=timestep_dtype)
+    schema = build_schema(
+        multiperiod=multiperiod, timestep_dtype=timestep_dtype, stochastic=False
+    )
     assert schema.entity_types == frozenset(_TYPE_NAMES)
+    assert "Carrier" not in schema.entity_types
+    assert "Shape" not in schema.entity_types
+
+
+def test_build_schema_stochastic_constructs() -> None:
+    """A stochastic schema also validates cleanly, carrier/shape dims included."""
+    schema = build_schema(multiperiod=False, timestep_dtype="Int64", stochastic=True)
+    assert schema.entity_types == frozenset(_TYPE_NAMES)
+    assert schema.attributes["co2_emissions"].dims == frozenset({"carrier", "scenario"})
+    assert schema.attributes["geometry"].dims == frozenset({"shape", "scenario"})
 
 
 def test_every_input_attribute_is_granted() -> None:
     """Every registry input attribute of every entity type is granted by that type."""
-    schema = build_schema(multiperiod=False, timestep_dtype="Int64")
+    schema = build_schema(multiperiod=False, timestep_dtype="Int64", stochastic=False)
     for ct in all_components.values():
         if ct.name in _EXCLUDED_TYPES:
             continue
@@ -80,7 +99,7 @@ def test_link_process_p_stays_connection_addressed() -> None:
     """Link/Process's per-port `p` joins the record-wide, connection-addressed
     `p` spec; only their own entity-wide `p` is renamed to `p_activity`.
     """
-    schema = build_schema(multiperiod=False, timestep_dtype="Int64")
+    schema = build_schema(multiperiod=False, timestep_dtype="Int64", stochastic=False)
     assert schema.results["p"].dims == frozenset({"connection", "scenario", "timestep"})
     assert schema.results["p_activity"].dims == frozenset(
         {"entity", "scenario", "timestep"}
@@ -92,7 +111,7 @@ def test_efficiency_is_connection_addressed_across_types() -> None:
     resolve to one connection-addressed spec, not Generator's entity-addressed
     one winning by declaration order.
     """
-    schema = build_schema(multiperiod=False, timestep_dtype="Int64")
+    schema = build_schema(multiperiod=False, timestep_dtype="Int64", stochastic=False)
     spec = schema.attributes["efficiency"]
     assert spec.dims == frozenset({"connection", "scenario", "timestep"})
 
@@ -101,11 +120,11 @@ def test_varying_attributes_carry_period_when_multiperiod() -> None:
     """A varying attribute's `dims` gains `period` once the schema is
     multiperiod, so its long rows carry both coordinates.
     """
-    schema = build_schema(multiperiod=True, timestep_dtype="Int64")
+    schema = build_schema(multiperiod=True, timestep_dtype="Int64", stochastic=False)
     spec = schema.attributes["p_max_pu"]
     assert spec.dims == frozenset({"entity", "scenario", "timestep", "period"})
 
-    schema = build_schema(multiperiod=False, timestep_dtype="Int64")
+    schema = build_schema(multiperiod=False, timestep_dtype="Int64", stochastic=False)
     spec = schema.attributes["p_max_pu"]
     assert spec.dims == frozenset({"entity", "scenario", "timestep"})
 
@@ -117,7 +136,9 @@ def test_snapshot_weightings_stay_on_the_timestep_axis_when_multiperiod() -> Non
     `dims/timestep.parquet` rather than becoming a long attribute.
     """
     for multiperiod in (True, False):
-        schema = build_schema(multiperiod=multiperiod, timestep_dtype="Int64")
+        schema = build_schema(
+            multiperiod=multiperiod, timestep_dtype="Int64", stochastic=False
+        )
         spec = schema.attributes["objective"]
         assert spec.dims == frozenset({"timestep"})
         assert not spec.varying
