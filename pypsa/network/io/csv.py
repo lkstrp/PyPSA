@@ -12,7 +12,6 @@ import re
 from typing import TYPE_CHECKING
 
 import pandas as pd
-from pandas.errors import ParserError
 
 from pypsa.network.io._common import _Exporter, _Importer
 
@@ -77,33 +76,12 @@ class _ImporterCSV(_Importer):
         fn = self.path.joinpath("snapshots.csv")
         if not fn.is_file():
             return None
-        df = pd.read_csv(
+        return pd.read_csv(
             fn,
             index_col=0,
             encoding=self.encoding,
             quotechar=self.quotechar,
         )
-
-        # Convert snapshot and timestep to datetime (if possible)
-        if (
-            "snapshot" in df
-            and df.snapshot.iloc[0] != "now"
-            and df.snapshot.dtype.kind != "i"
-        ):
-            try:
-                df["snapshot"] = pd.to_datetime(df.snapshot)
-            except (ValueError, ParserError):
-                pass
-        if (
-            "timestep" in df
-            and df.timestep.iloc[0] != "now"
-            and df.timestep.dtype.kind != "i"
-        ):
-            try:
-                df["timestep"] = pd.to_datetime(df.timestep)
-            except (ValueError, ParserError):
-                pass
-        return df
 
     def get_investment_periods(self) -> pd.Series:
         """Get investment periods data."""
