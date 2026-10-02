@@ -158,9 +158,12 @@ class TestCSVDir:
     def test_csv_io_deduplicates_clashing_shape_reference(self, tmp_path):
         from shapely.geometry import Point
 
+        from pypsa.network.names import unchecked_names
+
         n = pypsa.Network()
         n.add("Bus", ["bus0", "bus1"])
-        n.add("Line", "bus0", bus0="bus0", bus1="bus1")
+        with unchecked_names(n):
+            n.add("Line", "bus0", bus0="bus0", bus1="bus1")
         n.add("Shape", "shape1", geometry=Point(0, 0), component="Line", idx="bus0")
         fn = tmp_path / "csv_export"
         n.export_to_csv_folder(fn)
@@ -307,9 +310,12 @@ class TestNetcdf:
         )
 
     def test_netcdf_io_deduplicates_clashing_names(self, tmp_path):
+        from pypsa.network.names import unchecked_names
+
         n = pypsa.Network()
         n.add("Bus", ["x", "x-Load"])
-        n.add("Load", "x", bus="x")
+        with unchecked_names(n):
+            n.add("Load", "x", bus="x")
         fn = tmp_path / "netcdf_export.nc"
         n.export_to_netcdf(fn)
 
@@ -1007,10 +1013,12 @@ class TestDatarecord:
 
     def test_collision_raises(self):
         from pypsa.network.io.datarecord.record import DatarecordExportError
+        from pypsa.network.names import unchecked_names
 
         n = pypsa.Network()
         n.add("Bus", "b0")
-        n.add("Load", "b0", bus="b0")
+        with unchecked_names(n):
+            n.add("Load", "b0", bus="b0")
 
         with pytest.warns(UserWarning, match="experimental"):
             with pytest.raises(DatarecordExportError, match="Bus, Load"):

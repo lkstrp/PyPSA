@@ -153,6 +153,76 @@ def test_add_duplicated_names(n_5bus):
         )
 
 
+def test_add_refuses_name_taken_by_other_type():
+    """`n.add` refuses a name already held by another namespace type."""
+    n = pypsa.Network()
+    n.add("Bus", "b")
+
+    with pytest.raises(ValueError, match="b: Bus, Load"):
+        n.add("Load", "b", bus="b")
+
+
+def test_add_allows_generator_named_like_its_carrier():
+    """Carrier sits outside the namespace, so naming conventions stay legal."""
+    n = pypsa.Network()
+    n.add("Bus", "bus1")
+    n.add("Generator", "solar", bus="bus1", carrier="solar")
+    n.add("Carrier", "solar")
+
+    added = n.c.carriers.add_missing_carriers()
+    assert set(added) == {"AC"}
+    n.sanitize()
+
+    assert "solar" in n.c.generators.static.index
+    assert "solar" in n.c.carriers.static.index
+
+
+def test_add_allows_shape_named_like_bus():
+    from shapely.geometry import Point
+
+    n = pypsa.Network()
+    n.add("Bus", "bus1")
+    n.add("Shape", "bus1", geometry=Point(0, 0), component="Bus", idx="bus1")
+
+    assert "bus1" in n.c.shapes.static.index
+
+
+def test_determine_network_topology_names_sub_networks_like_numeric_buses():
+    """SubNetwork is exempt, so sub-network names "0", "1" may equal bus names."""
+    n = pypsa.Network()
+    n.add("Bus", ["0", "1"])
+
+    n.determine_network_topology()
+
+    assert set(n.c.sub_networks.static.index) == {"0", "1"}
+
+
+def test_merge_refuses_clashing_names():
+    n1 = pypsa.Network()
+    n1.add("Bus", "bus1")
+
+    n2 = pypsa.Network()
+    n2.add("Bus", "bus2")
+    n2.add("Load", "bus1", bus="bus2")
+
+    with pytest.raises(ValueError, match="bus1"):
+        n1.merge(n2)
+
+
+def test_add_stochastic_checks_name_level_not_scenario_label():
+    """The namespace check applies to the name level, never a scenario label."""
+    n = pypsa.Network()
+    n.add("Bus", "bus1")
+    n.set_scenarios(["bus1", "other"])
+
+    with pytest.raises(ValueError, match="bus1: Bus, Load"):
+        n.add("Load", "bus1", bus="bus1")
+
+    # "other" is a scenario label, not a component name, so this is fine.
+    n.add("Load", "other", bus="bus1")
+    assert "other" in n.c.loads.static.index.get_level_values("name")
+
+
 @pytest.mark.parametrize("slicer", [0, slice(0, 1), slice(None, None)])
 def test_add_static(n_5bus, slicer):
     buses = n_5bus.c.buses.static.index[slicer]
@@ -1048,11 +1118,12 @@ def test_deduplicate_names_no_clash_returns_empty_without_warning(caplog):
 
 
 def test_deduplicate_names_renames_clash_and_warns(caplog):
-    from pypsa.network.names import deduplicate_names
+    from pypsa.network.names import deduplicate_names, unchecked_names
 
     n = pypsa.Network()
     n.add("Bus", "bus1")
-    n.add("Load", "bus1", bus="bus1")
+    with unchecked_names(n):
+        n.add("Load", "bus1", bus="bus1")
 
     with caplog.at_level("WARNING"):
         result = deduplicate_names(n)
@@ -1067,11 +1138,12 @@ def test_deduplicate_names_renames_clash_and_warns(caplog):
 
 def test_deduplicate_names_counter_path():
     """A candidate name already present in the clashing type gets a counter suffix."""
-    from pypsa.network.names import deduplicate_names
+    from pypsa.network.names import deduplicate_names, unchecked_names
 
     n = pypsa.Network()
     n.add("Bus", ["x", "x-Load"])
-    n.add("Load", "x", bus="x")
+    with unchecked_names(n):
+        n.add("Load", "x", bus="x")
 
     result = deduplicate_names(n)
 
@@ -1085,12 +1157,13 @@ def test_deduplicate_names_follows_namespace_order():
     Line comes before Load, so a Line named "a" keeps its name and the
     clashing Load is the one renamed.
     """
-    from pypsa.network.names import deduplicate_names
+    from pypsa.network.names import deduplicate_names, unchecked_names
 
     n = pypsa.Network()
     n.add("Bus", ["b0", "b1"])
     n.add("Line", "a", bus0="b0", bus1="b1")
-    n.add("Load", "a", bus="b0")
+    with unchecked_names(n):
+        n.add("Load", "a", bus="b0")
 
     result = deduplicate_names(n)
 
@@ -1107,11 +1180,12 @@ def test_deduplicate_names_applies_renames_in_reverse_namespace_order():
     while Load still has it, which raises. Applying in reverse order frees
     "x-Line" (Load renamed first) before Line claims it.
     """
-    from pypsa.network.names import deduplicate_names
+    from pypsa.network.names import deduplicate_names, unchecked_names
 
     n = pypsa.Network()
     n.add("Bus", ["x", "b1"])
-    n.add("Line", "x", bus0="x", bus1="b1")
+    with unchecked_names(n):
+        n.add("Line", "x", bus0="x", bus1="b1")
     n.add("Load", "x-Line", bus="x")
 
     result = deduplicate_names(n)
@@ -1129,11 +1203,12 @@ def test_deduplicate_names_applies_three_type_chain_in_reverse_order():
     "x-Line-Load" and is renamed to "x-Line-Load-Store". Reverse order
     (Store, then Load, then Line) frees each target before it is claimed.
     """
-    from pypsa.network.names import deduplicate_names
+    from pypsa.network.names import deduplicate_names, unchecked_names
 
     n = pypsa.Network()
     n.add("Bus", ["x", "b1"])
-    n.add("Line", "x", bus0="x", bus1="b1")
+    with unchecked_names(n):
+        n.add("Line", "x", bus0="x", bus1="b1")
     n.add("Load", "x-Line", bus="x")
     n.add("Store", "x-Line-Load", bus="x")
 
@@ -1152,11 +1227,12 @@ def test_deduplicate_names_applies_three_type_chain_in_reverse_order():
 def test_deduplicate_names_keeps_shape_reference():
     from shapely.geometry import Point
 
-    from pypsa.network.names import deduplicate_names
+    from pypsa.network.names import deduplicate_names, unchecked_names
 
     n = pypsa.Network()
     n.add("Bus", ["bus0", "bus1"])
-    n.add("Line", "bus0", bus0="bus0", bus1="bus1")
+    with unchecked_names(n):
+        n.add("Line", "bus0", bus0="bus0", bus1="bus1")
     n.add("Shape", "shape1", geometry=Point(0, 0), component="Line", idx="bus0")
 
     deduplicate_names(n)

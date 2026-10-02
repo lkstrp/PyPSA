@@ -1407,7 +1407,7 @@ class OptimizationAccessor(OptimizationAbstractMixin):
             buses,
             suffix,
             bus=buses,
-            carrier="load",
+            carrier="Load",
             sign=sign,
             marginal_cost=marginal_cost,
             p_nom=p_nom,
