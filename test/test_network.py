@@ -1013,6 +1013,25 @@ def test_rename_component_names_stochastic_leaves_scenario_label_unchanged():
     assert "gen1" not in idx.get_level_values("name")
 
 
+def test_rename_component_names_dynamic_frame_with_unnamed_columns():
+    """A dynamic frame assigned directly keeps `columns.name = None`.
+
+    Renaming must not require a `name` level on flat columns.
+    """
+    n = pypsa.Network()
+    n.snapshots = [0, 1]
+    n.add("Bus", "bus1")
+    n.add("Generator", "gen1", bus="bus1")
+
+    df = pd.DataFrame({"gen1": [0.1, 0.2]}, index=n.snapshots)
+    assert df.columns.name is None
+    n.c.generators.dynamic["p_min_pu"] = df
+
+    n.rename_component_names("Generator", gen1="gen2")
+
+    assert "gen2" in n.c.generators.dynamic["p_min_pu"].columns
+
+
 def test_components_repr(ac_dc_network):
     n = ac_dc_network
 
