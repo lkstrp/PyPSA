@@ -948,31 +948,31 @@ def test_multiperiod_stochastic_tiny_default():
         n = pypsa.Network(snapshots=range(2))
         n.investment_periods = [2020, 2030]
         n.add("Carrier", "elec")
-        n.add("Bus", 1, carrier="elec")
+        n.add("Bus", "bus1", carrier="elec")
         n.add(
             "Generator",
-            1,
-            bus=1,
+            "gen1",
+            bus="bus1",
             p_nom_extendable=True,
             capital_cost=10,
             carrier="elec",
         )
-        n.add("Load", 1, bus=1, p_set=100)
+        n.add("Load", "load1", bus="bus1", p_set=100)
 
         n.set_scenarios({"high": 0.5, "low": 0.5})
         n.c.loads.dynamic.p_set = pd.DataFrame(
             index=n.snapshots,
             columns=pd.MultiIndex.from_product(
-                [n.scenarios, ["1"]], names=["scenario", "name"]
+                [n.scenarios, ["load1"]], names=["scenario", "name"]
             ),
         )
-        n.c.loads.dynamic.p_set.loc[:, ("high", "1")] = [
+        n.c.loads.dynamic.p_set.loc[:, ("high", "load1")] = [
             120,
             120,
             120,
             120,
         ]
-        n.c.loads.dynamic.p_set.loc[:, ("low", "1")] = [80, 80, 80, 80]
+        n.c.loads.dynamic.p_set.loc[:, ("low", "load1")] = [80, 80, 80, 80]
 
         status, _ = n.optimize(multi_investment_periods=True)
         assert status == "ok"
@@ -986,8 +986,8 @@ def test_multiperiod_stochastic_tiny_default():
         )
 
         # Capacities should be identical across scenarios in stochastic optimization
-        high_cap = n.c.generators.static.p_nom_opt.loc[("high", "1")]
-        low_cap = n.c.generators.static.p_nom_opt.loc[("low", "1")]
+        high_cap = n.c.generators.static.p_nom_opt.loc[("high", "gen1")]
+        low_cap = n.c.generators.static.p_nom_opt.loc[("low", "gen1")]
         assert high_cap == low_cap
 
 
@@ -1000,30 +1000,30 @@ def test_multiperiod_stochastic_tiny_build_year():
         n = pypsa.Network(snapshots=range(2))
         n.investment_periods = [2020, 2030]
         n.add("Carrier", "elec")
-        n.add("Bus", 1, carrier="elec")
+        n.add("Bus", "bus1", carrier="elec")
         n.add(
             "Generator",
-            1,
-            bus=1,
+            "gen1",
+            bus="bus1",
             p_nom_extendable=True,
             capital_cost=10,
             build_year=2020,
             carrier="elec",
         )
-        n.add("Load", 1, bus=1, p_set=100)
+        n.add("Load", "load1", bus="bus1", p_set=100)
 
         n.set_scenarios({"scenario": 1.0})  # Single scenario
         n.c.loads.dynamic.p_set = pd.DataFrame(
             index=n.snapshots,
             columns=pd.MultiIndex.from_product(
-                [n.scenarios, ["1"]], names=["scenario", "name"]
+                [n.scenarios, ["load1"]], names=["scenario", "name"]
             ),
         )
-        n.c.loads.dynamic.p_set.loc[:, ("scenario", "1")] = [100, 100, 100, 100]
+        n.c.loads.dynamic.p_set.loc[:, ("scenario", "load1")] = [100, 100, 100, 100]
 
         status, _ = n.optimize(multi_investment_periods=True)
         assert status == "ok"
-        assert n.c.generators.static.p_nom_opt.loc[("scenario", "1")] == 100
+        assert n.c.generators.static.p_nom_opt.loc[("scenario", "gen1")] == 100
 
 
 def test_multiperiod_stochastic_tiny_infeasible():
@@ -1035,26 +1035,26 @@ def test_multiperiod_stochastic_tiny_infeasible():
         n = pypsa.Network(snapshots=range(2))
         n.investment_periods = [2020, 2030]
         n.add("Carrier", "elec")
-        n.add("Bus", 1, carrier="elec")
+        n.add("Bus", "bus1", carrier="elec")
         n.add(
             "Generator",
-            1,
-            bus=1,
+            "gen1",
+            bus="bus1",
             p_nom_extendable=True,
             capital_cost=10,
             build_year=2030,
             carrier="elec",
         )
-        n.add("Load", 1, bus=1, p_set=100)
+        n.add("Load", "load1", bus="bus1", p_set=100)
 
         n.set_scenarios({"scenario": 1.0})
         n.c.loads.dynamic.p_set = pd.DataFrame(
             index=n.snapshots,
             columns=pd.MultiIndex.from_product(
-                [n.scenarios, ["1"]], names=["scenario", "name"]
+                [n.scenarios, ["load1"]], names=["scenario", "name"]
             ),
         )
-        n.c.loads.dynamic.p_set.loc[:, ("scenario", "1")] = [100, 100, 100, 100]
+        n.c.loads.dynamic.p_set.loc[:, ("scenario", "load1")] = [100, 100, 100, 100]
 
         # This should fail because generator only available in 2030 but load exists in 2020
         with pytest.raises(ValueError):

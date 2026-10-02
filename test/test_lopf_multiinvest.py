@@ -167,9 +167,9 @@ def test_active_assets(n):
 def test_tiny_with_default():
     n = pypsa.Network(snapshots=range(2))
     n.investment_periods = [2020, 2030]
-    n.add("Bus", 1)
-    n.add("Generator", 1, bus=1, p_nom_extendable=True, capital_cost=10)
-    n.add("Load", 1, bus=1, p_set=100)
+    n.add("Bus", "bus1")
+    n.add("Generator", "gen1", bus="bus1", p_nom_extendable=True, capital_cost=10)
+    n.add("Load", "load1", bus="bus1", p_set=100)
     status, _ = n.optimize(**kwargs)
     assert status == "ok"
     assert n.c.generators.static.p_nom_opt.item() == 100
@@ -178,11 +178,16 @@ def test_tiny_with_default():
 def test_tiny_with_build_year():
     n = pypsa.Network(snapshots=range(2))
     n.investment_periods = [2020, 2030]
-    n.add("Bus", 1)
+    n.add("Bus", "bus1")
     n.add(
-        "Generator", 1, bus=1, p_nom_extendable=True, capital_cost=10, build_year=2020
+        "Generator",
+        "gen1",
+        bus="bus1",
+        p_nom_extendable=True,
+        capital_cost=10,
+        build_year=2020,
     )
-    n.add("Load", 1, bus=1, p_set=100)
+    n.add("Load", "load1", bus="bus1", p_set=100)
     status, _ = n.optimize(**kwargs)
     assert status == "ok"
     assert n.c.generators.static.p_nom_opt.item() == 100
@@ -191,11 +196,16 @@ def test_tiny_with_build_year():
 def test_tiny_infeasible():
     n = pypsa.Network(snapshots=range(2))
     n.investment_periods = [2020, 2030]
-    n.add("Bus", 1)
+    n.add("Bus", "bus1")
     n.add(
-        "Generator", 1, bus=1, p_nom_extendable=True, capital_cost=10, build_year=2030
+        "Generator",
+        "gen1",
+        bus="bus1",
+        p_nom_extendable=True,
+        capital_cost=10,
+        build_year=2030,
     )
-    n.add("Load", 1, bus=1, p_set=100)
+    n.add("Load", "load1", bus="bus1", p_set=100)
     with pytest.raises(ValueError):
         status, cond = n.optimize(**kwargs)
 

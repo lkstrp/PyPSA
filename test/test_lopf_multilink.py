@@ -16,15 +16,15 @@ def n():
     n.add("Load", "load", bus="bus", p_set=1.0)
 
     n.add("Bus", "transport")
-    n.add("Load", "transport", bus="transport", p_set=1.0)
+    n.add("Load", "transport load", bus="transport", p_set=1.0)
 
     n.add("Bus", "diesel")
 
-    n.add("Store", "diesel", bus="diesel", e_cyclic=True, e_nom=1000.0)
+    n.add("Store", "diesel store", bus="diesel", e_cyclic=True, e_nom=1000.0)
 
     n.add("Bus", "hydrogen")
 
-    n.add("Store", "hydrogen", bus="hydrogen", e_cyclic=True, e_nom=1000.0)
+    n.add("Store", "hydrogen store", bus="hydrogen", e_cyclic=True, e_nom=1000.0)
 
     n.add(
         "Link", "electrolysis", p_nom=2.0, efficiency=0.8, bus0="bus", bus1="hydrogen"
@@ -49,13 +49,15 @@ def n():
     n.add("Bus", "co2 atmosphere", carrier="co2")
 
     # NB: can also be negative
-    n.add("Store", "co2 atmosphere", e_nom=1000, e_min_pu=-1, bus="co2 atmosphere")
+    n.add(
+        "Store", "co2 atmosphere store", e_nom=1000, e_min_pu=-1, bus="co2 atmosphere"
+    )
 
     # this tracks CO2 stored, e.g. underground
     n.add("Bus", "co2 stored")
 
     # NB: can also be negative
-    n.add("Store", "co2 stored", e_nom=1000, e_min_pu=-1, bus="co2 stored")
+    n.add("Store", "co2 stored store", e_nom=1000, e_min_pu=-1, bus="co2 stored")
 
     n.add(
         "Link",
@@ -81,7 +83,7 @@ def n():
 
     n.add("Bus", "gas")
 
-    n.add("Store", "gas", e_initial=50, e_nom=50, marginal_cost=20, bus="gas")
+    n.add("Store", "gas store", e_initial=50, e_nom=50, marginal_cost=20, bus="gas")
 
     n.add(
         "Link",
@@ -116,7 +118,7 @@ def n():
 
         n.add(
             "Store",
-            f"biomass{str(i)}",
+            f"biomass{str(i)} store",
             bus=f"biomass{str(i)}",
             e_nom_extendable=True,
             marginal_cost=biomass_marginal_cost[i],
@@ -127,7 +129,7 @@ def n():
         # simultaneously empties and refills co2 atmosphere
         n.add(
             "Link",
-            f"biomass{str(i)}",
+            f"biomass{str(i)} link",
             bus0=f"biomass{str(i)}",
             bus1="bus",
             p_nom_extendable=True,
