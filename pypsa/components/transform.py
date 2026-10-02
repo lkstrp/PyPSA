@@ -212,12 +212,13 @@ class ComponentsTransformMixin:
 
         # Rename component name definitions. `level="name"` renames the name
         # level only, so a stochastic scenario label equal to a renamed name
-        # stays untouched.
+        # stays untouched. Flat columns have no such level, so pass level
+        # only for a MultiIndex (the stochastic case).
         self.static = self.static.rename(index=kwargs, level="name")
-        for k, v in self.dynamic.items():  # Modify in place
-            self.dynamic[k] = v.rename(columns=kwargs, level="name")
-        for k, v in self.piecewise.items():  # Modify in place
-            self.piecewise[k] = v.rename(columns=kwargs, level="name")
+        for store in (self.dynamic, self.piecewise):
+            for k, v in store.items():  # Modify in place
+                level = "name" if isinstance(v.columns, pd.MultiIndex) else None
+                store[k] = v.rename(columns=kwargs, level=level)
 
         # Rename cross references in network (if attached to one)
         if self.attached:
