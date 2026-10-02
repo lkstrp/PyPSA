@@ -22,13 +22,62 @@ def test_storage_hvdc():
     assert not n.c.buses.static.empty
 
 
+def test_ac_dc_meshed_deduplicates_load_names(caplog):
+    """Loads share their bus's name, so every Load clashes and is renamed."""
+    buses = {
+        "London",
+        "Norwich",
+        "Norwich DC",
+        "Manchester",
+        "Bremen",
+        "Bremen DC",
+        "Frankfurt",
+        "Norway",
+        "Norway DC",
+    }
+    with caplog.at_level("WARNING"):
+        n = pypsa.examples.ac_dc_meshed()
+
+    assert set(n.c.buses.static.index) == buses
+    assert "London-Load" in n.c.loads.static.index
+    rename_warnings = [r for r in caplog.records if "Renamed" in r.message]
+    assert len(rename_warnings) == 1
+    assert "Load 6" in rename_warnings[0].message
+
+
 def test_scigrid_de():
     n = pypsa.examples.scigrid_de()
     assert not n.c.buses.static.empty
 
 
+def test_scigrid_de_deduplicates_clashing_names(caplog):
+    """Lines, transformers and loads are numbered like buses, so they clash."""
+    with caplog.at_level("WARNING"):
+        n = pypsa.examples.scigrid_de()
+
+    rename_warnings = [r for r in caplog.records if "Renamed" in r.message]
+    assert len(rename_warnings) == 1
+    assert "Line 486, Transformer 96, Load 489" in rename_warnings[0].message
+
+    buses = n.c.buses.static.index
+    assert not any(b.endswith(("-Line", "-Transformer", "-Load")) for b in buses)
+    assert "1" in buses
+
+    p_set = n.c.loads.dynamic["p_set"]
+    assert "1-Load" in p_set.columns
+    assert p_set["1-Load"].notna().any()
+
+
 def test_model_energy():
     n = pypsa.examples.model_energy()
+    assert not n.c.buses.static.empty
+
+
+def test_model_energy_has_no_name_clashes(caplog):
+    with caplog.at_level("WARNING"):
+        n = pypsa.examples.model_energy()
+
+    assert not any("Renamed" in r.message for r in caplog.records)
     assert not n.c.buses.static.empty
 
 
