@@ -20,6 +20,7 @@ from pandas import Series
 
 from pypsa.common import _scenarios_not_implemented
 from pypsa.geo import haversine_pts
+from pypsa.network.names import deduplicate_names
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable
@@ -1074,6 +1075,10 @@ class SpatialClusteringMixin:
                     clustered._import_series_from_df(df, "Link", attr)
 
         clustered.add("Carrier", n.c.carriers.static.index, **n.c.carriers.static)
+
+        renames = deduplicate_names(clustered)
+        if "Line" in renames:
+            linemap = linemap.replace(renames["Line"])
 
         clustered.determine_network_topology()
 

@@ -14,7 +14,7 @@ def test_optimize_security_constrained(scipy_network):
     n = scipy_network
 
     # There are some infeasibilities without line extensions
-    for line_name in ["316", "527", "602"]:
+    for line_name in ["316-Line", "527", "602"]:
         n.c.lines.static.loc[line_name, "s_nom"] = 1200
 
     # Choose the contingencies

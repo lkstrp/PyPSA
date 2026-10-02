@@ -15,7 +15,7 @@ def test_pf_distributed_slack(scipy_network):
 
     # There are some infeasibilities without line extensions
     n.c.lines.static.s_max_pu = 0.7
-    n.c.lines.static.loc[["316", "527", "602"], "s_nom"] = 1715
+    n.c.lines.static.loc[["316-Line", "527", "602"], "s_nom"] = 1715
     n.c.storage_units.static.state_of_charge_initial = 0.0
 
     n.optimize(n.snapshots)

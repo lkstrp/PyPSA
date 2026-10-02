@@ -14,7 +14,7 @@ def sub_network_full(scipy_network):
 @pytest.fixture
 def sub_network_filtered(scipy_network):
     n = scipy_network.copy()
-    n.c.lines.static.loc["2", "active"] = False
+    n.c.lines.static.loc["2-Line", "active"] = False
     return n.c.sub_networks.static.obj.iloc[0]
 
 

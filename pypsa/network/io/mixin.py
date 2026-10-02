@@ -30,6 +30,7 @@ from pypsa.network.io.csv import _ExporterCSV, _ImporterCSV
 from pypsa.network.io.excel import _ExporterExcel, _ImporterExcel
 from pypsa.network.io.hdf5 import _ExporterHDF5, _ImporterHDF5
 from pypsa.network.io.netcdf import _ExporterNetCDF, _ImporterNetCDF
+from pypsa.network.names import deduplicate_names
 from pypsa.version import __version_base__
 
 try:
@@ -354,6 +355,7 @@ class NetworkIOMixin(_NetworkABC):
 
             imported_components.append(list_name)
 
+        deduplicate_names(cast("Network", self))
         self._broadcast_standard_types()
 
         logger.info(
@@ -1320,6 +1322,8 @@ class NetworkIOMixin(_NetworkABC):
                 **pdf[self.components[component]["list_name"]],
             )
 
+        deduplicate_names(cast("Network", self))
+
         self.c.generators.static["control"] = self.c.generators.static.bus.map(
             self.c.buses.static["control"]
         )
@@ -1536,6 +1540,8 @@ class NetworkIOMixin(_NetworkABC):
             "ShuntImpedance",
         ]:
             self.add(component_name, d[component_name].index, **d[component_name])
+
+        deduplicate_names(cast("Network", self))
 
         # amalgamate buses connected by closed switches
 
