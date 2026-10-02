@@ -20,7 +20,7 @@ from pandas import Series
 
 from pypsa.common import _scenarios_not_implemented
 from pypsa.geo import haversine_pts
-from pypsa.network.names import deduplicate_names
+from pypsa.network.names import deduplicate_names, unchecked_names
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable
@@ -964,117 +964,120 @@ class SpatialClusteringMixin:
 
         clustered = n.__class__()
 
-        clustered.add("Bus", buses.index, **buses)
-        clustered.add("Line", lines.index, **lines)
+        with unchecked_names(clustered):
+            clustered.add("Bus", buses.index, **buses)
+            clustered.add("Line", lines.index, **lines)
 
-        # Carry forward global constraints to clustered n.
-        clustered.c.global_constraints.static = n.c.global_constraints.static
+            # Carry forward global constraints to clustered n.
+            clustered.c.global_constraints.static = n.c.global_constraints.static
 
-        if with_time:
-            clustered.set_snapshots(n.snapshots)
-            clustered.snapshot_weightings = n.snapshot_weightings.copy()
-            if not n.investment_periods.empty:
-                clustered.set_investment_periods(n.investment_periods)
-                clustered.investment_period_weightings = (
-                    n.investment_period_weightings.copy()
-                )
-            for attr, df in lines_t.items():
-                if not df.empty:
-                    clustered._import_series_from_df(df, "Line", attr)
-
-        one_port_components = n.one_port_components.copy()
-
-        if aggregate_generators_weighted:
-            # TODO: Remove this in favour of the more general approach below.
-            one_port_components.remove("Generator")
-            generators, generators_dynamic = aggregateoneport(
-                n,
-                busmap,
-                "Generator",
-                carriers=aggregate_generators_carriers,
-                buses=aggregate_generators_buses,
-                with_time=with_time,
-                custom_strategies=generator_strategies,
-            )
-            clustered.add("Generator", generators.index, **generators)
             if with_time:
-                for attr, df in generators_dynamic.items():
+                clustered.set_snapshots(n.snapshots)
+                clustered.snapshot_weightings = n.snapshot_weightings.copy()
+                if not n.investment_periods.empty:
+                    clustered.set_investment_periods(n.investment_periods)
+                    clustered.investment_period_weightings = (
+                        n.investment_period_weightings.copy()
+                    )
+                for attr, df in lines_t.items():
                     if not df.empty:
-                        clustered._import_series_from_df(df, "Generator", attr)
+                        clustered._import_series_from_df(df, "Line", attr)
 
-        for one_port in aggregate_one_ports:
-            one_port_components.remove(one_port)
-            new_static, new_dynamic = aggregateoneport(
-                n,
-                busmap,
-                component=one_port,
-                with_time=with_time,
-                custom_strategies=one_port_strategies.get(one_port, {}),
-            )
-            clustered.add(one_port, new_static.index, **new_static)
-            for attr, df in new_dynamic.items():
-                if not df.empty:
-                    clustered._import_series_from_df(df, one_port, attr)
+            one_port_components = n.one_port_components.copy()
 
-        # Collect remaining one ports
+            if aggregate_generators_weighted:
+                # TODO: Remove this in favour of the more general approach below.
+                one_port_components.remove("Generator")
+                generators, generators_dynamic = aggregateoneport(
+                    n,
+                    busmap,
+                    "Generator",
+                    carriers=aggregate_generators_carriers,
+                    buses=aggregate_generators_buses,
+                    with_time=with_time,
+                    custom_strategies=generator_strategies,
+                )
+                clustered.add("Generator", generators.index, **generators)
+                if with_time:
+                    for attr, df in generators_dynamic.items():
+                        if not df.empty:
+                            clustered._import_series_from_df(df, "Generator", attr)
 
-        for c in n.components:
-            if c.name not in one_port_components:
-                continue
-            remaining_one_port_data = c.static.assign(
-                bus=c.static.bus.map(busmap)
-            ).dropna(subset=["bus"])
-            clustered.add(
-                c.name, remaining_one_port_data.index, **remaining_one_port_data
-            )
+            for one_port in aggregate_one_ports:
+                one_port_components.remove(one_port)
+                new_static, new_dynamic = aggregateoneport(
+                    n,
+                    busmap,
+                    component=one_port,
+                    with_time=with_time,
+                    custom_strategies=one_port_strategies.get(one_port, {}),
+                )
+                clustered.add(one_port, new_static.index, **new_static)
+                for attr, df in new_dynamic.items():
+                    if not df.empty:
+                        clustered._import_series_from_df(df, one_port, attr)
 
-        if with_time:
+            # Collect remaining one ports
+
             for c in n.components:
                 if c.name not in one_port_components:
                     continue
-                for attr, df in c.dynamic.items():
+                remaining_one_port_data = c.static.assign(
+                    bus=c.static.bus.map(busmap)
+                ).dropna(subset=["bus"])
+                clustered.add(
+                    c.name, remaining_one_port_data.index, **remaining_one_port_data
+                )
+
+            if with_time:
+                for c in n.components:
+                    if c.name not in one_port_components:
+                        continue
+                    for attr, df in c.dynamic.items():
+                        if not df.empty:
+                            clustered._import_series_from_df(df, c.name, attr)
+
+            bus_mappings = {
+                "bus0": n.c.links.static.bus0.map(busmap),
+                "bus1": n.c.links.static.bus1.map(busmap),
+            }
+
+            # Also add additional ports if they exist
+            for port in n.c.links.additional_ports:
+                col = f"bus{port}"
+                if col in n.c.links.static.columns:
+                    bus_mappings[col] = n.c.links.static[col].map(busmap)
+
+            new_links = (
+                n.c.links.static.assign(**bus_mappings)
+                .dropna(
+                    subset=["bus0", "bus1"]
+                )  # Only require bus0 and bus1 to be non-NaN
+                .loc[lambda df: df.bus0 != df.bus1]
+            )
+
+            new_links["length"] = np.where(
+                new_links.length.notnull() & (new_links.length > 0),
+                line_length_factor
+                * haversine_pts(
+                    buses.loc[new_links["bus0"], ["x", "y"]],
+                    buses.loc[new_links["bus1"], ["x", "y"]],
+                ),
+                0,
+            )
+            if scale_link_capital_costs:
+                new_links["capital_cost"] *= (
+                    new_links.length / n.c.links.static.length
+                ).fillna(1)
+
+            clustered.add("Link", new_links.index, **new_links)
+
+            if with_time:
+                for attr, df in n.c.links.dynamic.items():
                     if not df.empty:
-                        clustered._import_series_from_df(df, c.name, attr)
+                        clustered._import_series_from_df(df, "Link", attr)
 
-        bus_mappings = {
-            "bus0": n.c.links.static.bus0.map(busmap),
-            "bus1": n.c.links.static.bus1.map(busmap),
-        }
-
-        # Also add additional ports if they exist
-        for port in n.c.links.additional_ports:
-            col = f"bus{port}"
-            if col in n.c.links.static.columns:
-                bus_mappings[col] = n.c.links.static[col].map(busmap)
-
-        new_links = (
-            n.c.links.static.assign(**bus_mappings)
-            .dropna(subset=["bus0", "bus1"])  # Only require bus0 and bus1 to be non-NaN
-            .loc[lambda df: df.bus0 != df.bus1]
-        )
-
-        new_links["length"] = np.where(
-            new_links.length.notnull() & (new_links.length > 0),
-            line_length_factor
-            * haversine_pts(
-                buses.loc[new_links["bus0"], ["x", "y"]],
-                buses.loc[new_links["bus1"], ["x", "y"]],
-            ),
-            0,
-        )
-        if scale_link_capital_costs:
-            new_links["capital_cost"] *= (
-                new_links.length / n.c.links.static.length
-            ).fillna(1)
-
-        clustered.add("Link", new_links.index, **new_links)
-
-        if with_time:
-            for attr, df in n.c.links.dynamic.items():
-                if not df.empty:
-                    clustered._import_series_from_df(df, "Link", attr)
-
-        clustered.add("Carrier", n.c.carriers.static.index, **n.c.carriers.static)
+            clustered.add("Carrier", n.c.carriers.static.index, **n.c.carriers.static)
 
         renames = deduplicate_names(clustered)
         if "Line" in renames:

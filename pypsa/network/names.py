@@ -17,11 +17,14 @@ taken target name.
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import pandas as pd
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
+
     from pypsa import Network
 
 logger = logging.getLogger(__name__)
@@ -43,9 +46,14 @@ NAMESPACE_ORDER: tuple[str, ...] = (
 
 
 def _name_level(index: pd.Index) -> pd.Index:
-    """Return the unique names held by a static index, dropping any scenario level."""
+    """Return the unique names held by a static index, dropping any scenario level.
+
+    Uses the last level by position, not by the label "name", since
+    `check_names_free` sees incoming indices before `_import_components_from_df`
+    has normalized the MultiIndex level names.
+    """
     if isinstance(index, pd.MultiIndex):
-        return index.get_level_values("name").unique()
+        return index.get_level_values(-1).unique()
     return index
 
 
@@ -80,6 +88,39 @@ def format_clashes(owners: dict[str, list[str]]) -> str:
         f"{name}: {', '.join(types)}" for name, types in sorted(owners.items())
     )
     return f"names claimed by more than one component type: {detail}"
+
+
+def check_names_free(n: Network, cls_name: str, names: pd.Index) -> None:
+    """Raise if any of `names` is already held by another namespace type.
+
+    No-op for exempt types (Carrier, Shape, SubNetwork, the standard types)
+    and while the check is suspended with `unchecked_names`. Only the `name`
+    level is checked for a MultiIndex, never scenario labels.
+    """
+    if cls_name not in NAMESPACE_ORDER:
+        return
+    if getattr(n, "_names_unchecked", 0):
+        return
+    owners = name_owners(n, _name_level(names), exclude=cls_name)
+    if owners:
+        owners = {name: sorted({cls_name, *types}) for name, types in owners.items()}
+        msg = format_clashes(owners)
+        raise ValueError(msg)
+
+
+@contextmanager
+def unchecked_names(n: Network) -> Generator[None, None, None]:
+    """Suspend `check_names_free` for `n` for the duration of the context.
+
+    Reentrant, counted with a private flag on the network. Importers and
+    clustering use this while they build a network that may clash, then call
+    `deduplicate_names` after leaving the context.
+    """
+    n._names_unchecked = getattr(n, "_names_unchecked", 0) + 1
+    try:
+        yield
+    finally:
+        n._names_unchecked -= 1
 
 
 def deduplicate_names(n: Network) -> dict[str, dict[str, str]]:

@@ -56,6 +56,20 @@ def test_add_missing_carriers_stochastic():
             assert (scenario, carrier) in n.c.carriers.static.index
 
 
+def test_add_missing_carriers_generator_named_like_its_carrier():
+    """Carrier sits outside the namespace, so a generator may share its carrier's name."""
+    n = Network()
+    n.add("Bus", "bus1")
+    n.add("Generator", "solar", bus="bus1", carrier="solar")
+
+    added = n.c.carriers.add_missing_carriers()
+
+    assert set(added) == {"AC", "solar"}
+    n.sanitize()
+    assert "solar" in n.c.generators.static.index
+    assert "solar" in n.c.carriers.static.index
+
+
 def test_assign_colors():
     """Test assign_colors: basic, specific carriers, palette, overwrite, partial."""
     import pytest

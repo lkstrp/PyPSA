@@ -30,7 +30,7 @@ from pypsa.network.io.csv import _ExporterCSV, _ImporterCSV
 from pypsa.network.io.excel import _ExporterExcel, _ImporterExcel
 from pypsa.network.io.hdf5 import _ExporterHDF5, _ImporterHDF5
 from pypsa.network.io.netcdf import _ExporterNetCDF, _ImporterNetCDF
-from pypsa.network.names import deduplicate_names
+from pypsa.network.names import check_names_free, deduplicate_names, unchecked_names
 from pypsa.version import __version_base__
 
 try:
@@ -326,34 +326,35 @@ class NetworkIOMixin(_NetworkABC):
         imported_components = []
 
         # now read in other components; make sure buses and carriers come first
-        for component in ["Bus", "Carrier"] + sorted(
-            self.all_components - {"Bus", "Carrier"}
-        ):
-            list_name = self.components[component]["list_name"]
+        with unchecked_names(cast("Network", self)):
+            for component in ["Bus", "Carrier"] + sorted(
+                self.all_components - {"Bus", "Carrier"}
+            ):
+                list_name = self.components[component]["list_name"]
 
-            df = importer.get_static(list_name)
-            if df is None:
-                if component == "Bus":
-                    logger.error("Error, no buses found")
-                    return
-                continue
+                df = importer.get_static(list_name)
+                if df is None:
+                    if component == "Bus":
+                        logger.error("Error, no buses found")
+                        return
+                    continue
 
-            if component in ("Link", "Process"):
-                _update_ports_component_attrs(self, where=df, c_name=component)
+                if component in ("Link", "Process"):
+                    _update_ports_component_attrs(self, where=df, c_name=component)
 
-            self._import_components_from_df(df, component)
+                self._import_components_from_df(df, component)
 
-            if not skip_time:
-                for attr, df in importer.get_series(list_name):
-                    df.set_index(self.snapshots, inplace=True)
-                    self._import_series_from_df(df, component, attr)
+                if not skip_time:
+                    for attr, df in importer.get_series(list_name):
+                        df.set_index(self.snapshots, inplace=True)
+                        self._import_series_from_df(df, component, attr)
 
-            for attr, df in importer.get_piecewise(list_name):
-                self._import_piecewise_from_df(df, component, attr)
+                for attr, df in importer.get_piecewise(list_name):
+                    self._import_piecewise_from_df(df, component, attr)
 
-            logger.debug(getattr(self, list_name))
+                logger.debug(getattr(self, list_name))
 
-            imported_components.append(list_name)
+                imported_components.append(list_name)
 
         deduplicate_names(cast("Network", self))
         self._broadcast_standard_types()
@@ -720,6 +721,8 @@ class NetworkIOMixin(_NetworkABC):
             if not isinstance(df.index, pd.MultiIndex)
             else df.index.set_levels([level.astype(str) for level in df.index.levels])
         )
+
+        check_names_free(cast("Network", self), cls_name, df.index)
 
         # Fill nan values with default values
         df = df.fillna(attrs["default"].to_dict())
@@ -1308,19 +1311,20 @@ class NetworkIOMixin(_NetworkABC):
         # 1 startup shutdown n x1 y1 ... xn yn
         # 2 startup shutdown n c(n-1) ... c0
 
-        for component in [
-            "Bus",
-            "Load",
-            "Generator",
-            "Line",
-            "Transformer",
-            "ShuntImpedance",
-        ]:
-            self.add(
-                component,
-                pdf[self.components[component]["list_name"]].index,
-                **pdf[self.components[component]["list_name"]],
-            )
+        with unchecked_names(cast("Network", self)):
+            for component in [
+                "Bus",
+                "Load",
+                "Generator",
+                "Line",
+                "Transformer",
+                "ShuntImpedance",
+            ]:
+                self.add(
+                    component,
+                    pdf[self.components[component]["list_name"]].index,
+                    **pdf[self.components[component]["list_name"]],
+                )
 
         deduplicate_names(cast("Network", self))
 
@@ -1531,15 +1535,16 @@ class NetworkIOMixin(_NetworkABC):
         )
         d["ShuntImpedance"] = d["ShuntImpedance"].fillna(0)
 
-        for component_name in [
-            "Bus",
-            "Load",
-            "Generator",
-            "Line",
-            "Transformer",
-            "ShuntImpedance",
-        ]:
-            self.add(component_name, d[component_name].index, **d[component_name])
+        with unchecked_names(cast("Network", self)):
+            for component_name in [
+                "Bus",
+                "Load",
+                "Generator",
+                "Line",
+                "Transformer",
+                "ShuntImpedance",
+            ]:
+                self.add(component_name, d[component_name].index, **d[component_name])
 
         deduplicate_names(cast("Network", self))
 

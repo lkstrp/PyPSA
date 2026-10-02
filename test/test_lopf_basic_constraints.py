@@ -691,3 +691,14 @@ def test_line_voltage_angle_no_bound():
     n2.calculate_dependent_values()
     slack = n2.c.lines.static.x_pu_eff["l01"] * n2.lines_t.p0.loc[0, "l01"]
     assert np.isclose(unconstrained, slack)
+
+
+def test_add_load_shedding_sets_carrier():
+    """Load shedding generators carry the carrier they add, not a bare string."""
+    n = pypsa.Network()
+    n.add("Bus", ["b0", "b1"])
+
+    n.optimize.add_load_shedding()
+
+    assert (n.c.generators.static["carrier"] == "Load").all()
+    assert "Load" in n.c.carriers.static.index

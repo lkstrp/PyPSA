@@ -95,6 +95,9 @@ class Network(
     _optimize_window: SnapshotWindow | None
     iteration: int
 
+    # Namespace enforcement
+    _names_unchecked: int
+
     # ----------------
     # Dunder methods
     # ----------------
@@ -165,6 +168,7 @@ class Network(
         self._multi_invest: int = 0
         self._committable_big_m: float | None = None
         self._optimize_window: SnapshotWindow | None = None
+        self._names_unchecked: int = 0
 
         # Initialize accessors
         self.optimize: OptimizationAccessor = OptimizationAccessor(self)
