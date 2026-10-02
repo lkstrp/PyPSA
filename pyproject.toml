@@ -119,10 +119,8 @@ include = ["pypsa"]
 [tool.setuptools.package-data]
 "pypsa" = ["py.typed"]
 
-# Development-only path pin for the datarecord clone. Replace with a
-# `datarecord>=0.1` version pin before merging.
 [tool.uv.sources]
-datarecord = { path = "datarecord-repo", editable = true }
+datarecord = { git = "https://github.com/lkstrp/datarecord", branch = "dev-lkstrp" }
 
 # Pytest settings
 
