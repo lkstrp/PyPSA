@@ -27,12 +27,6 @@ except ImportError:
     excel_installed = False
 
 
-# `pypsa.examples`' cached networks still carry a stray `now` scalar from an
-# older PyPSA version. CSV/netCDF preserve it via `dir(n)` reflection but the
-# datarecord network-attribute allow-list does not, by design.
-_LEGACY_EXAMPLE_ATTRS = ["now"]
-
-
 def custom_equals(n1, n2, ignore_attrs=None):
     """
     Custom equality check that allows certain attributes to be different.
@@ -962,43 +956,39 @@ def _canonical_dynamic_order(n: pypsa.Network) -> pypsa.Network:
     return n
 
 
-def _record_twin(n: pypsa.Network) -> pypsa.Network:
-    """A copy of `n` with every cross-type name collision renamed away.
+def _drop_carrier_shape_custom_attrs(n: pypsa.Network) -> pypsa.Network:
+    """Drop non-registry Carrier/Shape static columns, in place.
 
-    A record scopes names across every component type, while PyPSA scopes
-    them per type, so a name two types share is renamed on every claiming
-    type, `<Type> <name>`, before the network can be exported. `rename` can
-    also turn a plain-index dtype (e.g. object) into pandas' `str` dtype,
-    which is restored here too.
+    The datarecord format round-trips a component's registry-declared
+    attributes only; a custom column, such as the shipped `ac-dc-meshed`
+    example's `marginal_cost` on Carrier, has no schema slot for a dim
+    attribute yet. Shape's own `type` column stays: it is registry-declared,
+    just excluded from the record, so the import recreates it with its
+    default like any other unwritten attribute.
     """
-    n = n.copy()
-    dtypes = {
-        c.name: c.static.index.dtype
-        for c in n.components
-        if not c.static.empty and not isinstance(c.static.index, pd.MultiIndex)
-    }
-    owners: dict[str, list[str]] = {}
-    for c in n.components:
-        if c.static.empty:
-            continue
-        index = c.static.index
-        names = (
-            index.get_level_values("name")
-            if isinstance(index, pd.MultiIndex)
-            else index
-        )
-        for name in names.unique():
-            owners.setdefault(str(name), []).append(c.name)
-    for name, ctypes in owners.items():
-        if len(ctypes) < 2:
-            continue
-        for ctype in ctypes:
-            n.rename_component_names(ctype, **{name: f"{ctype} {name}"})
+    for ctype in ("Carrier", "Shape"):
+        c = n.components[ctype]
+        extra = [col for col in c.static.columns if col not in c.defaults.index]
+        if extra:
+            c.static = c.static.drop(columns=extra)
+    return n
 
-    for c in n.components:
-        if c.name in dtypes and c.static.index.dtype != dtypes[c.name]:
-            c.static.index = c.static.index.astype(dtypes[c.name])
-    return _canonical_dynamic_order(n)
+
+def _drop_topology(n: pypsa.Network) -> pypsa.Network:
+    """Reset `sub_network` (Bus, Line, Transformer) and Bus `generator` to their default, in place.
+
+    `determine_network_topology` fills these, but the datarecord format never
+    writes or recomputes them, so a solved source network is normalised to
+    the re-imported one's default values before comparing.
+    """
+    for ctype in ("Bus", "Line", "Transformer"):
+        c = n.components[ctype]
+        if "sub_network" in c.static.columns:
+            c.static["sub_network"] = c.defaults.at["sub_network", "default"]
+    buses = n.c.buses
+    if "generator" in buses.static.columns:
+        buses.static["generator"] = buses.defaults.at["generator", "default"]
+    return n
 
 
 @pytest.mark.skipif(
@@ -1012,13 +1002,14 @@ class TestDatarecord:
         pytest.importorskip("datarecord", reason="datarecord not installed")
 
     def test_collision_raises(self):
+        # `n.add` refuses a cross-type name clash outright, so the only way
+        # to produce one is to bypass it with a direct static assignment.
         from pypsa.network.io.datarecord.record import DatarecordExportError
-        from pypsa.network.names import unchecked_names
 
         n = pypsa.Network()
         n.add("Bus", "b0")
-        with unchecked_names(n):
-            n.add("Load", "b0", bus="b0")
+        n.add("Load", "l0", bus="b0")
+        n.c.loads.static.rename(index={"l0": "b0"}, inplace=True)
 
         with pytest.warns(UserWarning, match="experimental"):
             with pytest.raises(DatarecordExportError, match="Bus, Load"):
@@ -1035,7 +1026,8 @@ class TestDatarecord:
                 n.to_datarecord()
 
     def test_experimental_warning_once_per_call(self, ac_dc_network):
-        n = _record_twin(ac_dc_network)
+        n = ac_dc_network.copy()
+        _canonical_dynamic_order(n)
         with pytest.warns(UserWarning, match="experimental") as record:
             n.to_datarecord()
         matches = [w for w in record if "experimental" in str(w.message)]
@@ -1046,7 +1038,8 @@ class TestDatarecord:
 
         from pypsa.network.io.datarecord.schema import ENTITY_TYPE
 
-        n = _record_twin(ac_dc_network)
+        n = ac_dc_network.copy()
+        _canonical_dynamic_order(n)
         path = tmp_path / "record"
         with pytest.warns(UserWarning, match="experimental"):
             n.export_to_datarecord(path)
@@ -1058,7 +1051,8 @@ class TestDatarecord:
 
     def test_outputs_and_per_port_attributes_are_written(self, ac_dc_solved):
         # Non-default efficiency, so the scalar rows are not dropped as defaults.
-        n = _record_twin(ac_dc_solved)
+        n = ac_dc_solved.copy()
+        _canonical_dynamic_order(n)
         n.c.links.static["efficiency"] = 0.9
         with pytest.warns(UserWarning, match="experimental"):
             rec = n.to_datarecord()
@@ -1087,7 +1081,8 @@ class TestDatarecord:
         n = pypsa.examples.ac_dc_meshed()
         n.snapshots = pd.MultiIndex.from_product([[2020, 2030], n.snapshots])
         n.investment_periods = [2020, 2030]
-        n = _record_twin(n)
+        n = n.copy()
+        _canonical_dynamic_order(n)
         with pytest.warns(UserWarning, match="experimental"):
             rec = n.to_datarecord()
 
@@ -1101,7 +1096,8 @@ class TestDatarecord:
         n = pypsa.examples.ac_dc_meshed()
         n.snapshots = pd.MultiIndex.from_product([[2020, 2030], n.snapshots])
         n.investment_periods = [2020, 2030]
-        n = _record_twin(n)
+        n = n.copy()
+        _canonical_dynamic_order(n)
 
         path = tmp_path / "record"
         with pytest.warns(UserWarning, match="experimental"):
@@ -1112,7 +1108,8 @@ class TestDatarecord:
         assert "period" in opened.dims["timestep"].to_native().columns
 
     def test_piecewise_breakpoints_are_written(self, piecewise_network):
-        n = _record_twin(piecewise_network)
+        n = piecewise_network.copy()
+        _canonical_dynamic_order(n)
         with pytest.warns(UserWarning, match="experimental"):
             rec = n.to_datarecord()
 
@@ -1123,7 +1120,8 @@ class TestDatarecord:
         assert efficiency["breakpoint"].notna().any()
 
     def test_stochastic_static_and_series_do_not_overlap(self, stochastic_network):
-        n = _record_twin(stochastic_network)
+        n = stochastic_network.copy()
+        _canonical_dynamic_order(n)
         gen = n.c.generators.static.index.get_level_values("name").unique()[0]
         scenarios = n.c.generators.static.index.get_level_values("scenario").unique()
         cols = pd.MultiIndex.from_product(
@@ -1141,7 +1139,8 @@ class TestDatarecord:
         assert not entity_rows["timestep"].isna().any()
 
     def test_entity_types_omit_varying_and_deleted_columns(self, ac_dc_network):
-        n = _record_twin(ac_dc_network)
+        n = ac_dc_network.copy()
+        _canonical_dynamic_order(n)
         with pytest.warns(UserWarning, match="experimental"):
             rec = n.to_datarecord()
 
@@ -1166,11 +1165,44 @@ class TestDatarecord:
         assert rows["breakpoint"].notna().any()
         assert "capital_cost" not in rec.entity_types["StorageUnit"].to_native().columns
 
+    def test_carrier_and_shape_are_dims_not_entity_types(self):
+        n = pypsa.Network()
+        n.add("Bus", "b0")
+        n.add("Carrier", "solar", co2_emissions=1.0)
+        with pytest.warns(UserWarning, match="experimental"):
+            rec = n.to_datarecord()
+
+        assert "Carrier" not in rec.schema.entity_types
+        assert "Shape" not in rec.schema.entity_types
+        assert "carrier" in rec.dims
+        carrier_dim = rec.dims["carrier"].to_native()
+        assert set(carrier_dim["carrier"]) == {"solar"}
+
+    def test_carrier_attributes_round_trip(self, tmp_path):
+        n = pypsa.Network()
+        n.add("Bus", "b0")
+        n.add(
+            "Carrier", "gas", co2_emissions=0.2, color="brown", nice_name="Natural Gas"
+        )
+        with pytest.warns(UserWarning, match="experimental"):
+            rec = n.to_datarecord()
+
+        carrier_dim = rec.dims["carrier"].to_native().set_index("carrier")
+        assert carrier_dim.loc["gas", "co2_emissions"] == 0.2
+        assert carrier_dim.loc["gas", "color"] == "brown"
+        assert carrier_dim.loc["gas", "nice_name"] == "Natural Gas"
+
+        n, n2 = self._round_trip(n, tmp_path)
+        assert custom_equals(n, n2)
+
     # -- import: round-trip parity ---------------------------------------
 
     def _round_trip(self, n, tmp_path):
-        """Export `n`'s renamed twin to disk and reopen it via `pypsa.Network`."""
-        n = _record_twin(n)
+        """Export a copy of `n` to disk and reopen it via `pypsa.Network`."""
+        n = n.copy()
+        _canonical_dynamic_order(n)
+        _drop_carrier_shape_custom_attrs(n)
+        _drop_topology(n)
         path = tmp_path / "record"
         with pytest.warns(UserWarning, match="experimental"):
             n.export_to_datarecord(path)
@@ -1185,12 +1217,8 @@ class TestDatarecord:
         n, n2 = self._round_trip(n, tmp_path)
         # Derived data (`SubNetwork`) and optimizer-internal scalars are out of
         # scope for the datarecord network-attribute allow-list.
-        ignore = _LEGACY_EXAMPLE_ATTRS + (
-            [
-                "_components.sub_networks",
-                "_linearized_uc",
-                "_committable_big_m",
-            ]
+        ignore = (
+            ["_components.sub_networks", "_linearized_uc", "_committable_big_m"]
             if n.model is not None
             else []
         )
@@ -1198,14 +1226,14 @@ class TestDatarecord:
 
     def test_round_trip_ac_dc_periods(self, ac_dc_periods, tmp_path):
         n, n2 = self._round_trip(ac_dc_periods, tmp_path)
-        assert custom_equals(n, n2, ignore_attrs=_LEGACY_EXAMPLE_ATTRS)
+        assert custom_equals(n, n2)
 
     def test_round_trip_two_period(self, tmp_path):
         n = pypsa.examples.ac_dc_meshed()
         n.snapshots = pd.MultiIndex.from_product([[2020, 2030], n.snapshots])
         n.investment_periods = [2020, 2030]
         n, n2 = self._round_trip(n, tmp_path)
-        assert custom_equals(n, n2, ignore_attrs=_LEGACY_EXAMPLE_ATTRS)
+        assert custom_equals(n, n2)
 
     def test_round_trip_ac_dc_shapes(self, ac_dc_shapes, tmp_path):
         n, n2 = self._round_trip(ac_dc_shapes, tmp_path)
@@ -1217,7 +1245,7 @@ class TestDatarecord:
             check_less_precise=True,
         )
         n.c.shapes.static["geometry"] = n2.c.shapes.static["geometry"]
-        assert custom_equals(n, n2, ignore_attrs=_LEGACY_EXAMPLE_ATTRS)
+        assert custom_equals(n, n2)
 
     def test_round_trip_piecewise_network(self, piecewise_network, tmp_path):
         n, n2 = self._round_trip(piecewise_network, tmp_path)
@@ -1228,24 +1256,70 @@ class TestDatarecord:
         assert (n.scenario_weightings == n2.scenario_weightings).all().all()
         assert custom_equals(n, n2)
 
+    def test_round_trip_carrier_and_generator_share_a_name(self, tmp_path):
+        n = pypsa.Network()
+        n.add("Bus", "b0")
+        n.add("Carrier", "solar", co2_emissions=1.0)
+        n.add("Generator", "solar", bus="b0", carrier="solar")
+        n, n2 = self._round_trip(n, tmp_path)
+        assert custom_equals(n, n2)
+
+    def test_round_trip_stochastic_carrier_attribute_per_scenario(self, tmp_path):
+        n = pypsa.Network()
+        n.add("Bus", "b0")
+        n.add("Carrier", "gas", co2_emissions=0.2)
+        n.add("Generator", "g0", bus="b0", carrier="gas")
+        n.set_scenarios({"low": 0.5, "high": 0.5})
+        n.c.carriers.static.loc[("high", "gas"), "co2_emissions"] = 0.4
+        n, n2 = self._round_trip(n, tmp_path)
+        assert n2.c.carriers.static.loc[("low", "gas"), "co2_emissions"] == 0.2
+        assert n2.c.carriers.static.loc[("high", "gas"), "co2_emissions"] == 0.4
+        assert custom_equals(n, n2)
+
+    def test_solved_network_record_has_no_topology_outputs(
+        self, ac_dc_solved, tmp_path
+    ):
+        n = ac_dc_solved.copy()
+        _canonical_dynamic_order(n)
+        with pytest.warns(UserWarning, match="experimental"):
+            rec = n.to_datarecord()
+        assert "sub_network" not in rec.outputs
+        assert "generator" not in rec.outputs
+
+        path = tmp_path / "record"
+        with pytest.warns(UserWarning, match="experimental"):
+            n.export_to_datarecord(path)
+        assert not (path / "outputs" / "sub_network.parquet").exists()
+        assert not (path / "outputs" / "generator.parquet").exists()
+
+        with pytest.warns(UserWarning, match="experimental"):
+            n2 = pypsa.Network(path)
+        assert n2.sub_networks.empty
+
     def test_from_datarecord_without_disk(self, ac_dc_network):
-        n = _record_twin(ac_dc_network)
+        n = ac_dc_network.copy()
+        _canonical_dynamic_order(n)
+        _drop_carrier_shape_custom_attrs(n)
+        _drop_topology(n)
         with pytest.warns(UserWarning, match="experimental"):
             record = n.to_datarecord()
         with pytest.warns(UserWarning, match="experimental"):
             n2 = pypsa.Network.from_datarecord(record)
-        assert custom_equals(n, n2, ignore_attrs=_LEGACY_EXAMPLE_ATTRS)
+        assert custom_equals(n, n2)
 
     def test_network_constructor_dispatches_datarecord_directory(
         self, ac_dc_network, tmp_path
     ):
-        n = _record_twin(ac_dc_network)
+        n = ac_dc_network.copy()
+        _canonical_dynamic_order(n)
+        _drop_carrier_shape_custom_attrs(n)
+        _drop_topology(n)
         path = tmp_path / "record"
         with pytest.warns(UserWarning, match="experimental"):
             n.export_to_datarecord(path)
         with pytest.warns(UserWarning, match="experimental"):
             n2 = pypsa.Network(path)
-        assert custom_equals(n, n2, ignore_attrs=_LEGACY_EXAMPLE_ATTRS)
+        assert custom_equals(n, n2)
 
     def test_csv_folder_without_manifest_still_imports_as_csv(
         self, ac_dc_network, tmp_path
@@ -1273,13 +1347,11 @@ class TestDatarecord:
         assert not hasattr(n2, "my_custom_attr")
 
     def test_round_trip_ac_dc_meshed_example(self, tmp_path):
-        """The shipped example, renamed but not collapsed to `_record_twin`'s
-        per-scenario handling, round-trips strictly once its own dynamic
+        """The shipped example round-trips strictly once its own dynamic
         column order is normalised to the datarecord import's contract.
 
         Solving triggers `n.determine_network_topology()`, so `SubNetwork`
-        (out of scope for the datarecord allow-list, like the legacy example's
-        stray `now` attribute) is ignored the same way
+        (out of scope for the datarecord allow-list) is ignored the same way
         `test_round_trip_networks_including_solved` already does for a
         solved network.
         """
@@ -1292,8 +1364,9 @@ class TestDatarecord:
                 ctype, **{name: f"{ctype} {name}" for name in c.static.index}
             )
         _canonical_dynamic_order(n)
+        _drop_carrier_shape_custom_attrs(n)
+        _drop_topology(n)
         ignore = [
-            *_LEGACY_EXAMPLE_ATTRS,
             "_components.sub_networks",
             "_linearized_uc",
             "_committable_big_m",

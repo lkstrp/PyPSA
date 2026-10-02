@@ -26,14 +26,18 @@ from datarecord.record import Flags, LazyFrames
 from pypsa.network.io.datarecord.schema import (
     _BUS,
     _CONNECTION,
+    _DIM_ATTRS,
     _ENTITY,
     _EXCLUDED_TYPES,
+    _TOPOLOGY_OUTPUTS,
+    DIM_TYPES,
     ENTITY_TYPE,
     PERIOD,
     PERIOD_WEIGHTINGS,
     PORT,
     SCENARIO,
     SCENARIO_WEIGHTINGS,
+    SHAPE,
     TIMESTEP,
     build_schema,
     port_columns,
@@ -215,6 +219,11 @@ class NetworkRecord:
         """Present `n` as a `Record`, validating eagerly."""
         self.n = n
         self._components = _exported_components(n)
+        self._dim_components = {
+            dim: n.components[ctype]
+            for dim, ctype in DIM_TYPES.items()
+            if not n.components[ctype].static.empty
+        }
         _check_collisions(self._components)
         _check_same_bus_twice(self._components)
 
@@ -225,7 +234,9 @@ class NetworkRecord:
         """The canonical schema, with the network's own attributes as `meta`."""
         n = self.n
         schema = build_schema(
-            multiperiod=n.has_periods, timestep_dtype=_timestep_dtype_name(n)
+            multiperiod=n.has_periods,
+            timestep_dtype=_timestep_dtype_name(n),
+            stochastic=n.has_scenarios,
         )
         schema.meta["pypsa"] = {
             "attributes": {k: _scalar(getattr(n, k)) for k in NETWORK_ATTRS},
@@ -236,7 +247,7 @@ class NetworkRecord:
 
     @cached_property
     def dims(self) -> LazyFrames:
-        """Axis frames, keyed by dim: `timestep`, `period`, `scenario`, `entity`."""
+        """Axis frames, keyed by dim: `timestep`, `period`, `scenario`, `entity`, `carrier`, `shape`."""
         n = self.n
         axes: dict[str, Any] = {}
         timestep = n.snapshot_weightings.reset_index()
@@ -261,12 +272,68 @@ class NetworkRecord:
         axes[SCENARIO] = scenario
 
         keys = tuple(d for d in (TIMESTEP, PERIOD, SCENARIO) if not axes[d].empty)
-        return LazyFrames((*keys, _ENTITY), lambda key: self._dim_frame(key, axes))
+        keys = (*keys, _ENTITY, *self._dim_components)
+        return LazyFrames(keys, lambda key: self._dim_frame(key, axes))
 
     def _dim_frame(self, key: str, axes: dict[str, pd.DataFrame]) -> Any:
         if key == _ENTITY:
             return nw.from_native(self._entity_axis_frame()).lazy()
+        if key in self._dim_components:
+            return nw.from_native(self._carrier_shape_dim_frame(key)).lazy()
         return nw.from_native(axes[key]).lazy()
+
+    def _carrier_shape_dim_frame(self, dim: str) -> pd.DataFrame:
+        """One row per carrier/shape name, non-stochastic attribute columns included.
+
+        A stochastic network carries only the name column here: its
+        attributes vary by scenario and are written as long rows instead
+        (`_dim_attr_long_frame`). Default values are dropped as for a
+        component's static columns.
+        """
+        c = self._dim_components[dim]
+        defaults = c.defaults
+        static = c.static
+        if isinstance(static.index, pd.MultiIndex):
+            static = static.droplevel(SCENARIO)
+            static = static[~static.index.duplicated()]
+        frame = static.reset_index().rename(columns={"name": dim})
+        if self.n.has_scenarios:
+            return frame[[dim]]
+
+        for col in _DIM_ATTRS[dim]:
+            if col not in frame.columns:
+                continue
+            default = _default(defaults.at[col, "default"])
+            keep = frame[col].notna() if default is None else frame[col] != default
+            if (~keep).any():
+                frame[col] = frame[col].astype(object)
+                frame.loc[~keep, col] = np.nan
+
+        if dim == SHAPE and "geometry" in frame.columns:
+            # Cast to plain DataFrame before the WKT swap. Assigning text into
+            # a GeoDataFrame's geometry column warns that it no longer holds
+            # geometries.
+            wkt = frame["geometry"].to_wkt()
+            frame = pd.DataFrame(frame)
+            frame["geometry"] = wkt
+        return frame[[dim, *_DIM_ATTRS[dim]]]
+
+    def _dim_attr_long_frame(self, dim: str, attr: str) -> pd.DataFrame:
+        """`(scenario, dim, attribute, breakpoint, value)` rows for one stochastic carrier/shape attribute.
+
+        Default values are dropped, as for a component's long input rows.
+        """
+        c = self._dim_components[dim]
+        defaults = c.defaults
+        static = c.static[attr]
+        if dim == SHAPE and attr == "geometry":
+            static = static.to_wkt()
+        rows = static.rename("value").reset_index().rename(columns={"name": dim})
+        default = _default(defaults.at[attr, "default"])
+        rows = _drop_default(rows, default)
+        rows["attribute"] = attr
+        rows["breakpoint"] = None
+        return rows[[SCENARIO, dim, "attribute", "breakpoint", "value"]]
 
     def _entity_axis_frame(self) -> pd.DataFrame:
         """`(entity, entity_type, deleted)` across every exported type."""
@@ -367,10 +434,26 @@ class NetworkRecord:
                 names.setdefault(attr, []).append(c)
             if c.ports:
                 names.setdefault(PORT, []).append(c)
-        return LazyFrames(
-            tuple(names),
-            lambda attr: nw.from_native(self._long_frame(attr, names[attr])).lazy(),
-        )
+        dim_attrs = self._stochastic_dim_attrs()
+        keys = (*names, *dim_attrs)
+
+        def _build(attr: str) -> Any:
+            if attr in dim_attrs:
+                dim = dim_attrs[attr]
+                return nw.from_native(self._dim_attr_long_frame(dim, attr)).lazy()
+            return nw.from_native(self._long_frame(attr, names[attr])).lazy()
+
+        return LazyFrames(keys, _build)
+
+    def _stochastic_dim_attrs(self) -> dict[str, str]:
+        """Carrier/shape attribute -> its dim, for a stochastic network only.
+
+        Empty otherwise: a non-stochastic network's carrier/shape attributes
+        are columns of their axis file, not long input rows.
+        """
+        if not self.n.has_scenarios:
+            return {}
+        return {attr: dim for dim in self._dim_components for attr in _DIM_ATTRS[dim]}
 
     @cached_property
     def outputs(self) -> LazyFrames:
@@ -448,6 +531,8 @@ class NetworkRecord:
         names: list[str] = []
         for attr in defaults.index:
             if not str(defaults.at[attr, "status"]).startswith("Output"):
+                continue
+            if (c.name, attr) in _TOPOLOGY_OUTPUTS:
                 continue
             stem, port = ports.get(attr, (attr, None))
             name = record_name(c.name, stem) if port is None else stem

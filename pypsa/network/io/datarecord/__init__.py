@@ -18,12 +18,14 @@ from pypsa.network.io.datarecord.record import (
     NetworkRecord,
 )
 from pypsa.network.io.datarecord.schema import (
+    CARRIER,
     ENTITY_TYPE,
     PERIOD,
     PERIOD_WEIGHTINGS,
     PORT,
     SCENARIO,
     SCENARIO_WEIGHTINGS,
+    SHAPE,
     SNAPSHOT_WEIGHTINGS,
     TIMESTEP,
     TIMESTEP_DTYPES,
@@ -34,6 +36,7 @@ from pypsa.network.io.datarecord.schema import (
 )
 
 __all__ = [
+    "CARRIER",
     "ENTITY_TYPE",
     "NETWORK_ATTRS",
     "PERIOD",
@@ -41,6 +44,7 @@ __all__ = [
     "PORT",
     "SCENARIO",
     "SCENARIO_WEIGHTINGS",
+    "SHAPE",
     "SNAPSHOT_WEIGHTINGS",
     "TIMESTEP",
     "TIMESTEP_DTYPES",

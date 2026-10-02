@@ -33,12 +33,14 @@ if TYPE_CHECKING:
 
     from pypsa.components.components import Components
 
-TIMESTEP, PERIOD, SCENARIO, ENTITY_TYPE, PORT = (
+TIMESTEP, PERIOD, SCENARIO, ENTITY_TYPE, PORT, CARRIER, SHAPE = (
     "timestep",
     "period",
     "scenario",
     "entity_type",
     "port",
+    "carrier",
+    "shape",
 )
 # The two narwhals dtype names `build_schema` accepts for `timestep_dtype`.
 TIMESTEP_DTYPES = ("Int64", "Datetime")
@@ -51,9 +53,44 @@ SCENARIO_WEIGHTINGS = {"weight": "scenario_weight"}
 # addressed record-wide only through the `connection` group.
 _ENTITY, _BUS, _CONNECTION = "entity", "bus", "connection"
 
-# Component types the schema does not export: templates/library rows and
-# derived, non-schema types.
-_EXCLUDED_TYPES = {"LineType", "TransformerType", "SubNetwork", "Network"}
+# Component types the schema does not export: templates/library rows, derived,
+# non-schema types, and Carrier/Shape, which the record addresses as dims
+# (`CARRIER`/`SHAPE`) rather than as entity types.
+_EXCLUDED_TYPES = {
+    "LineType",
+    "TransformerType",
+    "SubNetwork",
+    "Network",
+    "Carrier",
+    "Shape",
+}
+
+# Carrier/Shape attributes declared on the `carrier`/`shape` dims rather than
+# granted to an entity type. Shape's own `type` attribute is excluded: it
+# would share the record-wide `type` name that Bus/Generator/Line already
+# declare with different dims (entity-addressed), which the record forbids.
+_DIM_ATTRS: dict[str, tuple[str, ...]] = {
+    CARRIER: (
+        "co2_emissions",
+        "color",
+        "nice_name",
+        "max_growth",
+        "max_relative_growth",
+    ),
+    SHAPE: ("geometry", "component", "idx"),
+}
+# Dim name -> the entity type it rebuilds on import.
+DIM_TYPES: dict[str, str] = {CARRIER: "Carrier", SHAPE: "Shape"}
+
+# Derived topology outputs dropped from the schema and never written: Bus,
+# Line and Transformer's `sub_network`, and Bus's `generator`. Both are set by
+# `determine_network_topology`, which the datarecord import never calls.
+_TOPOLOGY_OUTPUTS = {
+    ("Bus", "sub_network"),
+    ("Bus", "generator"),
+    ("Line", "sub_network"),
+    ("Transformer", "sub_network"),
+}
 
 # PyPSA's `defaults["typ"]` mapped to the narwhals type the record stores.
 # `String` for anything unlisted, which covers `geometry` (WKT text) too.
@@ -189,7 +226,7 @@ def _timestep_dtype(name: str) -> nw.dtypes.DType:
     raise ValueError(msg)
 
 
-def build_schema(*, multiperiod: bool, timestep_dtype: str) -> Schema:
+def build_schema(*, multiperiod: bool, timestep_dtype: str, stochastic: bool) -> Schema:
     """Build the canonical datarecord schema for a PyPSA network of this shape.
 
     Parameters
@@ -199,6 +236,10 @@ def build_schema(*, multiperiod: bool, timestep_dtype: str) -> Schema:
     timestep_dtype
         One of `TIMESTEP_DTYPES`: the narwhals dtype name for the snapshot
         axis, integer or datetime.
+    stochastic
+        Whether Carrier/Shape attributes vary by scenario. `False` puts them
+        on the `carrier`/`shape` axis files as columns; `True` puts them in
+        long input rows addressed by `(scenario, carrier)`/`(scenario, shape)`.
 
     """
     dimensions = {
@@ -215,11 +256,14 @@ def build_schema(*, multiperiod: bool, timestep_dtype: str) -> Schema:
         SCENARIO: Dimension(
             dtype=nw.String(), description="One realisation of a stochastic problem."
         ),
+        CARRIER: Dimension(dtype=nw.String(), description="An energy carrier."),
+        SHAPE: Dimension(dtype=nw.String(), description="A named geographic shape."),
         _ENTITY: Dimension(dtype=nw.String(), description="A component."),
         _BUS: Dimension(dtype=nw.String(), description="A node of the network."),
     }
+    all_by_name = {ct.name: ct for ct in all_components.values()}
     types_by_name = {
-        ct.name: ct for ct in all_components.values() if ct.name not in _EXCLUDED_TYPES
+        name: ct for name, ct in all_by_name.items() if name not in _EXCLUDED_TYPES
     }
     type_names = sorted(types_by_name)
     dimensions[ENTITY_TYPE] = Dimension(
@@ -249,7 +293,7 @@ def build_schema(*, multiperiod: bool, timestep_dtype: str) -> Schema:
         stems = _port_stems(ctype, defaults)
         grants: dict[str, TypeAttribute] = {}
         for attr, row in defaults.iterrows():
-            if attr == "name":
+            if attr == "name" or (ctype, attr) in _TOPOLOGY_OUTPUTS:
                 continue
             stem, port = stems.get(attr, (attr, None))
             # A `_RECORD_NAME_OVERRIDES` entry disambiguates a type's own,
@@ -287,6 +331,23 @@ def build_schema(*, multiperiod: bool, timestep_dtype: str) -> Schema:
             )
             grants[PORT] = TypeAttribute()
         types[ctype] = TypeSpec(attributes=grants, description=_text(ct.description))
+
+    for dim, ctype in DIM_TYPES.items():
+        defaults = all_by_name[ctype].defaults
+        dim_dims = frozenset({dim, SCENARIO}) if stochastic else frozenset({dim})
+        for attr in _DIM_ATTRS[dim]:
+            row = defaults.loc[attr]
+            _register(
+                attributes,
+                attr,
+                AttributeSpec(
+                    dtype=_DTYPES.get(row["typ"], nw.String()),
+                    dims=dim_dims,
+                    default=_default(row["default"]),
+                    unit=_text(row["unit"]),
+                    description=_text(row["description"]),
+                ),
+            )
 
     _weighting_descriptions = {
         "objective": "Weight of this snapshot in the objective function.",
