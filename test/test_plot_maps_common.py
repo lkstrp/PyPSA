@@ -63,7 +63,7 @@ def simple_network():
     n.add("Generator", "G1", bus="A", p_nom=100)
 
     # Add a load on B
-    n.add("Load", "L1", bus="B", p_set=50)
+    n.add("Load", "L1 load", bus="B", p_set=50)
 
     return n
 

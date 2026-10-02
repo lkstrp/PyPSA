@@ -467,7 +467,7 @@ def test_link_unit_commitment():
 
     n.add("Bus", ["gas", "electricity"])
 
-    n.add("Generator", "gas", bus="gas", marginal_cost=10, p_nom=20000)
+    n.add("Generator", "gas gen", bus="gas", marginal_cost=10, p_nom=20000)
 
     n.add(
         "Link",
@@ -516,7 +516,7 @@ def test_link_ramp_limits():
 
     n.add("Bus", ["gas", "electricity"])
 
-    n.add("Generator", "gas", bus="gas", marginal_cost=10, p_nom=20000)
+    n.add("Generator", "gas gen", bus="gas", marginal_cost=10, p_nom=20000)
 
     n.add(
         "Link",
@@ -572,7 +572,7 @@ def test_link_ramp_limits_rolling_horizon():
 
     n.add("Bus", ["gas", "electricity"])
 
-    n.add("Generator", "gas", bus="gas", marginal_cost=10, p_nom=20000)
+    n.add("Generator", "gas gen", bus="gas", marginal_cost=10, p_nom=20000)
 
     n.add(
         "Link",
@@ -1046,7 +1046,7 @@ def test_ramp_limit_start_up_binary_uc():
     n.set_snapshots(range(4))
 
     n.add("Bus", ["gas", "electricity"])
-    n.add("Generator", "gas", bus="gas", marginal_cost=10, p_nom=20000)
+    n.add("Generator", "gas gen", bus="gas", marginal_cost=10, p_nom=20000)
 
     # Committable link with ramp_limit_start_up set, but ramp_limit_up is NaN
     n.add(
@@ -1110,7 +1110,7 @@ def test_infeasible_start_up_limit():
 
     n.add("Bus", ["gas", "electricity"])
 
-    n.add("Generator", "gas", bus="gas", marginal_cost=10, p_nom=20000)
+    n.add("Generator", "gas gen", bus="gas", marginal_cost=10, p_nom=20000)
 
     n.add(
         "Link",
@@ -1154,7 +1154,7 @@ def test_ramp_limit_shut_down_binary_uc():
     n.set_snapshots(snapshots)
 
     n.add("Bus", ["gas", "electricity"])
-    n.add("Generator", "gas", bus="gas", marginal_cost=10, p_nom=20000)
+    n.add("Generator", "gas gen", bus="gas", marginal_cost=10, p_nom=20000)
 
     n.add(
         "Link",
@@ -1195,7 +1195,7 @@ def test_ramp_limit_shut_down_binary_uc():
     assert status == "ok", f"Optimization failed with status {status}"
 
     # Get generator outputs
-    gas_output = n.c.generators.dynamic.p.loc[:, "gas"].values
+    gas_output = n.c.generators.dynamic.p.loc[:, "gas gen"].values
     backstop_output = n.c.generators.dynamic.p.loc[:, "expensive_backstop"].values
 
     # Expected pattern based on ramp_limit_shut_down constraint
@@ -1235,7 +1235,7 @@ def test_ramp_limit_shut_down_first_snapshot_with_slack():
     n.set_snapshots(range(4))
 
     n.add("Bus", ["gas", "electricity"])
-    n.add("Generator", "gas", bus="gas", marginal_cost=10, p_nom=20000)
+    n.add("Generator", "gas gen", bus="gas", marginal_cost=10, p_nom=20000)
 
     n.add(
         "Link",
@@ -1274,7 +1274,7 @@ def test_ramp_limit_shut_down_first_snapshot_with_slack():
 
     assert status == "ok", f"Optimization failed with status {status}"
 
-    gas_output = n.c.generators.dynamic.p.loc[:, "gas"].values
+    gas_output = n.c.generators.dynamic.p.loc[:, "gas gen"].values
     slack_output = n.c.generators.dynamic.p.loc[:, "slack_dump"].values
 
     assert abs(gas_output[0] - 9000.0) < 1e-3, (

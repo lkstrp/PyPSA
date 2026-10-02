@@ -218,7 +218,7 @@ def test_update_ports_component_attrs():
 
     n.add(
         "Link",
-        "proc0",
+        "link0",
         bus0="bus0",
         bus1="bus1",
         bus2="bus2",
