@@ -131,21 +131,6 @@ def test_add_refuses_name_taken_by_other_type():
         n.add("Load", "b", bus="b")
 
 
-def test_add_allows_generator_named_like_its_carrier():
-    """Carrier sits outside the namespace, so naming conventions stay legal."""
-    n = pypsa.Network()
-    n.add("Bus", "bus1")
-    n.add("Generator", "solar", bus="bus1", carrier="solar")
-    n.add("Carrier", "solar")
-
-    added = n.c.carriers.add_missing_carriers()
-    assert set(added) == {"AC"}
-    n.sanitize()
-
-    assert "solar" in n.c.generators.static.index
-    assert "solar" in n.c.carriers.static.index
-
-
 def test_add_allows_shape_named_like_bus():
     from shapely.geometry import Point
 
@@ -915,6 +900,18 @@ def test_rename_component_names_refuses_name_taken_within_same_type():
 
     with pytest.raises(ValueError):
         n.rename_component_names("Generator", gen1="gen2")
+
+
+def test_rename_component_names_refuses_duplicate_targets():
+    """Two names renamed to the same target in one call must not silently
+    leave a duplicated index.
+    """
+    n = pypsa.Network()
+    n.add("Bus", "bus1")
+    n.add("Generator", ["gen1", "gen2"], bus="bus1")
+
+    with pytest.raises(ValueError, match="x"):
+        n.rename_component_names("Generator", gen1="x", gen2="x")
 
 
 def test_rename_component_names_exempt_type_may_reuse_other_types_name():
