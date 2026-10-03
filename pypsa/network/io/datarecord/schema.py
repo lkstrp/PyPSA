@@ -66,9 +66,9 @@ _EXCLUDED_TYPES = {
 }
 
 # Carrier/Shape attributes declared on the `carrier`/`shape` dims rather than
-# granted to an entity type. Shape's own `type` attribute is excluded: it
-# would share the record-wide `type` name that Bus/Generator/Line already
-# declare with different dims (entity-addressed), which the record forbids.
+# granted to an entity type. Shape's own `type` shares its PyPSA name with
+# Bus/Generator/Line's entity-addressed `type`, so it is registered under
+# `_RECORD_NAME_OVERRIDES` instead of the bare name.
 _DIM_ATTRS: dict[str, tuple[str, ...]] = {
     CARRIER: (
         "co2_emissions",
@@ -77,7 +77,7 @@ _DIM_ATTRS: dict[str, tuple[str, ...]] = {
         "max_growth",
         "max_relative_growth",
     ),
-    SHAPE: ("geometry", "component", "idx"),
+    SHAPE: ("geometry", "component", "idx", "type"),
 }
 # Dim name -> the entity type it rebuilds on import.
 DIM_TYPES: dict[str, str] = {CARRIER: "Carrier", SHAPE: "Shape"}
@@ -114,6 +114,7 @@ _RECORD_NAME_OVERRIDES = {
     ("Bus", "q"): "q_balance",
     ("Link", "p"): "p_activity",
     ("Process", "p"): "p_activity",
+    ("Shape", "type"): "shape_type",
 }
 _PYPSA_NAME_OVERRIDES = {
     (ctype, record_attr): attr
@@ -339,7 +340,7 @@ def build_schema(*, multiperiod: bool, timestep_dtype: str, stochastic: bool) ->
             row = defaults.loc[attr]
             _register(
                 attributes,
-                attr,
+                record_name(ctype, attr),
                 AttributeSpec(
                     dtype=_DTYPES.get(row["typ"], nw.String()),
                     dims=dim_dims,

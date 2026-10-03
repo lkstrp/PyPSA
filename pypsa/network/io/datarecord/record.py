@@ -41,6 +41,7 @@ from pypsa.network.io.datarecord.schema import (
     TIMESTEP,
     build_schema,
     port_columns,
+    pypsa_name,
     record_name,
 )
 
@@ -185,6 +186,25 @@ def _drop_default(rows: pd.DataFrame, default: Any) -> pd.DataFrame:
     return rows[rows["value"] != default]
 
 
+def _drop_default_columns(
+    frame: pd.DataFrame, columns: tuple[str, ...], defaults: pd.DataFrame
+) -> None:
+    """Replace each column's default-valued cells with NaN, in place.
+
+    Shared by `_member_frame` and `_carrier_shape_dim_frame`: both write a
+    wide frame where a cell equal to the registry default is left unwritten.
+    Skips a column absent from `frame` or `defaults`.
+    """
+    for col in columns:
+        if col not in frame.columns or col not in defaults.index:
+            continue
+        default = _default(defaults.at[col, "default"])
+        keep = frame[col].notna() if default is None else frame[col] != default
+        if (~keep).any():
+            frame[col] = frame[col].astype(object)
+            frame.loc[~keep, col] = np.nan
+
+
 def _scenario_varying(c: Components, columns: list[str]) -> set[str]:
     """Which static columns hold more than one value across scenarios."""
     index = c.static.index
@@ -288,7 +308,8 @@ class NetworkRecord:
         A stochastic network carries only the name column here: its
         attributes vary by scenario and are written as long rows instead
         (`_dim_attr_long_frame`). Default values are dropped as for a
-        component's static columns.
+        component's static columns, and columns are named by each
+        attribute's record-wide name (`record_name`), not its PyPSA one.
         """
         c = self._dim_components[dim]
         defaults = c.defaults
@@ -300,14 +321,7 @@ class NetworkRecord:
         if self.n.has_scenarios:
             return frame[[dim]]
 
-        for col in _DIM_ATTRS[dim]:
-            if col not in frame.columns:
-                continue
-            default = _default(defaults.at[col, "default"])
-            keep = frame[col].notna() if default is None else frame[col] != default
-            if (~keep).any():
-                frame[col] = frame[col].astype(object)
-                frame.loc[~keep, col] = np.nan
+        _drop_default_columns(frame, _DIM_ATTRS[dim], defaults)
 
         if dim == SHAPE and "geometry" in frame.columns:
             # Cast to plain DataFrame before the WKT swap. Assigning text into
@@ -316,20 +330,25 @@ class NetworkRecord:
             wkt = frame["geometry"].to_wkt()
             frame = pd.DataFrame(frame)
             frame["geometry"] = wkt
-        return frame[[dim, *_DIM_ATTRS[dim]]]
+        frame = frame.rename(
+            columns={col: record_name(c.name, col) for col in _DIM_ATTRS[dim]}
+        )
+        return frame[[dim, *(record_name(c.name, col) for col in _DIM_ATTRS[dim])]]
 
     def _dim_attr_long_frame(self, dim: str, attr: str) -> pd.DataFrame:
         """`(scenario, dim, attribute, breakpoint, value)` rows for one stochastic carrier/shape attribute.
 
-        Default values are dropped, as for a component's long input rows.
+        `attr` is the record-wide attribute name; default values are dropped,
+        as for a component's long input rows.
         """
         c = self._dim_components[dim]
         defaults = c.defaults
-        static = c.static[attr]
-        if dim == SHAPE and attr == "geometry":
+        pypsa_attr = pypsa_name(c.name, attr)
+        static = c.static[pypsa_attr]
+        if dim == SHAPE and pypsa_attr == "geometry":
             static = static.to_wkt()
         rows = static.rename("value").reset_index().rename(columns={"name": dim})
-        default = _default(defaults.at[attr, "default"])
+        default = _default(defaults.at[pypsa_attr, "default"])
         rows = _drop_default(rows, default)
         rows["attribute"] = attr
         rows["breakpoint"] = None
@@ -388,26 +407,7 @@ class NetworkRecord:
             static = static.droplevel(SCENARIO)
             static = static[~static.index.duplicated()]
         frame = static.reset_index().rename(columns={"name": _ENTITY})
-
-        for col in frame.columns:
-            if col == _ENTITY or col not in defaults.index:
-                continue
-            default = _default(defaults.at[col, "default"])
-            if default is None:
-                keep = frame[col].notna()
-            else:
-                keep = frame[col] != default
-            if (~keep).any():
-                frame[col] = frame[col].astype(object)
-                frame.loc[~keep, col] = np.nan
-
-        if c.name == "Shape" and "geometry" in frame.columns:
-            # Cast to plain DataFrame before the WKT swap. Assigning text into
-            # a GeoDataFrame's geometry column warns that it no longer holds
-            # geometries.
-            wkt = frame["geometry"].to_wkt()
-            frame = pd.DataFrame(frame)
-            frame["geometry"] = wkt
+        _drop_default_columns(frame, tuple(frame.columns), defaults)
         return frame
 
     @cached_property
@@ -446,14 +446,18 @@ class NetworkRecord:
         return LazyFrames(keys, _build)
 
     def _stochastic_dim_attrs(self) -> dict[str, str]:
-        """Carrier/shape attribute -> its dim, for a stochastic network only.
+        """Carrier/shape attribute's record-wide name -> its dim, for a stochastic network only.
 
         Empty otherwise: a non-stochastic network's carrier/shape attributes
         are columns of their axis file, not long input rows.
         """
         if not self.n.has_scenarios:
             return {}
-        return {attr: dim for dim in self._dim_components for attr in _DIM_ATTRS[dim]}
+        return {
+            record_name(self._dim_components[dim].name, attr): dim
+            for dim in self._dim_components
+            for attr in _DIM_ATTRS[dim]
+        }
 
     @cached_property
     def outputs(self) -> LazyFrames:
