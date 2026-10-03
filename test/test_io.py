@@ -962,9 +962,7 @@ def _drop_carrier_shape_custom_attrs(n: pypsa.Network) -> pypsa.Network:
     The datarecord format round-trips a component's registry-declared
     attributes only; a custom column, such as the shipped `ac-dc-meshed`
     example's `marginal_cost` on Carrier, has no schema slot for a dim
-    attribute yet. Shape's own `type` column stays: it is registry-declared,
-    just excluded from the record, so the import recreates it with its
-    default like any other unwritten attribute.
+    attribute yet. Remove this once custom carrier/shape attributes round-trip.
     """
     for ctype in ("Carrier", "Shape"):
         c = n.components[ctype]
@@ -1274,6 +1272,64 @@ class TestDatarecord:
         n, n2 = self._round_trip(n, tmp_path)
         assert n2.c.carriers.static.loc[("low", "gas"), "co2_emissions"] == 0.2
         assert n2.c.carriers.static.loc[("high", "gas"), "co2_emissions"] == 0.4
+        assert custom_equals(n, n2)
+
+    def test_round_trip_shape_type(self, tmp_path):
+        from shapely.geometry import Point
+
+        n = pypsa.Network()
+        n.add("Bus", "b0")
+        n.add(
+            "Shape",
+            "s0",
+            geometry=Point(0, 0),
+            component="Bus",
+            idx="b0",
+            type="country",
+        )
+        n, n2 = self._round_trip(n, tmp_path)
+        assert n2.c.shapes.static.at["s0", "type"] == "country"
+        n.c.shapes.static["geometry"] = n2.c.shapes.static["geometry"]
+        assert custom_equals(n, n2)
+
+    def test_round_trip_stochastic_shape_type_per_scenario(self, tmp_path):
+        from shapely.geometry import Point
+
+        n = pypsa.Network()
+        n.add("Bus", "b0")
+        n.add(
+            "Shape",
+            "s0",
+            geometry=Point(0, 0),
+            component="Bus",
+            idx="b0",
+            type="country",
+        )
+        n.set_scenarios({"low": 0.5, "high": 0.5})
+        n.c.shapes.static.loc[("high", "s0"), "type"] = "offshore"
+        n, n2 = self._round_trip(n, tmp_path)
+        assert n2.c.shapes.static.loc[("low", "s0"), "type"] == "country"
+        assert n2.c.shapes.static.loc[("high", "s0"), "type"] == "offshore"
+        n.c.shapes.static["geometry"] = n2.c.shapes.static["geometry"]
+        assert custom_equals(n, n2)
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="custom carrier attributes land with custom attribute declarations",
+    )
+    def test_round_trip_custom_carrier_attribute(self, tmp_path):
+        n = pypsa.Network()
+        n.add("Bus", "b0")
+        n.add("Carrier", "gas", co2_emissions=0.2)
+        n.c.carriers.static["marginal_cost"] = 5.0
+        n = n.copy()
+        _canonical_dynamic_order(n)
+        _drop_topology(n)
+        path = tmp_path / "record"
+        with pytest.warns(UserWarning, match="experimental"):
+            n.export_to_datarecord(path)
+        with pytest.warns(UserWarning, match="experimental"):
+            n2 = pypsa.Network(path)
         assert custom_equals(n, n2)
 
     def test_solved_network_record_has_no_topology_outputs(

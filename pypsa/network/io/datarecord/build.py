@@ -425,9 +425,10 @@ def _add_dim_component(
     if stochastic:
         frame = _broadcast_scenarios(frame, n.scenarios)
         for attr in _DIM_ATTRS[dim]:
-            if attr not in record.attributes:
+            record_attr = record_name(ctype, attr)
+            if record_attr not in record.attributes:
                 continue
-            rows = _collect(record.attributes[attr])
+            rows = _collect(record.attributes[record_attr])
             if rows.empty:
                 continue
             values = _dim_attr_values(rows, dim)
@@ -436,6 +437,9 @@ def _add_dim_component(
         frame = frame.set_index([SCENARIO, dim])
         frame.index.names = ["scenario", "name"]
     else:
+        frame = frame.rename(
+            columns={record_name(ctype, attr): attr for attr in _DIM_ATTRS[dim]}
+        )
         frame = frame.set_index(dim)
         frame.index.name = "name"
     n._import_components_from_df(frame, ctype)
@@ -485,7 +489,5 @@ def network_from_record(record: Record, n: Network) -> None:
             multiperiod=multiperiod,
             stochastic=stochastic,
         )
-
-    n._broadcast_standard_types()
 
     n._broadcast_standard_types()
