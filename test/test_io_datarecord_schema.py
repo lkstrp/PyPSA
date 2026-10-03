@@ -280,3 +280,39 @@ def test_declare_custom_carrier_goes_over_its_dim() -> None:
     assert schema.attributes["carrier_marginal_cost"].dims == frozenset({"carrier"})
     assert schema.attributes["marginal_cost"].dims != frozenset({"carrier"})
     assert "Carrier" not in schema.types
+
+
+def test_declare_custom_carrier_varying_raises() -> None:
+    """Carrier/Shape attributes are static dim columns, with no `timestep`
+    axis to carry a time-varying custom declaration.
+    """
+    import narwhals as nw
+
+    from pypsa.network.io.datarecord.record import DatarecordExportError
+
+    schema = build_schema(multiperiod=False, timestep_dtype="Int64", stochastic=False)
+    with pytest.raises(DatarecordExportError, match="varying"):
+        declare_custom(
+            schema, "Carrier", "my_ts", nw.Float64(), varying=True, multiperiod=False
+        )
+
+
+def test_declare_custom_carrier_attribute_name_clash_raises() -> None:
+    """A custom Carrier column named `attribute` would be namespaced to
+    `carrier_attribute`, clashing with GlobalConstraint's own registry
+    attribute of that name, rather than silently overwriting it.
+    """
+    import narwhals as nw
+
+    from pypsa.network.io.datarecord.record import DatarecordExportError
+
+    schema = build_schema(multiperiod=False, timestep_dtype="Int64", stochastic=False)
+    with pytest.raises(DatarecordExportError, match="carrier_attribute"):
+        declare_custom(
+            schema,
+            "Carrier",
+            "attribute",
+            nw.String(),
+            varying=False,
+            multiperiod=False,
+        )

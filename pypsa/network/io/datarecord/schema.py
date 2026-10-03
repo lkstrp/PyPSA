@@ -11,6 +11,7 @@ contents, so the schema is the same for every network of a given shape
 
 from __future__ import annotations
 
+import functools
 import math
 import re
 from typing import TYPE_CHECKING, Any
@@ -32,6 +33,11 @@ if TYPE_CHECKING:
     import pandas as pd
 
     from pypsa.components.components import Components
+
+
+class DatarecordExportError(ValueError):
+    """A network cannot be exported to the datarecord format as-is."""
+
 
 TIMESTEP, PERIOD, SCENARIO, ENTITY_TYPE, PORT, CARRIER, SHAPE = (
     "timestep",
@@ -65,28 +71,24 @@ _EXCLUDED_TYPES = {
     "Shape",
 }
 
-# Carrier/Shape attributes declared on the `carrier`/`shape` dims rather than
-# granted to an entity type. Shape's own `type` shares its PyPSA name with
-# Bus/Generator/Line's entity-addressed `type`, so it is registered under
-# `_RECORD_NAME_OVERRIDES` instead of the bare name.
-_DIM_ATTRS: dict[str, tuple[str, ...]] = {
-    CARRIER: (
-        "co2_emissions",
-        "color",
-        "nice_name",
-        "max_growth",
-        "max_relative_growth",
-    ),
-    SHAPE: ("geometry", "component", "idx", "type"),
-}
 # Dim name -> the entity type it rebuilds on import.
 DIM_TYPES: dict[str, str] = {CARRIER: "Carrier", SHAPE: "Shape"}
 # Entity type -> its dim, the inverse of `DIM_TYPES`.
 _TYPE_DIMS: dict[str, str] = {v: k for k, v in DIM_TYPES.items()}
 
-# `schema.meta` key for `declare_custom`'s merge bookkeeping, popped before
-# the schema is used (`NetworkRecord.schema`), never written to disk.
-_CUSTOM_ATTRS_META_KEY = "_datarecord_custom_attrs"
+# Component type name -> its registry entry, keyed the way `build_schema`
+# keys its own local copy (`all_components` itself is keyed by list name).
+_ALL_BY_NAME = {ct.name: ct for ct in all_components.values()}
+
+# Carrier/Shape attributes declared on the `carrier`/`shape` dims rather than
+# granted to an entity type, derived from the registry (every attribute but
+# `name`). Shape's own `type` shares its PyPSA name with Bus/Generator/Line's
+# entity-addressed `type`, so it is registered under `_RECORD_NAME_OVERRIDES`
+# instead of the bare name.
+_DIM_ATTRS: dict[str, tuple[str, ...]] = {
+    dim: tuple(attr for attr in _ALL_BY_NAME[ctype].defaults.index if attr != "name")
+    for dim, ctype in DIM_TYPES.items()
+}
 
 # Bus, Line and Transformer's `sub_network`, and Bus's `generator`, dropped
 # from the schema and never written. Both are set by
@@ -141,6 +143,11 @@ def custom_dim_attr_name(dim: str, attr: str) -> str:
     The same pattern already stores `Shape.type` as `shape_type`.
     """
     return f"{dim}_{attr}"
+
+
+def custom_dim_pypsa_name(dim: str, record_attr: str) -> str:
+    """PyPSA attribute name for a dim-namespaced record attribute, inverse of `custom_dim_attr_name`."""
+    return record_attr[len(dim) + 1 :]
 
 
 def pypsa_name(ctype: str, record_attr: str) -> str:
@@ -411,6 +418,19 @@ def build_schema(*, multiperiod: bool, timestep_dtype: str, stochastic: bool) ->
     )
 
 
+@functools.cache
+def _registry_attribute_names() -> frozenset[str]:
+    """Every attribute name `build_schema` registers on its own, before any custom attribute is declared.
+
+    The name set is invariant to `multiperiod`/`timestep_dtype`/`stochastic`
+    (only the per-attribute shape differs), so one cached call tells
+    `declare_custom` whether an existing name is a registry attribute or an
+    earlier custom declaration of the same name.
+    """
+    schema = build_schema(multiperiod=False, timestep_dtype="Int64", stochastic=False)
+    return frozenset(schema.attributes)
+
+
 def declare_custom(
     schema: Schema,
     ctype: str,
@@ -424,21 +444,35 @@ def declare_custom(
     """Register a custom attribute record-wide, granted to `ctype` with no default.
 
     Carrier and Shape attributes go over their own dim instead, under
-    `custom_dim_attr_name`, and are never granted to a type. Their dims gain
-    `scenario` when `stochastic`, matching `build_schema`'s own registry dims.
+    `custom_dim_attr_name`, and are never granted to a type, nor ever
+    time-varying (Carrier/Shape have no `timestep` axis to carry one). Their
+    dims gain `scenario` when `stochastic`, matching `build_schema`'s own
+    registry dims.
 
     Raises `DatarecordExportError` when `attr` already names a registry
-    attribute of a different dtype or dims. Two custom declarations of the
-    same name merge by unioning their dims. A dtype mismatch between them
-    always raises, since one attribute has one dtype, per the format's invariant.
+    attribute of a different dtype or dims, when a Carrier/Shape attribute is
+    `varying`, or when a Carrier/Shape attribute's namespaced name already
+    names an unrelated registry attribute (e.g. a custom Carrier column
+    `attribute` would clash with GlobalConstraint's own `carrier_attribute`).
+    Two custom declarations of the same name merge by unioning their dims. A
+    dtype mismatch between them always raises, since one attribute has one
+    dtype, per the format's invariant.
     """
-    from pypsa.network.io.datarecord.record import (  # noqa: PLC0415
-        DatarecordExportError,
-    )
-
     dim = _TYPE_DIMS.get(ctype)
     if dim is not None:
+        if varying:
+            msg = (
+                f"{ctype} cannot declare custom attribute {attr!r} as time-varying, "
+                f"{ctype} attributes are static dim columns with no timestep axis"
+            )
+            raise DatarecordExportError(msg)
         record_attr = custom_dim_attr_name(dim, attr)
+        if record_attr in schema.attributes:
+            msg = (
+                f"{ctype} cannot declare custom attribute {attr!r}, its namespaced "
+                f"name {record_attr!r} is already a registry attribute"
+            )
+            raise DatarecordExportError(msg)
         dim_dims = frozenset({dim, SCENARIO}) if stochastic else frozenset({dim})
         schema.attributes[record_attr] = AttributeSpec(
             dtype=dtype, dims=dim_dims, default=None
@@ -452,10 +486,9 @@ def declare_custom(
             varying_dims.add(PERIOD)
     dims = frozenset(varying_dims)
 
-    custom_names = schema.meta.setdefault(_CUSTOM_ATTRS_META_KEY, set())
     existing = schema.attributes.get(attr)
     if existing is not None:
-        if attr not in custom_names:
+        if attr in _registry_attribute_names():
             if existing.dtype != dtype or existing.dims != dims:
                 msg = (
                     f"{ctype} cannot declare {attr!r} as a custom attribute, "
@@ -472,5 +505,4 @@ def declare_custom(
             dims = existing.dims | dims
 
     schema.attributes[attr] = AttributeSpec(dtype=dtype, dims=dims, default=None)
-    custom_names.add(attr)
     schema.types[ctype].attributes[attr] = TypeAttribute(default=None)

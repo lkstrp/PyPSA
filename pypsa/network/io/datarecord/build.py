@@ -31,6 +31,7 @@ from pypsa.network.io.datarecord.schema import (
     SCENARIO_WEIGHTINGS,
     SNAPSHOT_WEIGHTINGS,
     TIMESTEP,
+    custom_dim_pypsa_name,
     port_columns,
     pypsa_name,
     record_name,
@@ -458,18 +459,16 @@ def _add_dim_component(
     if stochastic:
         frame = _broadcast_scenarios(frame, n.scenarios)
         registry = {record_name(ctype, attr): attr for attr in _DIM_ATTRS[dim]}
-        prefix = f"{dim}_"
         # Iterates `record.schema.attributes` (insertion-ordered) rather than
         # `record.attributes` (a set), so column order matches the network's
         # exported static columns.
         order = [
             record_attr
             for record_attr in record.schema.attributes
-            if record_attr in registry
-            or (record_attr.startswith(prefix) and record_attr not in registry)
+            if record_attr in registry or record_attr.startswith(f"{dim}_")
         ]
         for record_attr in order:
-            attr = registry.get(record_attr, record_attr[len(prefix) :])
+            attr = registry.get(record_attr, custom_dim_pypsa_name(dim, record_attr))
             if record_attr not in record.attributes:
                 continue
             rows = _collect(record.attributes[record_attr])
@@ -484,12 +483,11 @@ def _add_dim_component(
         frame = frame.rename(
             columns={record_name(ctype, attr): attr for attr in _DIM_ATTRS[dim]}
         )
-        prefix = f"{dim}_"
         frame = frame.rename(
             columns={
-                col: col[len(prefix) :]
+                col: custom_dim_pypsa_name(dim, col)
                 for col in frame.columns
-                if col.startswith(prefix)
+                if col.startswith(f"{dim}_")
             }
         )
         frame = frame.set_index(dim)
