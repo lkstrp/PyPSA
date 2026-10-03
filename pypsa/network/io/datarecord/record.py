@@ -193,9 +193,9 @@ def _drop_default_columns(
 ) -> None:
     """Replace each column's default-valued cells with NaN, in place.
 
-    Shared by `_member_frame` and `_carrier_shape_dim_frame`: both write a
-    wide frame where a cell equal to the registry default is left unwritten.
-    Skips a column absent from `frame` or `defaults`.
+    Shared by `_member_frame` and `_carrier_shape_dim_frame`, both of which
+    write a wide frame where a cell equal to the registry default is left
+    unwritten. Skips a column absent from `frame` or `defaults`.
     """
     for col in columns:
         if col not in frame.columns or col not in defaults.index:
@@ -389,7 +389,7 @@ class NetworkRecord:
     def _carrier_shape_dim_frame(self, dim: str) -> pd.DataFrame:
         """One row per carrier/shape name, non-stochastic attribute columns included.
 
-        A stochastic network carries only the name column here: its
+        A stochastic network carries only the name column here. Its
         attributes vary by scenario and are written as long rows instead
         (`_dim_attr_long_frame`). Default values are dropped as for a
         component's static columns, and columns are named by each
@@ -493,8 +493,8 @@ class NetworkRecord:
                 continue
             if col not in defaults.index:
                 if col in custom_series:
-                    # Also time-varying: lives in its long file only, like a
-                    # registry attribute whose `varying` flag routes it there.
+                    # Also time-varying, so it lives in its long file only,
+                    # like a registry attribute whose `varying` flag routes it there.
                     continue
                 columns.append(col)
                 custom.append(col)
@@ -555,8 +555,8 @@ class NetworkRecord:
     def _stochastic_dim_attrs(self) -> dict[str, str]:
         """Carrier/shape attribute's record-wide name -> its dim, for a stochastic network only.
 
-        Empty otherwise: a non-stochastic network's carrier/shape attributes
-        are columns of their axis file, not long input rows. Custom dim
+        Empty otherwise, since a non-stochastic network's carrier/shape
+        attributes are columns of their axis file, not long input rows. Custom dim
         attributes are included alongside the registry ones.
         """
         if not self.n.has_scenarios:

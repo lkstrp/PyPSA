@@ -58,7 +58,7 @@ Create a folder with CSVs for each component type (e.g. `generators.csv`), then 
 !!! note "Renamed and converted on import"
 
     Names that clash across component types (e.g. a `Load` named after its `Bus`) are
-    renamed to `"<name>-<Type>"` (`-2`, `-3`, ... while still taken); `Bus` names are
+    renamed to `"<name>-<Type>"` (`-2`, `-3`, ... while still taken). `Bus` names are
     never renamed. One warning reports how many names were renamed per type. A legacy
     `"now"` snapshot becomes `0`, snapshot labels that parse as dates become datetimes,
     and any other string labels become positions with a warning listing the original
@@ -166,7 +166,7 @@ n_import = pypsa.Network("foo/bar")
     [Adding, Removing & Merging](#adding-removing-merging)), so export needs no
     preparation. `Carrier` and `Shape` round-trip as their own record dimensions
     rather than as component types. Custom static and time-varying attributes
-    round-trip as declared attributes; a custom attribute shared by two component
+    round-trip as declared attributes. A custom attribute shared by two component
     types must have the same dtype on both, or export raises a
     `DatarecordExportError`. Links and processes keep every port (`bus2`,
     `efficiency2`, `p2`, ...). Derived topology (`sub_network`, `Bus.generator`) is
