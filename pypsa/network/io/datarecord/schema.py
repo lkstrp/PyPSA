@@ -53,9 +53,9 @@ SCENARIO_WEIGHTINGS = {"weight": "scenario_weight"}
 # addressed record-wide only through the `connection` group.
 _ENTITY, _BUS, _CONNECTION = "entity", "bus", "connection"
 
-# Component types the schema does not export: templates/library rows, derived,
-# non-schema types, and Carrier/Shape, which the record addresses as dims
-# (`CARRIER`/`SHAPE`) rather than as entity types.
+# Component types the schema does not export. These are templates/library
+# rows, derived, non-schema types, and Carrier/Shape, which the record
+# addresses as dims (`CARRIER`/`SHAPE`) rather than as entity types.
 _EXCLUDED_TYPES = {
     "LineType",
     "TransformerType",
@@ -88,8 +88,8 @@ _TYPE_DIMS: dict[str, str] = {v: k for k, v in DIM_TYPES.items()}
 # the schema is used (`NetworkRecord.schema`), never written to disk.
 _CUSTOM_ATTRS_META_KEY = "_datarecord_custom_attrs"
 
-# Derived topology outputs dropped from the schema and never written: Bus,
-# Line and Transformer's `sub_network`, and Bus's `generator`. Both are set by
+# Bus, Line and Transformer's `sub_network`, and Bus's `generator`, dropped
+# from the schema and never written. Both are set by
 # `determine_network_topology`, which the datarecord import never calls.
 _TOPOLOGY_OUTPUTS = {
     ("Bus", "sub_network"),
@@ -255,7 +255,7 @@ def build_schema(*, multiperiod: bool, timestep_dtype: str, stochastic: bool) ->
         axis, integer or datetime.
     stochastic
         Whether Carrier/Shape attributes vary by scenario. `False` puts them
-        on the `carrier`/`shape` axis files as columns; `True` puts them in
+        on the `carrier`/`shape` axis files as columns. `True` puts them in
         long input rows addressed by `(scenario, carrier)`/`(scenario, shape)`.
 
     """
@@ -424,13 +424,13 @@ def declare_custom(
     """Register a custom attribute record-wide, granted to `ctype` with no default.
 
     Carrier and Shape attributes go over their own dim instead, under
-    `custom_dim_attr_name`, and are never granted to a type; their dims gain
+    `custom_dim_attr_name`, and are never granted to a type. Their dims gain
     `scenario` when `stochastic`, matching `build_schema`'s own registry dims.
 
     Raises `DatarecordExportError` when `attr` already names a registry
     attribute of a different dtype or dims. Two custom declarations of the
     same name merge by unioning their dims. A dtype mismatch between them
-    always raises: one attribute has one dtype, per the format's invariant.
+    always raises, since one attribute has one dtype, per the format's invariant.
     """
     from pypsa.network.io.datarecord.record import (  # noqa: PLC0415
         DatarecordExportError,

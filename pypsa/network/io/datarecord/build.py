@@ -280,10 +280,10 @@ def _add_component_type(
 ) -> None:
     """Assign one type's static frame (inputs), then its series and piecewise data.
 
-    Iterates `record.schema.attributes_for(ctype)` rather than the registry's
-    `c.defaults.index`, so a custom attribute the schema granted this type
-    comes back too, port stems expanded to their PyPSA columns through
-    `port_columns` and record names through `pypsa_name`.
+    Iterates `record.schema.attributes_for(ctype)` instead of the registry's
+    `c.defaults.index`, so a custom attribute the schema granted this type is
+    included too. Port stems are expanded to their PyPSA columns through
+    `port_columns`, record names through `pypsa_name`.
     """
     ctype = c.name
     bus_cols = _bus_columns(c)
@@ -446,7 +446,7 @@ def _add_dim_component(
 ) -> None:
     """Rebuild Carrier or Shape from its `dim` axis frame.
 
-    A non-stochastic frame carries every attribute as a column already; a
+    A non-stochastic frame carries every attribute as a column already. A
     stochastic one carries only the names, overlaid here with each
     attribute's per-scenario long rows, registry and custom alike.
     """
@@ -459,10 +459,9 @@ def _add_dim_component(
         frame = _broadcast_scenarios(frame, n.scenarios)
         registry = {record_name(ctype, attr): attr for attr in _DIM_ATTRS[dim]}
         prefix = f"{dim}_"
-        # Column order follows the schema's own attribute order (a plain dict,
-        # insertion-ordered), not `record.attributes` (a set): registry names
-        # first, then custom ones in the order they were declared, matching
-        # the static column order the network was exported with.
+        # Iterates `record.schema.attributes` (insertion-ordered) rather than
+        # `record.attributes` (a set), so column order matches the network's
+        # exported static columns.
         order = [
             record_attr
             for record_attr in record.schema.attributes

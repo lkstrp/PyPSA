@@ -210,10 +210,8 @@ class ComponentsTransformMixin:
 
         self._refuse_taken_target_names(kwargs)
 
-        # Rename component name definitions. `level="name"` renames the name
-        # level only, so a stochastic scenario label equal to a renamed name
-        # stays untouched. Flat columns have no such level, so pass level
-        # only for a MultiIndex (the stochastic case).
+        # `level="name"` renames only the name level, so a stochastic
+        # scenario label matching a new name stays untouched.
         self.static = self.static.rename(index=kwargs, level="name")
         for store in (self.dynamic, self.piecewise):
             for k, v in store.items():  # Modify in place

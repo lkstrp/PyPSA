@@ -227,8 +227,9 @@ def test_declare_custom_dtype_mismatch_raises_for_a_shared_file() -> None:
 
 
 def test_declare_custom_dtype_mismatch_raises_even_when_both_static() -> None:
-    """A dtype mismatch raises even for two purely static custom columns:
-    one attribute has one dtype, and the manifest cannot say otherwise.
+    """A dtype mismatch raises even for two purely static custom columns.
+
+    One attribute has one dtype, and the manifest cannot say otherwise.
     """
     import narwhals as nw
 
