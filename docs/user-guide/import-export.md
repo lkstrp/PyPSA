@@ -15,7 +15,7 @@ providers.
 ## Adding, Removing & Merging
 
 Networks can be built step-by-step for each component by calling
-[`n.add()`][pypsa.network.transform.NetworkTransformMixin.remove] to **add** a single or multiple components.
+[`n.add()`][pypsa.network.transform.NetworkTransformMixin.add] to **add** a single or multiple components.
 
 ``` py
 n.add("Bus", "my_bus")
@@ -26,7 +26,7 @@ n.add("Generator", "gen_1", bus="my_bus", p_nom=100, marginal_cost=100)
 n.add("Load", ["load_1", "load_2"], bus="my_bus", p_set=[10, 20])
 ```
 
-Components can be **removed** with [`n.remove()`][pypsa.network.transform.NetworkTransformMixin.add].
+Components can be **removed** with [`n.remove()`][pypsa.network.transform.NetworkTransformMixin.remove].
 
 ``` py
 n.remove("Load", ["load_1", "load_2"])
@@ -34,6 +34,16 @@ n.remove("Generator", "my_generator")
 ```
 
 Two networks with a disjunct set of component indices can be **merged** with [`n1.merge(n2)`][pypsa.network.transform.NetworkTransformMixin.merge]
+
+!!! note "Unique component names"
+
+    Component names must be unique across `Bus`, `Line`, `Transformer`, `Link`, `Process`,
+    `Generator`, `Load`, `StorageUnit`, `Store`, `ShuntImpedance` and `GlobalConstraint`,
+    not just within one type. `n.add()`, `n1.merge(n2)`, `n.copy()` and
+    [`n.rename_component_names()`][pypsa.Network.rename_component_names] refuse a name
+    already held by another of these types. `Carrier`, `Shape`, `SubNetwork` and the
+    standard types (`LineType`, `TransformerType`) sit outside this namespace and may
+    reuse a name from it, so a carrier `"solar"` can sit next to a generator `"solar"`.
 
 ## CSV Files
 
@@ -44,6 +54,15 @@ Create a folder with CSVs for each component type (e.g. `generators.csv`), then 
 !!! note
 
     It is not necessary to add every single column, only those where values differ from the defaults listed in [Components](../user-guide/components.md). All empty values/columns are filled with the defaults.
+
+!!! note "Renamed and converted on import"
+
+    Names that clash across component types (e.g. a `Load` named after its `Bus`) are
+    renamed to `"<name>-<Type>"` (`-2`, `-3`, ... while still taken); `Bus` names are
+    never renamed. One warning reports how many names were renamed per type. A legacy
+    `"now"` snapshot becomes `0`, snapshot labels that parse as dates become datetimes,
+    and any other string labels become positions with a warning listing the original
+    labels.
 
 A network can be **exported** as a folder of csv files with [`n.export_to_csv_folder()`][pypsa.network.io.NetworkIOMixin.export_to_csv_folder].
 
@@ -79,6 +98,8 @@ The snapshots worksheet must contain the time-series index using an appropriate 
 
     Excel is resource-intensive and only appropriate for smaller networks. For larger datasets or production workflows, consider using netCDF files.
 
+Import renames clashing names and converts legacy snapshot labels the same way as for [CSV files](#csv-files).
+
 
 ## netCDF
 
@@ -99,6 +120,8 @@ n.export_to_netcdf("foo/bar.nc")
 n_import = pypsa.Network("foo/bar.nc")
 ```
 
+Import renames clashing names and converts legacy snapshot labels the same way as for [CSV files](#csv-files).
+
 ## HDF5
 
 To **export** the network to an HDF store, run [`n.export_to_hdf5()`][pypsa.network.io.NetworkIOMixin.export_to_hdf5].
@@ -109,6 +132,8 @@ To **import** network data from an HDF5 store, run [`n.import_from_hdf5()`][pyps
 n.export_to_hdf5("foo/bar.h5")
 n_import = pypsa.Network("foo/bar.h5")
 ```
+
+Import renames clashing names and converts legacy snapshot labels the same way as for [CSV files](#csv-files).
 
 ## datarecord
 
@@ -137,11 +162,19 @@ n_import = pypsa.Network("foo/bar")
 
 !!! note
 
-    Component names must be unique across component types, since the datarecord
-    schema keys components by name alone. Snapshots must be integer- or
-    datetime-typed. After import, a time-series frame's columns follow the
-    component's static index order, which can differ from the order they had
-    in the source network.
+    Every network already has unique names across component types (see
+    [Adding, Removing & Merging](#adding-removing-merging)), so export needs no
+    preparation. `Carrier` and `Shape` round-trip as their own record dimensions
+    rather than as component types. Custom static and time-varying attributes
+    round-trip as declared attributes; a custom attribute shared by two component
+    types must have the same dtype on both, or export raises a
+    `DatarecordExportError`. Links and processes keep every port (`bus2`,
+    `efficiency2`, `p2`, ...). Derived topology (`sub_network`, `Bus.generator`) is
+    not written, so an imported network's `n.sub_networks` is empty until a solve
+    or an explicit [`n.determine_network_topology()`][pypsa.Network.determine_network_topology]
+    call. Snapshots must still be integer- or datetime-typed. After import, a
+    time-series frame's columns follow the component's static index order, which
+    can differ from the order they had in the source network.
 
 `path` may also be a remote URI, resolved through datarecord's own connection rather
 than `cloudpathlib`.
