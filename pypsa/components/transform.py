@@ -18,7 +18,12 @@ from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
-from pypsa.network.names import NAMESPACE_ORDER, format_clashes, name_owners
+from pypsa.network.names import (
+    NAMESPACE_ORDER,
+    _name_level,
+    format_clashes,
+    name_owners,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -249,23 +254,23 @@ class ComponentsTransformMixin:
     def _refuse_taken_target_names(self, kwargs: dict[str, str]) -> None:
         """Raise if a rename target name is already taken.
 
-        Every type refuses a target already present within its own type.
+        Every type refuses a target already present within its own type,
+        including a target reused by more than one rename in the same call.
         Namespace types (Generator, Bus, ...) additionally refuse a target
         already held by another namespace type, since Carrier, Shape and the
         other exempt types sit outside that namespace.
         """
-        own_names = self.static.index
-        if isinstance(own_names, pd.MultiIndex):
-            own_names = own_names.get_level_values("name")
-        own_names = own_names.unique().difference(kwargs.keys())
+        own_names = _name_level(self.static.index).unique().difference(kwargs.keys())
         same_type_clashes = own_names.intersection(kwargs.values())
-        if not same_type_clashes.empty:
-            names = ", ".join(sorted(same_type_clashes))
+        targets = pd.Index(kwargs.values())
+        duplicate_targets = targets[targets.duplicated()].unique()
+        clashes = same_type_clashes.union(duplicate_targets)
+        if not clashes.empty:
+            names = ", ".join(sorted(clashes))
             msg = f"name(s) already present in '{self.name}': {names}"
             raise ValueError(msg)
 
         if self.attached and self.name in NAMESPACE_ORDER:
-            targets = pd.Index(kwargs.values())
             owners = name_owners(self.n_save, targets, exclude=self.name)
             if owners:
                 owners = {
