@@ -26,7 +26,6 @@ from datarecord.record import Flags, LazyFrames
 from pypsa.network.io.datarecord.schema import (
     _BUS,
     _CONNECTION,
-    _CUSTOM_ATTRS_META_KEY,
     _DIM_ATTRS,
     _ENTITY,
     _EXCLUDED_TYPES,
@@ -40,12 +39,15 @@ from pypsa.network.io.datarecord.schema import (
     SCENARIO_WEIGHTINGS,
     SHAPE,
     TIMESTEP,
+    DatarecordExportError,
     build_schema,
     custom_dim_attr_name,
+    custom_dim_pypsa_name,
     declare_custom,
     port_columns,
     record_name,
 )
+from pypsa.network.names import _name_level, format_clashes
 
 if TYPE_CHECKING:
     from datarecord.schema import Schema
@@ -67,10 +69,6 @@ NETWORK_ATTRS = (
 )
 
 
-class DatarecordExportError(ValueError):
-    """A network cannot be exported to the datarecord format as-is."""
-
-
 def _exported_components(n: Network) -> list[Components]:
     """Component types with data to write: non-empty, standard types excluded.
 
@@ -86,27 +84,15 @@ def _exported_components(n: Network) -> list[Components]:
     ]
 
 
-def _names(c: Components) -> pd.Index:
-    """Return a type's component names, one per entity regardless of scenario."""
-    index = c.static.index
-    if isinstance(index, pd.MultiIndex):
-        return index.get_level_values("name").unique()
-    return index
-
-
 def _check_collisions(components: list[Components]) -> None:
     """Raise if a name is claimed by more than one exported type."""
     owners: dict[str, set[str]] = {}
     for c in components:
-        for name in _names(c):
+        for name in _name_level(c.static.index):
             owners.setdefault(str(name), set()).add(c.name)
     clashing = {name: sorted(types) for name, types in owners.items() if len(types) > 1}
     if clashing:
-        detail = "; ".join(
-            f"{name}: {', '.join(types)}" for name, types in sorted(clashing.items())
-        )
-        msg = f"names claimed by more than one component type: {detail}"
-        raise DatarecordExportError(msg)
+        raise DatarecordExportError(format_clashes(clashing))
 
 
 def _attached_buses(c: Components, port: str) -> pd.Series:
@@ -241,13 +227,22 @@ def _custom_static_attrs(c: Components) -> dict[str, nw.dtypes.DType]:
 
 
 def _custom_series_attrs(c: Components) -> dict[str, nw.dtypes.DType]:
-    """Time-varying keys `c.dynamic` carries that the registry does not declare."""
+    """Time-varying keys `c.dynamic` carries that the registry does not declare.
+
+    Reads the dtype straight off `df.dtypes` where every column shares one,
+    the common case, rather than materialising the frame with `to_numpy()`
+    just to inspect it. Falls back to `to_numpy()` for a frame whose columns
+    genuinely differ, to keep numpy's own dtype promotion.
+    """
     defaults = c.defaults
-    return {
-        attr: _custom_dtype(df.to_numpy())
-        for attr, df in c.dynamic.items()
-        if attr not in defaults.index and not df.empty
-    }
+    result: dict[str, nw.dtypes.DType] = {}
+    for attr, df in c.dynamic.items():
+        if attr in defaults.index or df.empty:
+            continue
+        dtypes = df.dtypes
+        values = dtypes.iloc[0] if (dtypes == dtypes.iloc[0]).all() else df.to_numpy()
+        result[attr] = _custom_dtype(values)
+    return result
 
 
 def _cast_custom_string_columns(frame: pd.DataFrame, columns: list[str]) -> None:
@@ -347,7 +342,6 @@ class NetworkRecord:
                     multiperiod=multiperiod,
                     stochastic=stochastic,
                 )
-        schema.meta.pop(_CUSTOM_ATTRS_META_KEY, None)
 
     @cached_property
     def dims(self) -> LazyFrames:
@@ -440,8 +434,7 @@ class NetworkRecord:
         c = self._dim_components[dim]
         defaults = c.defaults
         registry = {record_name(c.name, a): a for a in _DIM_ATTRS[dim]}
-        prefix = f"{dim}_"
-        pypsa_attr = registry.get(attr, attr[len(prefix) :])
+        pypsa_attr = registry.get(attr, custom_dim_pypsa_name(dim, attr))
         static = c.static[pypsa_attr]
         if dim == SHAPE and pypsa_attr == "geometry":
             static = static.to_wkt()
@@ -457,7 +450,7 @@ class NetworkRecord:
         """`(entity, entity_type, deleted)` across every exported type."""
         frames = []
         for c in self._components:
-            names = _names(c)
+            names = _name_level(c.static.index)
             frames.append(
                 pd.DataFrame(
                     {

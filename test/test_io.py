@@ -1450,6 +1450,39 @@ class TestDatarecord:
             rec.schema  # noqa: B018
         assert "p_nom" in str(exc_info.value)
 
+    def test_custom_carrier_series_raises(self):
+        """Carrier/Shape attributes are dim columns with no `timestep` axis,
+        so a custom time-varying one cannot be written.
+        """
+        from pypsa.network.io.datarecord.record import DatarecordExportError
+
+        n = pypsa.Network()
+        n.set_snapshots(range(2))
+        n.add("Bus", "cb4")
+        n.add("Carrier", "gas", co2_emissions=0.2)
+        n.c.carriers.dynamic["custom_ts"] = pd.DataFrame(
+            {"gas": [1.0, 2.0]}, index=n.snapshots
+        )
+        with pytest.warns(UserWarning, match="experimental"):
+            rec = n.to_datarecord()
+        with pytest.raises(DatarecordExportError, match="varying"):
+            rec.schema  # noqa: B018
+
+    def test_custom_carrier_attribute_named_attribute_raises(self):
+        """A custom Carrier column named `attribute` must not silently
+        overwrite GlobalConstraint's own `carrier_attribute` attribute.
+        """
+        from pypsa.network.io.datarecord.record import DatarecordExportError
+
+        n = pypsa.Network()
+        n.add("Bus", "cb5")
+        n.add("Carrier", "gas", co2_emissions=0.2)
+        n.c.carriers.static["attribute"] = "co2_emissions"
+        with pytest.warns(UserWarning, match="experimental"):
+            rec = n.to_datarecord()
+        with pytest.raises(DatarecordExportError, match="carrier_attribute"):
+            rec.schema  # noqa: B018
+
     def test_solved_network_record_has_no_topology_outputs(
         self, ac_dc_solved, tmp_path
     ):
