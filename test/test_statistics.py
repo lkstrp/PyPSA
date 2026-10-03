@@ -651,11 +651,11 @@ class TestMarketValue:
         rev_per_t = -(
             n.c.processes.dynamic["p0"]["electrolyser"] * prices["elec"]
             + n.c.processes.dynamic["p1"]["electrolyser"] * prices["h2"]
-            + n.c.processes.dynamic["p2"]["electrolyser"] * prices["heat"]
+            + n.c.processes.dynamic["p2"]["electrolyser"] * prices["heat bus"]
         )
         expected = rev_per_t.mean() / operation.mean()
         np.testing.assert_allclose(
-            mv.loc[("Process", "electrolyser")], expected, rtol=self.rtol
+            mv.loc[("Process", "electrolysis")], expected, rtol=self.rtol
         )
 
     @pytest.mark.parametrize(
@@ -663,7 +663,7 @@ class TestMarketValue:
         [
             ("AC", "p0", "elec"),
             ("H2", "p1", "h2"),
-            ("heat", "p2", "heat"),
+            ("heat", "p2", "heat bus"),
         ],
     )
     def test_with_bus_carrier(self, multiport_process_network, bus_carrier, port, bus):
@@ -675,7 +675,7 @@ class TestMarketValue:
         prices = n.c.buses.dynamic["marginal_price"][bus]
         expected = -(operation * prices).mean() / reference_operation.mean()
         np.testing.assert_allclose(
-            mv.loc[("Process", "electrolyser")], expected, rtol=self.rtol
+            mv.loc[("Process", "electrolysis")], expected, rtol=self.rtol
         )
 
     def test_bus_carrier_additivity(self, multiport_process_network):

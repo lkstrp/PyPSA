@@ -334,19 +334,19 @@ def networks_including_solved(request):
 def multiport_process_network():
     n = pypsa.Network()
     n.set_snapshots([0, 1, 2])
-    for c in ["AC", "H2", "heat", "electrolyser"]:
+    for c in ["AC", "H2", "heat", "electrolysis"]:
         n.add("Carrier", c)
     n.add("Bus", "elec", carrier="AC")
     n.add("Bus", "h2", carrier="H2")
-    n.add("Bus", "heat", carrier="heat")
+    n.add("Bus", "heat bus", carrier="heat")
     n.add("Generator", "gen", bus="elec", carrier="AC", p_nom=200, marginal_cost=10)
     n.add(
         "Process",
         "electrolyser",
         bus0="elec",
         bus1="h2",
-        bus2="heat",
-        carrier="electrolyser",
+        bus2="heat bus",
+        carrier="electrolysis",
         rate0=-1,
         rate1=0.7,
         rate2=0.2,
@@ -370,7 +370,7 @@ def multiport_process_network():
         {
             "elec": [50.0, 40.0, 45.0],
             "h2": [100.0, 90.0, 95.0],
-            "heat": [30.0, 25.0, 28.0],
+            "heat bus": [30.0, 25.0, 28.0],
         }
     )
     return n

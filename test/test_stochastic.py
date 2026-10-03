@@ -676,10 +676,10 @@ def test_store_stochastic_optimization_bug():
     assert not n.c.stores.static.empty, "Test network should have stores"
 
     # The bug occured in operation (1 - standing_loss)**eh due to dimension mismatch
-    n.c.stores.static.at["hydrogen storage", "e_nom"] = 1000
-    n.c.stores.static.at["hydrogen storage", "e_cyclic"] = False
-    n.c.stores.static.at["hydrogen storage", "e_initial"] = 800
-    n.c.stores.static.at["hydrogen storage", "standing_loss"] = 0.01
+    n.c.stores.static.at["hydrogen storage-Store", "e_nom"] = 1000
+    n.c.stores.static.at["hydrogen storage-Store", "e_cyclic"] = False
+    n.c.stores.static.at["hydrogen storage-Store", "e_initial"] = 800
+    n.c.stores.static.at["hydrogen storage-Store", "standing_loss"] = 0.01
 
     # Test without scenarios first (should work)
     n_regular = n.copy()
@@ -711,7 +711,7 @@ def test_store_stochastic_optimization_bug():
     # Verify specific energy level at second snapshot
     # it is 800 × (1 - 0.01)³ due to 3h temporal clustering
     second_hour_energy = n_stochastic.c.stores.dynamic.e.loc[
-        n_stochastic.snapshots[1], ("scenario_a", "hydrogen storage")
+        n_stochastic.snapshots[1], ("scenario_a", "hydrogen storage-Store")
     ]
     assert abs(second_hour_energy - 776.2392) < 0.01, (
         f"Expected hydrogen storage energy ~776.24 at second snapshot, got {second_hour_energy}"
@@ -1478,13 +1478,13 @@ def test_operational_limit_constraint_stochastic():
 
     n.add(
         "Generator",
-        "solar",
+        "solar_pv",
         bus="bus1",
         p_nom=100,
         marginal_cost=0,
         carrier="solar",
     )
-    n.add("Generator", "gas", bus="bus1", p_nom=200, marginal_cost=50, carrier="gas")
+    n.add("Generator", "ccgt", bus="bus1", p_nom=200, marginal_cost=50, carrier="gas")
     n.add("Load", "load1", bus="bus1", p_set=[50, 100, 100])
 
     n.add(

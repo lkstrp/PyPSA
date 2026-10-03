@@ -73,12 +73,20 @@ def test_model_energy():
     assert not n.c.buses.static.empty
 
 
-def test_model_energy_has_no_name_clashes(caplog):
+def test_model_energy_renames_carrier_clashes_on_import(caplog):
+    """Every model_energy carrier shares a name with a component. A carrier
+    yields only to a bus, every other type yields to the carrier, and the
+    renamed carriers are followed by the columns that referenced them.
+    """
     with caplog.at_level("WARNING"):
         n = pypsa.examples.model_energy()
 
-    assert not any("Renamed" in r.message for r in caplog.records)
-    assert not n.c.buses.static.empty
+    assert any("Renamed" in r.message for r in caplog.records)
+    carriers = set(n.c.carriers.static.index)
+    assert {"electricity-Carrier", "hydrogen-Carrier", "solar", "wind"} <= carriers
+    assert n.c.buses.static.at["electricity", "carrier"] == "electricity-Carrier"
+    assert n.c.generators.static.at["solar-Generator", "carrier"] == "solar"
+    assert "hydrogen storage-Store" in n.c.stores.static.index
 
 
 def test_carbon_management():

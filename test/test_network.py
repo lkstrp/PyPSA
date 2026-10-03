@@ -172,6 +172,24 @@ def test_add_allows_shape_named_like_bus():
     assert "bus1" in n.c.shapes.static.index
 
 
+def test_add_refuses_carrier_named_like_bus():
+    """Carrier is a namespace type: a carrier may not share a bus's name."""
+    n = pypsa.Network()
+    n.add("Bus", "heat")
+
+    with pytest.raises(ValueError, match="heat: Bus, Carrier"):
+        n.add("Carrier", "heat")
+
+
+def test_add_refuses_generator_named_like_carrier():
+    n = pypsa.Network()
+    n.add("Bus", "b0")
+    n.add("Carrier", "solar")
+
+    with pytest.raises(ValueError, match="solar: Carrier, Generator"):
+        n.add("Generator", "solar", bus="b0", carrier="solar")
+
+
 def test_determine_network_topology_names_sub_networks_like_numeric_buses():
     """SubNetwork is exempt, so sub-network names "0", "1" may equal bus names."""
     n = pypsa.Network()
@@ -1017,15 +1035,47 @@ def test_rename_component_names_refuses_duplicate_targets():
 
 
 def test_rename_component_names_exempt_type_may_reuse_other_types_name():
+    from shapely.geometry import Point
+
+    n = pypsa.Network()
+    n.add("Bus", "bus1")
+    n.add("Generator", "gen1", bus="bus1")
+    n.add("Shape", "shape1", geometry=Point(0, 0), component="Bus", idx="bus1")
+
+    n.rename_component_names("Shape", shape1="gen1")
+
+    assert "gen1" in n.c.shapes.static.index
+    assert "gen1" in n.c.generators.static.index
+
+
+def test_rename_component_names_carrier_refuses_taken_name():
     n = pypsa.Network()
     n.add("Bus", "bus1")
     n.add("Generator", "gen1", bus="bus1")
     n.add("Carrier", "wind")
 
-    n.rename_component_names("Carrier", wind="gen1")
+    with pytest.raises(ValueError, match="gen1: Carrier, Generator"):
+        n.rename_component_names("Carrier", wind="gen1")
 
-    assert "gen1" in n.c.carriers.static.index
-    assert "gen1" in n.c.generators.static.index
+
+def test_rename_carrier_cascades_to_every_type():
+    """Renaming a carrier rewrites `carrier` on ported and unported types
+    alike: Bus, Line, Link and Generator all point at the new name.
+    """
+    n = pypsa.Network()
+    n.add("Carrier", ["wind", "AC"])
+    n.add("Bus", ["b0", "b1"], carrier="AC")
+    n.add("Line", "l0", bus0="b0", bus1="b1", carrier="AC", x=0.1)
+    n.add("Link", "lk0", bus0="b0", bus1="b1", carrier="wind")
+    n.add("Generator", "g0", bus="b0", carrier="wind")
+
+    n.rename_component_names("Carrier", wind="onwind", AC="ac")
+
+    assert list(n.c.carriers.static.index) == ["onwind", "ac"]
+    assert (n.c.buses.static["carrier"] == "ac").all()
+    assert n.c.lines.static.at["l0", "carrier"] == "ac"
+    assert n.c.links.static.at["lk0", "carrier"] == "onwind"
+    assert n.c.generators.static.at["g0", "carrier"] == "onwind"
 
 
 def test_rename_component_names_keeps_piecewise_curve():
@@ -1219,6 +1269,32 @@ def test_deduplicate_names_applies_three_type_chain_in_reverse_order():
     assert "x-Line" in n.c.lines.static.index
     assert "x-Line-Load" in n.c.loads.static.index
     assert "x-Line-Load-Store" in n.c.stores.static.index
+
+
+def test_deduplicate_names_carrier_yields_only_to_bus():
+    """Carrier follows Bus in NAMESPACE_ORDER: it is renamed on a bus clash,
+    with the rename cascading to every `carrier` column, and a later type
+    is renamed on a carrier clash.
+    """
+    from pypsa.network.names import deduplicate_names, unchecked_names
+
+    n = pypsa.Network()
+    n.add("Bus", "heat")
+    with unchecked_names(n):
+        n.add("Carrier", ["heat", "solar"])
+        n.add("Generator", "solar", bus="heat", carrier="solar")
+        n.add("Load", "l0", bus="heat", carrier="heat")
+    n.c.buses.static["carrier"] = "heat"
+
+    result = deduplicate_names(n)
+
+    assert result == {
+        "Carrier": {"heat": "heat-Carrier"},
+        "Generator": {"solar": "solar-Generator"},
+    }
+    assert n.c.buses.static.at["heat", "carrier"] == "heat-Carrier"
+    assert n.c.loads.static.at["l0", "carrier"] == "heat-Carrier"
+    assert n.c.generators.static.at["solar-Generator", "carrier"] == "solar"
 
 
 def test_deduplicate_names_keeps_shape_reference():
