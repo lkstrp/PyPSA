@@ -956,22 +956,6 @@ def _canonical_dynamic_order(n: pypsa.Network) -> pypsa.Network:
     return n
 
 
-def _drop_carrier_shape_custom_attrs(n: pypsa.Network) -> pypsa.Network:
-    """Drop non-registry Carrier/Shape static columns, in place.
-
-    The datarecord format round-trips a component's registry-declared
-    attributes only; a custom column, such as the shipped `ac-dc-meshed`
-    example's `marginal_cost` on Carrier, has no schema slot for a dim
-    attribute yet. Remove this once custom carrier/shape attributes round-trip.
-    """
-    for ctype in ("Carrier", "Shape"):
-        c = n.components[ctype]
-        extra = [col for col in c.static.columns if col not in c.defaults.index]
-        if extra:
-            c.static = c.static.drop(columns=extra)
-    return n
-
-
 def _drop_topology(n: pypsa.Network) -> pypsa.Network:
     """Reset `sub_network` (Bus, Line, Transformer) and Bus `generator` to their default, in place.
 
@@ -1074,6 +1058,42 @@ class TestDatarecord:
         from pypsa.network.io.datarecord.schema import TIMESTEP
 
         assert rec.flags("Link")["p"].varies == frozenset({TIMESTEP})
+
+    def test_round_trip_three_port_link(self, tmp_path):
+        """A static `efficiency2`, with a solved `p2` output series."""
+        n = pypsa.Network()
+        n.set_snapshots(range(2))
+        n.add("Bus", ["mb0", "mb1", "mb2"])
+        n.add(
+            "Link",
+            "mlk0",
+            bus0="mb0",
+            bus1="mb1",
+            bus2="mb2",
+            efficiency2=0.3,
+        )
+        n.c.links.dynamic["p2"] = pd.DataFrame({"mlk0": [1.0, 2.0]}, index=n.snapshots)
+        n, n2 = self._round_trip(n, tmp_path)
+        assert n2.c.links.static.at["mlk0", "bus2"] == "mb2"
+        assert n2.c.links.static.at["mlk0", "efficiency2"] == 0.3
+        assert custom_equals(n, n2)
+
+    def test_round_trip_process_with_three_ports(self, tmp_path):
+        """A time-varying `rate2`, with a solved `p2` output series."""
+        n = pypsa.Network()
+        n.set_snapshots(range(2))
+        n.add("Bus", ["mb0", "mb1", "mb2"])
+        n.add("Process", "mpc0", bus0="mb0", bus1="mb1", bus2="mb2")
+        n.c.processes.dynamic["rate2"] = pd.DataFrame(
+            {"mpc0": [0.4, 0.5]}, index=n.snapshots
+        )
+        n.c.processes.dynamic["p2"] = pd.DataFrame(
+            {"mpc0": [1.0, 2.0]}, index=n.snapshots
+        )
+        n, n2 = self._round_trip(n, tmp_path)
+        assert n2.c.processes.static.at["mpc0", "bus2"] == "mb2"
+        assert list(n2.c.processes.dynamic["rate2"]["mpc0"]) == [0.4, 0.5]
+        assert custom_equals(n, n2)
 
     def test_multiperiod_series_carry_period_column(self):
         n = pypsa.examples.ac_dc_meshed()
@@ -1199,7 +1219,6 @@ class TestDatarecord:
         """Export a copy of `n` to disk and reopen it via `pypsa.Network`."""
         n = n.copy()
         _canonical_dynamic_order(n)
-        _drop_carrier_shape_custom_attrs(n)
         _drop_topology(n)
         path = tmp_path / "record"
         with pytest.warns(UserWarning, match="experimental"):
@@ -1313,24 +1332,71 @@ class TestDatarecord:
         n.c.shapes.static["geometry"] = n2.c.shapes.static["geometry"]
         assert custom_equals(n, n2)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="custom carrier attributes land with custom attribute declarations",
-    )
     def test_round_trip_custom_carrier_attribute(self, tmp_path):
         n = pypsa.Network()
         n.add("Bus", "b0")
         n.add("Carrier", "gas", co2_emissions=0.2)
         n.c.carriers.static["marginal_cost"] = 5.0
-        n = n.copy()
-        _canonical_dynamic_order(n)
-        _drop_topology(n)
-        path = tmp_path / "record"
-        with pytest.warns(UserWarning, match="experimental"):
-            n.export_to_datarecord(path)
-        with pytest.warns(UserWarning, match="experimental"):
-            n2 = pypsa.Network(path)
+        n, n2 = self._round_trip(n, tmp_path)
+        assert n2.c.carriers.static.at["gas", "marginal_cost"] == 5.0
         assert custom_equals(n, n2)
+
+    def test_round_trip_custom_bus_static_attributes(self, tmp_path):
+        n = pypsa.Network()
+        n.add("Bus", "cb0")
+        n.c.buses.static["custom_float"] = 1.5
+        n.c.buses.static["custom_str"] = "hello"
+        n, n2 = self._round_trip(n, tmp_path)
+        assert n2.c.buses.static.at["cb0", "custom_float"] == 1.5
+        assert n2.c.buses.static.at["cb0", "custom_str"] == "hello"
+        assert custom_equals(n, n2)
+
+    def test_round_trip_custom_generator_series_attribute(self, tmp_path):
+        n = pypsa.Network()
+        n.set_snapshots(range(2))
+        n.add("Bus", "cb1")
+        n.add("Generator", "cg0", bus="cb1")
+        n.c.generators.dynamic["custom_series"] = pd.DataFrame(
+            {"cg0": [1.0, 2.0]}, index=n.snapshots
+        )
+        with pytest.warns(UserWarning, match="experimental"):
+            rec = n.to_datarecord()
+        assert "custom_series" in rec.schema.attributes
+        assert "custom_series" in rec.schema.types["Generator"].attributes
+
+        n, n2 = self._round_trip(n, tmp_path)
+        assert list(n2.c.generators.dynamic["custom_series"]["cg0"]) == [1.0, 2.0]
+        assert custom_equals(n, n2)
+
+    def test_round_trip_custom_attribute_shared_name_differs_by_type(self, tmp_path):
+        n = pypsa.Network()
+        n.set_snapshots(range(2))
+        n.add("Bus", "cb2")
+        n.add("Load", "cl0", bus="cb2")
+        n.add("Generator", "cg1", bus="cb2")
+        n.c.loads.static["shared_custom"] = 2.0
+        n.c.generators.dynamic["shared_custom"] = pd.DataFrame(
+            {"cg1": [1.0, 2.0]}, index=n.snapshots
+        )
+        n, n2 = self._round_trip(n, tmp_path)
+        assert n2.c.loads.static.at["cl0", "shared_custom"] == 2.0
+        assert list(n2.c.generators.dynamic["shared_custom"]["cg1"]) == [1.0, 2.0]
+        assert custom_equals(n, n2)
+
+    def test_custom_time_varying_p_nom_on_bus_raises(self):
+        from pypsa.network.io.datarecord.record import DatarecordExportError
+
+        n = pypsa.Network()
+        n.set_snapshots(range(2))
+        n.add("Bus", "cb3")
+        n.c.buses.dynamic["p_nom"] = pd.DataFrame(
+            {"cb3": [1.0, 2.0]}, index=n.snapshots
+        )
+        with pytest.warns(UserWarning, match="experimental"):
+            rec = n.to_datarecord()
+        with pytest.raises(DatarecordExportError, match="Bus") as exc_info:
+            rec.schema  # noqa: B018
+        assert "p_nom" in str(exc_info.value)
 
     def test_solved_network_record_has_no_topology_outputs(
         self, ac_dc_solved, tmp_path
@@ -1355,7 +1421,6 @@ class TestDatarecord:
     def test_from_datarecord_without_disk(self, ac_dc_network):
         n = ac_dc_network.copy()
         _canonical_dynamic_order(n)
-        _drop_carrier_shape_custom_attrs(n)
         _drop_topology(n)
         with pytest.warns(UserWarning, match="experimental"):
             record = n.to_datarecord()
@@ -1368,7 +1433,6 @@ class TestDatarecord:
     ):
         n = ac_dc_network.copy()
         _canonical_dynamic_order(n)
-        _drop_carrier_shape_custom_attrs(n)
         _drop_topology(n)
         path = tmp_path / "record"
         with pytest.warns(UserWarning, match="experimental"):
@@ -1420,7 +1484,6 @@ class TestDatarecord:
                 ctype, **{name: f"{ctype} {name}" for name in c.static.index}
             )
         _canonical_dynamic_order(n)
-        _drop_carrier_shape_custom_attrs(n)
         _drop_topology(n)
         ignore = [
             "_components.sub_networks",

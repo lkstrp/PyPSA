@@ -32,6 +32,7 @@ from pypsa.network.io.datarecord.schema import (
     SNAPSHOT_WEIGHTINGS,
     TIMESTEP,
     port_columns,
+    pypsa_name,
     record_name,
 )
 
@@ -110,6 +111,17 @@ def _bus_columns(c: Components) -> dict[str, str]:
     return {port: col for col, (stem, port) in port_columns(c).items() if stem == _BUS}
 
 
+def _mine(ports: pd.DataFrame, static: pd.DataFrame) -> pd.DataFrame:
+    """Scope the full `port` frame to one type's own connection rows."""
+    return ports[ports[_ENTITY].isin(static[_ENTITY])]
+
+
+def _port_labels(ports: pd.DataFrame, static: pd.DataFrame) -> list[str]:
+    """Distinct port labels one type's entities use, from its `port` connection rows."""
+    mine = _mine(ports, static)
+    return [] if mine.empty else sorted(mine["value"].unique())
+
+
 def _pivot_buses(
     static: pd.DataFrame, ports: pd.DataFrame, c: Components
 ) -> pd.DataFrame:
@@ -117,7 +129,7 @@ def _pivot_buses(
     bus_cols = _bus_columns(c)
     if not bus_cols or ports.empty:
         return static
-    mine = ports[ports[_ENTITY].isin(static[_ENTITY])]
+    mine = _mine(ports, static)
     if mine.empty:
         return static
     # A connection's bus never varies by scenario, but a stochastic record's
@@ -246,6 +258,16 @@ def _filter_rows(
     return rows.merge(wanted, on=[_ENTITY, _BUS])
 
 
+def _stem_ports(
+    ports: dict[str, tuple[str, str]],
+) -> dict[str, list[tuple[str | None, str]]]:
+    """Record stem -> this type's (port, PyPSA column) pairs it addresses."""
+    result: dict[str, list[tuple[str | None, str]]] = {}
+    for col, (stem, port) in ports.items():
+        result.setdefault(stem, []).append((port, col))
+    return result
+
+
 def _add_component_type(
     n: Network,
     c: Components,
@@ -256,38 +278,47 @@ def _add_component_type(
     multiperiod: bool,
     stochastic: bool,
 ) -> None:
-    """Assign one type's static frame (inputs), then its series and piecewise data."""
+    """Assign one type's static frame (inputs), then its series and piecewise data.
+
+    Iterates `record.schema.attributes_for(ctype)` rather than the registry's
+    `c.defaults.index`, so a custom attribute the schema granted this type
+    comes back too, port stems expanded to their PyPSA columns through
+    `port_columns` and record names through `pypsa_name`.
+    """
     ctype = c.name
-    defaults = c.defaults
-    ports = port_columns(c)
     bus_cols = _bus_columns(c)
+    stem_ports = _stem_ports(port_columns(c))
 
     deferred: list[tuple[str, pd.DataFrame, pd.DataFrame]] = []
-    for attr in defaults.index:
-        if attr == "name" or attr in static.columns:
-            continue
-        if str(defaults.at[attr, "status"]).startswith("Output"):
-            continue
-        stem, port = ports.get(attr, (attr, None))
-        record_attr = record_name(ctype, stem) if port is None else stem
-        if record_attr not in record.attributes:
+    for record_attr in record.schema.attributes_for(ctype):
+        if record_attr == PORT or record_attr not in record.attributes:
             continue
         rows = _attr_rows(cache, record, "inputs", record_attr)
-        bus = static[bus_cols[port]] if port is not None and port in bus_cols else None
-        rows = _filter_rows(rows, static[_ENTITY], bus)
-        if rows.empty:
-            continue
-        scalar, series, piecewise = _split_rows(rows)
-        if not scalar.empty:
-            values = _scalar_values(scalar, stochastic=stochastic)
-            key = (
-                pd.MultiIndex.from_frame(static[["scenario", _ENTITY]])
-                if isinstance(values.index, pd.MultiIndex)
-                else static[_ENTITY]
+        targets = stem_ports.get(record_attr) or [
+            (None, pypsa_name(ctype, record_attr))
+        ]
+        for port, attr in targets:
+            if attr in static.columns:
+                continue
+            bus = (
+                static[bus_cols[port]]
+                if port is not None and port in bus_cols
+                else None
             )
-            static[attr] = key.map(values)
-        if not series.empty or not piecewise.empty:
-            deferred.append((attr, series, piecewise))
+            filtered = _filter_rows(rows, static[_ENTITY], bus)
+            if filtered.empty:
+                continue
+            scalar, series, piecewise = _split_rows(filtered)
+            if not scalar.empty:
+                values = _scalar_values(scalar, stochastic=stochastic)
+                key = (
+                    pd.MultiIndex.from_frame(static[["scenario", _ENTITY]])
+                    if isinstance(values.index, pd.MultiIndex)
+                    else static[_ENTITY]
+                )
+                static[attr] = key.map(values)
+            if not series.empty or not piecewise.empty:
+                deferred.append((attr, series, piecewise))
 
     if stochastic:
         static = static.set_index(["scenario", _ENTITY])
@@ -384,12 +415,14 @@ def _import_entity_type(
         col for col in static.columns if col != _ENTITY and static[col].isna().all()
     ]
     static = static.drop(columns=all_null)
+    if ctype in ("Link", "Process"):
+        labels = _port_labels(ports, static)
+        _update_ports_component_attrs(
+            n, where=[f"bus{label}" for label in labels], c_name=ctype
+        )
     static = _pivot_buses(static, ports, c)
     if stochastic:
         static = _broadcast_scenarios(static, n.scenarios)
-
-    if ctype in ("Link", "Process"):
-        _update_ports_component_attrs(n, where=static.columns, c_name=ctype)
 
     _add_component_type(
         n, c, static, cache, record, multiperiod=multiperiod, stochastic=stochastic
@@ -439,6 +472,14 @@ def _add_dim_component(
     else:
         frame = frame.rename(
             columns={record_name(ctype, attr): attr for attr in _DIM_ATTRS[dim]}
+        )
+        prefix = f"{dim}_"
+        frame = frame.rename(
+            columns={
+                col: col[len(prefix) :]
+                for col in frame.columns
+                if col.startswith(prefix)
+            }
         )
         frame = frame.set_index(dim)
         frame.index.name = "name"

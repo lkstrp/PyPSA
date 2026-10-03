@@ -81,6 +81,12 @@ _DIM_ATTRS: dict[str, tuple[str, ...]] = {
 }
 # Dim name -> the entity type it rebuilds on import.
 DIM_TYPES: dict[str, str] = {CARRIER: "Carrier", SHAPE: "Shape"}
+# Entity type -> its dim, the inverse of `DIM_TYPES`.
+_TYPE_DIMS: dict[str, str] = {v: k for k, v in DIM_TYPES.items()}
+
+# `schema.meta` key for `declare_custom`'s merge bookkeeping, popped before
+# the schema is used (`NetworkRecord.schema`), never written to disk.
+_CUSTOM_ATTRS_META_KEY = "_datarecord_custom_attrs"
 
 # Derived topology outputs dropped from the schema and never written: Bus,
 # Line and Transformer's `sub_network`, and Bus's `generator`. Both are set by
@@ -125,6 +131,16 @@ _PYPSA_NAME_OVERRIDES = {
 def record_name(ctype: str, attr: str) -> str:
     """PyPSA attribute -> record-wide attribute name."""
     return _RECORD_NAME_OVERRIDES.get((ctype, attr), attr)
+
+
+def custom_dim_attr_name(dim: str, attr: str) -> str:
+    """Record-wide name for a custom Carrier/Shape attribute, namespaced by `dim`.
+
+    A custom name could otherwise collide with an unrelated per-component
+    registry attribute, the way `marginal_cost` does with Generator's own.
+    The same pattern already stores `Shape.type` as `shape_type`.
+    """
+    return f"{dim}_{attr}"
 
 
 def pypsa_name(ctype: str, record_attr: str) -> str:
@@ -393,3 +409,71 @@ def build_schema(*, multiperiod: bool, timestep_dtype: str, stochastic: bool) ->
         types=types,
         partial=frozenset({SCENARIO}),
     )
+
+
+def declare_custom(
+    schema: Schema,
+    ctype: str,
+    attr: str,
+    dtype: nw.dtypes.DType,
+    *,
+    varying: bool,
+    multiperiod: bool,
+) -> None:
+    """Register a custom attribute record-wide, granted to `ctype` with no default.
+
+    Carrier and Shape attributes go over their own dim instead, under
+    `custom_dim_attr_name`, and are never granted to a type.
+
+    Raises `DatarecordExportError` when `attr` already names a registry
+    attribute of a different dtype or dims. Two custom declarations of the
+    same name merge by unioning their dims. A dtype mismatch between them
+    raises only when at least one is time-varying, so two purely static
+    columns that coincide in name may keep their own dtype.
+    """
+    from pypsa.network.io.datarecord.record import (  # noqa: PLC0415
+        DatarecordExportError,
+    )
+
+    dim = _TYPE_DIMS.get(ctype)
+    if dim is not None:
+        record_attr = custom_dim_attr_name(dim, attr)
+        schema.attributes[record_attr] = AttributeSpec(
+            dtype=dtype, dims=frozenset({dim}), default=None
+        )
+        return
+
+    varying_dims = {_ENTITY, SCENARIO}
+    if varying:
+        varying_dims.add(TIMESTEP)
+        if multiperiod:
+            varying_dims.add(PERIOD)
+    dims = frozenset(varying_dims)
+
+    custom_names = schema.meta.setdefault(_CUSTOM_ATTRS_META_KEY, set())
+    existing = schema.attributes.get(attr)
+    if existing is not None:
+        if attr not in custom_names:
+            if existing.dtype != dtype or existing.dims != dims:
+                msg = (
+                    f"{ctype} cannot declare {attr!r} as a custom attribute, "
+                    f"it is already a registry attribute of a different shape"
+                )
+                raise DatarecordExportError(msg)
+        elif existing.dtype != dtype:
+            if varying or TIMESTEP in existing.dims:
+                msg = (
+                    f"{ctype} declares custom attribute {attr!r} as {dtype}, "
+                    f"conflicting with its existing declaration as {existing.dtype}"
+                )
+                raise DatarecordExportError(msg)
+            # Coincidental name clash between two static columns, neither
+            # written to a shared file, so the dtype here is only documentation.
+            dtype = existing.dtype
+            dims = existing.dims | dims
+        else:
+            dims = existing.dims | dims
+
+    schema.attributes[attr] = AttributeSpec(dtype=dtype, dims=dims, default=None)
+    custom_names.add(attr)
+    schema.types[ctype].attributes[attr] = TypeAttribute(default=None)
