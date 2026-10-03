@@ -108,16 +108,20 @@ def _legacy_snapshots(index: pd.Index) -> pd.Index:
 def _legacy_snapshot_level(level: pd.Index, by: pd.Index | None = None) -> pd.Index:
     """Convert one snapshot index level to integer or datetime labels.
 
-    Integer and datetime levels pass through unchanged. A single `"now"`
-    label maps to `0`. Other labels are tried as dates, and if that fails,
-    replaced by positions (per `by` group, for a multi-period timestep level)
-    with a warning listing the original labels.
+    Integer, float and datetime levels pass through unchanged (a float level
+    is not a legacy label PyPSA ever wrote, and letting it through here makes
+    `set_snapshots` raise its own clear dtype error instead of this function
+    silently parsing it as an epoch timestamp). An all-`"now"` level maps to
+    `0`, once per period for a multi-period timestep level. Other labels are
+    tried as dates, and if that fails, replaced by positions (per `by` group,
+    for a multi-period timestep level) with a warning listing the original
+    labels.
     """
-    if level.dtype.kind in "iuM":
+    if level.dtype.kind in "iufM":
         return level
 
-    if len(level) == 1 and level[0] == "now":
-        return pd.Index([0], name=level.name)
+    if (level == "now").all():
+        return pd.Index([0] * len(level), name=level.name)
 
     try:
         with warnings.catch_warnings():
