@@ -9,9 +9,9 @@ types, the namespace types. Carrier, Shape, SubNetwork and the standard
 types sit outside that namespace and may reuse a namespace type's name.
 
 This module answers "who already holds this name" for the namespace types,
-and formats the answer as the export-check error wording. It does not
-enforce anything itself. `rename_component_names` uses it to refuse a
-taken target name.
+and formats the answer as the export-check error wording. `check_names_free`
+enforces it on import and `n.add`; `rename_component_names` uses it to
+refuse a taken target name.
 """
 
 from __future__ import annotations
@@ -65,17 +65,23 @@ def name_owners(
     Checks every namespace type except `exclude`. A name absent from all of
     them is left out of the result, so an empty dict means no clash.
 
-    Each type's own `static.index` engine answers the membership check
-    (`idx.get_indexer(names) >= 0`), so repeated calls reuse pandas' cached
-    hash table instead of rebuilding a set of all names.
+    Tests each type's own name level against `names` with `isin`, which hits
+    a hash table built over the (usually short) `names` and never dedupes
+    the type's own, possibly scenario-repeated, level up front. `unique()`
+    only runs over the few hits, not the whole level.
     """
     owners: dict[str, list[str]] = {}
     for type_name in NAMESPACE_ORDER:
         if type_name == exclude:
             continue
-        index = _name_level(n.components[type_name].static.index)
-        hits = index.get_indexer(names) >= 0
-        for name in names[hits]:
+        index = n.components[type_name].static.index
+        level = (
+            index.get_level_values(-1) if isinstance(index, pd.MultiIndex) else index
+        )
+        hits = level.isin(names)
+        if not hits.any():
+            continue
+        for name in level[hits].unique():
             owners.setdefault(str(name), []).append(type_name)
     for types in owners.values():
         types.sort()
@@ -99,7 +105,7 @@ def check_names_free(n: Network, cls_name: str, names: pd.Index) -> None:
     """
     if cls_name not in NAMESPACE_ORDER:
         return
-    if getattr(n, "_names_unchecked", 0):
+    if n._names_unchecked:
         return
     owners = name_owners(n, _name_level(names), exclude=cls_name)
     if owners:
@@ -116,7 +122,7 @@ def unchecked_names(n: Network) -> Generator[None, None, None]:
     clustering use this while they build a network that may clash, then call
     `deduplicate_names` after leaving the context.
     """
-    n._names_unchecked = getattr(n, "_names_unchecked", 0) + 1
+    n._names_unchecked += 1
     try:
         yield
     finally:
@@ -152,10 +158,8 @@ def deduplicate_names(n: Network) -> dict[str, dict[str, str]]:
         type_map: dict[str, str] = {}
         assigned: set[str] = set()
 
-        for name in names.unique():
-            name = str(name)
-            if name not in taken:
-                continue
+        candidates = [name for name in map(str, names) if name in taken]
+        for name in candidates:
             counter = 1
             candidate = f"{name}-{type_name}"
             while candidate in taken or candidate in same_type or candidate in assigned:
