@@ -1018,7 +1018,6 @@ class SpatialClusteringMixin:
                         clustered._import_series_from_df(df, one_port, attr)
 
             # Collect remaining one ports
-
             for c in n.components:
                 if c.name not in one_port_components:
                     continue
