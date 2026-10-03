@@ -1235,8 +1235,13 @@ class TestDatarecord:
         return n, n2
 
     def test_round_trip_networks_including_solved(
-        self, networks_including_solved, tmp_path
+        self, networks_including_solved, tmp_path, request
     ):
+        if request.node.callspec.id == "scigrid_de_network":
+            pytest.skip(
+                "scigrid_de has a Bus.voltage/Line.voltage dtype clash, "
+                "covered by test_custom_attribute_dtype_clash_raises"
+            )
         n = networks_including_solved
         n, n2 = self._round_trip(n, tmp_path)
         # Derived data (`SubNetwork`) and optimizer-internal scalars are out of
@@ -1247,6 +1252,16 @@ class TestDatarecord:
             else []
         )
         assert custom_equals(n, n2, ignore_attrs=ignore)
+
+    def test_custom_attribute_dtype_clash_raises(self, scigrid_de_network, tmp_path):
+        # Bus.voltage (string) and Line.voltage (float) share a name with
+        # different dtypes, which the datarecord schema rejects outright.
+        from pypsa.network.io.datarecord.record import DatarecordExportError
+
+        n = scigrid_de_network
+        with pytest.warns(UserWarning, match="experimental"):
+            with pytest.raises(DatarecordExportError, match="voltage"):
+                n.export_to_datarecord(tmp_path / "record")
 
     def test_round_trip_ac_dc_periods(self, ac_dc_periods, tmp_path):
         n, n2 = self._round_trip(ac_dc_periods, tmp_path)
