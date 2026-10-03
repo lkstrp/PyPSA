@@ -1060,7 +1060,7 @@ class TestDatarecord:
         assert rec.flags("Link")["p"].varies == frozenset({TIMESTEP})
 
     def test_round_trip_three_port_link(self, tmp_path):
-        """A static `efficiency2`, with a solved `p2` output series."""
+        """A static `efficiency2` on one link, time-varying on another, both with a solved `p2` output series."""
         n = pypsa.Network()
         n.set_snapshots(range(2))
         n.add("Bus", ["mb0", "mb1", "mb2"])
@@ -1072,10 +1072,17 @@ class TestDatarecord:
             bus2="mb2",
             efficiency2=0.3,
         )
-        n.c.links.dynamic["p2"] = pd.DataFrame({"mlk0": [1.0, 2.0]}, index=n.snapshots)
+        n.add("Link", "mlk1", bus0="mb0", bus1="mb1", bus2="mb2")
+        n.c.links.dynamic["efficiency2"] = pd.DataFrame(
+            {"mlk1": [0.4, 0.45]}, index=n.snapshots
+        )
+        n.c.links.dynamic["p2"] = pd.DataFrame(
+            {"mlk0": [1.0, 2.0], "mlk1": [1.5, 2.5]}, index=n.snapshots
+        )
         n, n2 = self._round_trip(n, tmp_path)
         assert n2.c.links.static.at["mlk0", "bus2"] == "mb2"
         assert n2.c.links.static.at["mlk0", "efficiency2"] == 0.3
+        assert list(n2.c.links.dynamic["efficiency2"]["mlk1"]) == [0.4, 0.45]
         assert custom_equals(n, n2)
 
     def test_round_trip_process_with_three_ports(self, tmp_path):
@@ -1293,6 +1300,23 @@ class TestDatarecord:
         assert n2.c.carriers.static.loc[("high", "gas"), "co2_emissions"] == 0.4
         assert custom_equals(n, n2)
 
+    def test_round_trip_stochastic_custom_carrier_attribute(self, tmp_path):
+        """A custom Carrier column, constant in one scenario and diverging in the other."""
+        n = pypsa.Network()
+        n.add("Bus", "b0")
+        n.add("Carrier", "gas", co2_emissions=0.2)
+        n.add("Generator", "g0", bus="b0", carrier="gas")
+        n.c.carriers.static["marginal_cost"] = 5.0
+        n.c.carriers.static["custom_constant"] = "shared"
+        n.set_scenarios({"low": 0.5, "high": 0.5})
+        n.c.carriers.static.loc[("high", "gas"), "marginal_cost"] = 7.0
+        n, n2 = self._round_trip(n, tmp_path)
+        assert n2.c.carriers.static.loc[("low", "gas"), "marginal_cost"] == 5.0
+        assert n2.c.carriers.static.loc[("high", "gas"), "marginal_cost"] == 7.0
+        assert n2.c.carriers.static.loc[("low", "gas"), "custom_constant"] == "shared"
+        assert n2.c.carriers.static.loc[("high", "gas"), "custom_constant"] == "shared"
+        assert custom_equals(n, n2)
+
     def test_round_trip_shape_type(self, tmp_path):
         from shapely.geometry import Point
 
@@ -1349,6 +1373,19 @@ class TestDatarecord:
         n, n2 = self._round_trip(n, tmp_path)
         assert n2.c.buses.static.at["cb0", "custom_float"] == 1.5
         assert n2.c.buses.static.at["cb0", "custom_str"] == "hello"
+        assert custom_equals(n, n2)
+
+    def test_round_trip_stochastic_custom_static_attribute_diverges(self, tmp_path):
+        """A custom static column that differs per scenario, not just per entity."""
+        n = pypsa.Network()
+        n.add("Bus", "b0")
+        n.add("Load", "l0", bus="b0")
+        n.c.loads.static["custom_f"] = 1.0
+        n.set_scenarios({"low": 0.5, "high": 0.5})
+        n.c.loads.static.loc[("high", "l0"), "custom_f"] = 2.0
+        n, n2 = self._round_trip(n, tmp_path)
+        assert n2.c.loads.static.loc[("low", "l0"), "custom_f"] == 1.0
+        assert n2.c.loads.static.loc[("high", "l0"), "custom_f"] == 2.0
         assert custom_equals(n, n2)
 
     def test_round_trip_custom_generator_series_attribute(self, tmp_path):

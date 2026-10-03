@@ -448,7 +448,7 @@ def _add_dim_component(
 
     A non-stochastic frame carries every attribute as a column already; a
     stochastic one carries only the names, overlaid here with each
-    attribute's per-scenario long rows.
+    attribute's per-scenario long rows, registry and custom alike.
     """
     if dim not in record.dims:
         return
@@ -457,8 +457,20 @@ def _add_dim_component(
         return
     if stochastic:
         frame = _broadcast_scenarios(frame, n.scenarios)
-        for attr in _DIM_ATTRS[dim]:
-            record_attr = record_name(ctype, attr)
+        registry = {record_name(ctype, attr): attr for attr in _DIM_ATTRS[dim]}
+        prefix = f"{dim}_"
+        # Column order follows the schema's own attribute order (a plain dict,
+        # insertion-ordered), not `record.attributes` (a set): registry names
+        # first, then custom ones in the order they were declared, matching
+        # the static column order the network was exported with.
+        order = [
+            record_attr
+            for record_attr in record.schema.attributes
+            if record_attr in registry
+            or (record_attr.startswith(prefix) and record_attr not in registry)
+        ]
+        for record_attr in order:
+            attr = registry.get(record_attr, record_attr[len(prefix) :])
             if record_attr not in record.attributes:
                 continue
             rows = _collect(record.attributes[record_attr])

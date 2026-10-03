@@ -419,17 +419,18 @@ def declare_custom(
     *,
     varying: bool,
     multiperiod: bool,
+    stochastic: bool = False,
 ) -> None:
     """Register a custom attribute record-wide, granted to `ctype` with no default.
 
     Carrier and Shape attributes go over their own dim instead, under
-    `custom_dim_attr_name`, and are never granted to a type.
+    `custom_dim_attr_name`, and are never granted to a type; their dims gain
+    `scenario` when `stochastic`, matching `build_schema`'s own registry dims.
 
     Raises `DatarecordExportError` when `attr` already names a registry
     attribute of a different dtype or dims. Two custom declarations of the
     same name merge by unioning their dims. A dtype mismatch between them
-    raises only when at least one is time-varying, so two purely static
-    columns that coincide in name may keep their own dtype.
+    always raises: one attribute has one dtype, per the format's invariant.
     """
     from pypsa.network.io.datarecord.record import (  # noqa: PLC0415
         DatarecordExportError,
@@ -438,8 +439,9 @@ def declare_custom(
     dim = _TYPE_DIMS.get(ctype)
     if dim is not None:
         record_attr = custom_dim_attr_name(dim, attr)
+        dim_dims = frozenset({dim, SCENARIO}) if stochastic else frozenset({dim})
         schema.attributes[record_attr] = AttributeSpec(
-            dtype=dtype, dims=frozenset({dim}), default=None
+            dtype=dtype, dims=dim_dims, default=None
         )
         return
 
@@ -461,16 +463,11 @@ def declare_custom(
                 )
                 raise DatarecordExportError(msg)
         elif existing.dtype != dtype:
-            if varying or TIMESTEP in existing.dims:
-                msg = (
-                    f"{ctype} declares custom attribute {attr!r} as {dtype}, "
-                    f"conflicting with its existing declaration as {existing.dtype}"
-                )
-                raise DatarecordExportError(msg)
-            # Coincidental name clash between two static columns, neither
-            # written to a shared file, so the dtype here is only documentation.
-            dtype = existing.dtype
-            dims = existing.dims | dims
+            msg = (
+                f"{ctype} declares custom attribute {attr!r} as {dtype}, "
+                f"conflicting with its existing declaration as {existing.dtype}"
+            )
+            raise DatarecordExportError(msg)
         else:
             dims = existing.dims | dims
 
