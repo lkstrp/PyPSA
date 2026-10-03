@@ -70,6 +70,23 @@ def test_add_missing_carriers_generator_named_like_its_carrier():
     assert "solar" in n.c.carriers.static.index
 
 
+def test_add_missing_carriers_generator_named_like_explicit_carrier():
+    """Same naming rule, but the carrier is added explicitly beforehand
+    rather than implicitly created by `add_missing_carriers`.
+    """
+    n = Network()
+    n.add("Bus", "bus1")
+    n.add("Generator", "solar", bus="bus1", carrier="solar")
+    n.add("Carrier", "solar")
+
+    added = n.c.carriers.add_missing_carriers()
+
+    assert set(added) == {"AC"}
+    n.sanitize()
+    assert "solar" in n.c.generators.static.index
+    assert "solar" in n.c.carriers.static.index
+
+
 def test_assign_colors():
     """Test assign_colors: basic, specific carriers, palette, overwrite, partial."""
     import pytest
