@@ -271,10 +271,10 @@ class NetworkIOMixin(_NetworkABC):
         else:
             pypsa_version = parse_version("0.0.0")
 
+        # Stray legacy network attribute, superseded by snapshot conversion below.
+        attrs.pop("now", None)
+
         for attr, val in attrs.items():
-            if attr == "now":
-                # Stray legacy network attribute, superseded by snapshot conversion below.
-                continue
             if attr in ["model", "objective", "objective_constant"]:
                 setattr(self, f"_{attr}", val)
             else:
