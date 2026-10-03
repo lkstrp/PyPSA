@@ -173,6 +173,32 @@ def test_csv_import_converts_legacy_multiperiod_string_timesteps(tmp_path):
     assert list(n.snapshots.get_level_values("timestep")) == [0, 1, 0, 1]
 
 
+def test_csv_import_converts_legacy_multiperiod_now_timesteps(tmp_path):
+    # A legacy multi-period file repeats "now" once per period. It must
+    # become positional timesteps, not get parsed as the current wall clock.
+    (tmp_path / "snapshots.csv").write_text(
+        ",period,timestep,objective,stores,generators\n"
+        "0,2020,now,1.0,1.0,1.0\n"
+        "1,2021,now,1.0,1.0,1.0\n"
+    )
+    n = pypsa.Network()
+    n.import_from_csv_folder(tmp_path)
+    assert list(n.snapshots.get_level_values("period")) == [2020, 2021]
+    assert list(n.snapshots.get_level_values("timestep")) == [0, 0]
+    assert n.snapshots.get_level_values("timestep").dtype.kind == "i"
+
+
+def test_csv_import_does_not_parse_float_labels_as_epoch(tmp_path):
+    # A float label must raise through `set_snapshots`, like any other
+    # unsupported dtype, rather than quietly becoming an epoch-era datetime.
+    (tmp_path / "snapshots.csv").write_text(
+        ",snapshot,objective,stores,generators\n0,0.0,1.0,1.0,1.0\n1,1.0,1.0,1.0,1.0\n"
+    )
+    n = pypsa.Network()
+    with pytest.raises(ValueError, match="snapshot"):
+        n.import_from_csv_folder(tmp_path)
+
+
 def test_csv_import_still_rejects_legacy_non_integer_period(tmp_path):
     (tmp_path / "snapshots.csv").write_text(
         ",period,timestep,objective,stores,generators\n"
