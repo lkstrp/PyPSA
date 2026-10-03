@@ -239,14 +239,18 @@ class _ExporterNetCDF(_Exporter):
     def save_static(self, list_name: str, df: pd.DataFrame) -> None:
         """Save a static components data."""
         df = df.rename_axis(index={"name": list_name + "_i"})
-        self.ds[list_name + "_i"] = df.index.get_level_values(
-            list_name + "_i"
-        ).drop_duplicates()
+        names = df.index.get_level_values(list_name + "_i").drop_duplicates()
+        self.ds[list_name + "_i"] = names
 
         if not df.columns.empty:
             df_array = df.to_xarray().rename(
                 {attr: list_name + "_" + attr for attr in df.columns}
             )
+            if isinstance(df.index, pd.MultiIndex):
+                # `to_xarray` lays a MultiIndex out in level order, which a
+                # rename leaves sorted rather than in row order. Keep the
+                # rows' own order so a round trip reads them back as written.
+                df_array = df_array.reindex({list_name + "_i": names})
             self.ds = self.ds.merge(df_array, overwrite_vars=True)
 
     def save_series(self, list_name: str, attr: str, df: pd.DataFrame) -> None:
