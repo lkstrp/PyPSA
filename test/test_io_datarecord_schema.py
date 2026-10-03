@@ -14,6 +14,7 @@ from pypsa.network.io.datarecord.schema import (  # noqa: E402
     TIMESTEP_DTYPES,
     _port_stems,
     build_schema,
+    declare_custom,
     port_columns,
     pypsa_name,
     record_name,
@@ -163,3 +164,117 @@ def test_conflicting_record_name_spec_raises() -> None:
             "x",
             AttributeSpec(dtype=nw.String(), dims=frozenset({"entity"})),
         )
+
+
+def test_declare_custom_registers_and_grants() -> None:
+    """A custom attribute is granted to its type with no default."""
+    import narwhals as nw
+
+    schema = build_schema(multiperiod=False, timestep_dtype="Int64", stochastic=False)
+    declare_custom(
+        schema, "Generator", "foo", nw.Float64(), varying=False, multiperiod=False
+    )
+    assert schema.attributes["foo"].dims == frozenset({"entity", "scenario"})
+    assert schema.types["Generator"].attributes["foo"].default is None
+
+
+def test_declare_custom_varying_adds_timestep() -> None:
+    import narwhals as nw
+
+    schema = build_schema(multiperiod=True, timestep_dtype="Int64", stochastic=False)
+    declare_custom(
+        schema, "Generator", "foo", nw.Float64(), varying=True, multiperiod=True
+    )
+    assert schema.attributes["foo"].dims == frozenset(
+        {"entity", "scenario", "timestep", "period"}
+    )
+
+
+def test_declare_custom_merges_dims_across_types() -> None:
+    """The same custom name static on one type and time-varying on another
+    merges by unioning their dims, rather than clashing.
+    """
+    import narwhals as nw
+
+    schema = build_schema(multiperiod=False, timestep_dtype="Int64", stochastic=False)
+    declare_custom(
+        schema, "Load", "foo", nw.Float64(), varying=False, multiperiod=False
+    )
+    declare_custom(
+        schema, "Generator", "foo", nw.Float64(), varying=True, multiperiod=False
+    )
+    assert schema.attributes["foo"].dims == frozenset(
+        {"entity", "scenario", "timestep"}
+    )
+    assert "foo" in schema.types["Load"].attributes
+    assert "foo" in schema.types["Generator"].attributes
+
+
+def test_declare_custom_dtype_mismatch_raises_for_a_shared_file() -> None:
+    """A dtype mismatch raises when the merged attribute would need one
+    shared long file (one declaration time-varying).
+    """
+    import narwhals as nw
+
+    from pypsa.network.io.datarecord.record import DatarecordExportError
+
+    schema = build_schema(multiperiod=False, timestep_dtype="Int64", stochastic=False)
+    declare_custom(schema, "Load", "foo", nw.Float64(), varying=True, multiperiod=False)
+    with pytest.raises(DatarecordExportError, match="foo"):
+        declare_custom(
+            schema, "Generator", "foo", nw.String(), varying=False, multiperiod=False
+        )
+
+
+def test_declare_custom_dtype_mismatch_tolerated_when_both_static() -> None:
+    """Two purely static custom columns that coincide in name only (never
+    sharing a physical file) do not raise, unlike a real registry clash.
+    """
+    import narwhals as nw
+
+    schema = build_schema(multiperiod=False, timestep_dtype="Int64", stochastic=False)
+    declare_custom(
+        schema, "Load", "foo", nw.Float64(), varying=False, multiperiod=False
+    )
+    declare_custom(
+        schema, "Generator", "foo", nw.String(), varying=False, multiperiod=False
+    )
+    assert "foo" in schema.types["Load"].attributes
+    assert "foo" in schema.types["Generator"].attributes
+
+
+def test_declare_custom_registry_clash_raises() -> None:
+    """Widening a registry attribute's shape through a custom declaration of
+    the same name is rejected rather than silently applied.
+    """
+    import narwhals as nw
+
+    from pypsa.network.io.datarecord.record import DatarecordExportError
+
+    schema = build_schema(multiperiod=False, timestep_dtype="Int64", stochastic=False)
+    with pytest.raises(DatarecordExportError, match="Bus") as exc_info:
+        declare_custom(
+            schema, "Bus", "p_nom", nw.Float64(), varying=True, multiperiod=False
+        )
+    assert "p_nom" in str(exc_info.value)
+
+
+def test_declare_custom_carrier_goes_over_its_dim() -> None:
+    """A custom Carrier attribute is namespaced by its dim, so it cannot
+    clash with an unrelated per-component registry attribute of the same
+    name (`marginal_cost` is also Generator's).
+    """
+    import narwhals as nw
+
+    schema = build_schema(multiperiod=False, timestep_dtype="Int64", stochastic=False)
+    declare_custom(
+        schema,
+        "Carrier",
+        "marginal_cost",
+        nw.Float64(),
+        varying=False,
+        multiperiod=False,
+    )
+    assert schema.attributes["carrier_marginal_cost"].dims == frozenset({"carrier"})
+    assert schema.attributes["marginal_cost"].dims != frozenset({"carrier"})
+    assert "Carrier" not in schema.types

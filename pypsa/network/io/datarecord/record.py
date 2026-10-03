@@ -26,6 +26,7 @@ from datarecord.record import Flags, LazyFrames
 from pypsa.network.io.datarecord.schema import (
     _BUS,
     _CONNECTION,
+    _CUSTOM_ATTRS_META_KEY,
     _DIM_ATTRS,
     _ENTITY,
     _EXCLUDED_TYPES,
@@ -40,6 +41,8 @@ from pypsa.network.io.datarecord.schema import (
     SHAPE,
     TIMESTEP,
     build_schema,
+    custom_dim_attr_name,
+    declare_custom,
     port_columns,
     pypsa_name,
     record_name,
@@ -214,6 +217,53 @@ def _scenario_varying(c: Components, columns: list[str]) -> set[str]:
     return {x for x in columns if (by_entity[x].nunique(dropna=False) > 1).any()}
 
 
+def _custom_dtype(values: pd.Series | np.ndarray) -> nw.dtypes.DType:
+    """Map a pandas column's dtype to the narwhals dtype a custom attribute takes.
+
+    Float becomes Float64, int Int64, bool Boolean, anything else String.
+    """
+    if pd.api.types.is_bool_dtype(values):
+        return nw.Boolean()
+    if pd.api.types.is_float_dtype(values):
+        return nw.Float64()
+    if pd.api.types.is_integer_dtype(values):
+        return nw.Int64()
+    return nw.String()
+
+
+def _custom_static_attrs(c: Components) -> dict[str, nw.dtypes.DType]:
+    """Collect static columns `c` carries that the registry does not declare."""
+    defaults = c.defaults
+    return {
+        col: _custom_dtype(c.static[col])
+        for col in c.static.columns
+        if col not in defaults.index
+    }
+
+
+def _custom_series_attrs(c: Components) -> dict[str, nw.dtypes.DType]:
+    """Time-varying keys `c.dynamic` carries that the registry does not declare."""
+    defaults = c.defaults
+    return {
+        attr: _custom_dtype(df.to_numpy())
+        for attr, df in c.dynamic.items()
+        if attr not in defaults.index and not df.empty
+    }
+
+
+def _cast_custom_string_columns(frame: pd.DataFrame, columns: list[str]) -> None:
+    """Cast each listed column to text where its values aren't numeric or boolean, in place.
+
+    `astype(str)` turns NaN into the literal "nan", so null cells are masked
+    back to stay null.
+    """
+    for col in columns:
+        if col not in frame.columns:
+            continue
+        if isinstance(_custom_dtype(frame[col]), nw.String):
+            frame[col] = frame[col].where(frame[col].isna(), frame[col].astype(str))
+
+
 class NetworkRecord:
     """A `Network` presented as a datarecord `Record` (export only).
 
@@ -251,19 +301,41 @@ class NetworkRecord:
 
     @cached_property
     def schema(self) -> Schema:
-        """The canonical schema, with the network's own attributes as `meta`."""
+        """The canonical schema, with custom attributes applied.
+
+        The network's own attributes are carried as `meta`.
+        """
         n = self.n
         schema = build_schema(
             multiperiod=n.has_periods,
             timestep_dtype=_timestep_dtype_name(n),
             stochastic=n.has_scenarios,
         )
+        self._declare_custom_attrs(schema)
         schema.meta["pypsa"] = {
             "attributes": {k: _scalar(getattr(n, k)) for k in NETWORK_ATTRS},
             "crs": n.crs.to_wkt() if n.crs is not None else None,
             "meta": dict(n.meta),
         }
         return schema
+
+    def _declare_custom_attrs(self, schema: Schema) -> None:
+        """Grant every custom static or time-varying attribute to its type(s).
+
+        Carrier and Shape's custom static columns are declared too, over
+        their dim rather than granted to a type (`declare_custom`).
+        """
+        multiperiod = self.n.has_periods
+        for c in (*self._components, *self._dim_components.values()):
+            for attr, dtype in _custom_static_attrs(c).items():
+                declare_custom(
+                    schema, c.name, attr, dtype, varying=False, multiperiod=multiperiod
+                )
+            for attr, dtype in _custom_series_attrs(c).items():
+                declare_custom(
+                    schema, c.name, attr, dtype, varying=True, multiperiod=multiperiod
+                )
+        schema.meta.pop(_CUSTOM_ATTRS_META_KEY, None)
 
     @cached_property
     def dims(self) -> LazyFrames:
@@ -330,10 +402,21 @@ class NetworkRecord:
             wkt = frame["geometry"].to_wkt()
             frame = pd.DataFrame(frame)
             frame["geometry"] = wkt
+        custom = list(_custom_static_attrs(c))
+        _cast_custom_string_columns(frame, custom)
         frame = frame.rename(
-            columns={col: record_name(c.name, col) for col in _DIM_ATTRS[dim]}
+            columns={
+                **{col: record_name(c.name, col) for col in _DIM_ATTRS[dim]},
+                **{col: custom_dim_attr_name(dim, col) for col in custom},
+            }
         )
-        return frame[[dim, *(record_name(c.name, col) for col in _DIM_ATTRS[dim])]]
+        return frame[
+            [
+                dim,
+                *(record_name(c.name, col) for col in _DIM_ATTRS[dim]),
+                *(custom_dim_attr_name(dim, col) for col in custom),
+            ]
+        ]
 
     def _dim_attr_long_frame(self, dim: str, attr: str) -> pd.DataFrame:
         """`(scenario, dim, attribute, breakpoint, value)` rows for one stochastic carrier/shape attribute.
@@ -386,12 +469,19 @@ class NetworkRecord:
         """One type's non-port, non-output, non-varying static columns, defaults dropped."""
         defaults = c.defaults
         ports = port_columns(c)
+        custom_series = _custom_series_attrs(c)
+        custom: list[str] = []
         columns = []
         for col in c.static.columns:
             if col in ports or col in ("g_pu", "b_pu"):
                 continue
             if col not in defaults.index:
+                if col in custom_series:
+                    # Also time-varying: lives in its long file only, like a
+                    # registry attribute whose `varying` flag routes it there.
+                    continue
                 columns.append(col)
+                custom.append(col)
                 continue
             if str(defaults.at[col, "status"]).startswith("Output"):
                 continue
@@ -408,6 +498,7 @@ class NetworkRecord:
             static = static[~static.index.duplicated()]
         frame = static.reset_index().rename(columns={"name": _ENTITY})
         _drop_default_columns(frame, tuple(frame.columns), defaults)
+        _cast_custom_string_columns(frame, custom)
         return frame
 
     @cached_property
@@ -527,6 +618,9 @@ class NetworkRecord:
                 continue
             if name not in seen:
                 seen.append(name)
+        for attr in _custom_series_attrs(c):
+            if attr not in seen:
+                seen.append(attr)
         return seen
 
     def _output_attrs(self, c: Components) -> list[str]:
@@ -688,7 +782,11 @@ class NetworkRecord:
         return long
 
     def _source_attr(self, c: Components, record_attr: str) -> str | None:
-        """Which of `c`'s own columns writes `record_attr` (undo `record_name`)."""
+        """Which of `c`'s own columns writes `record_attr` (undo `record_name`).
+
+        A custom attribute carries no override, so its record-wide name is
+        the PyPSA column itself.
+        """
         defaults = c.defaults
         ports = port_columns(c)
         for attr in defaults.index:
@@ -697,6 +795,8 @@ class NetworkRecord:
                 continue
             if record_name(c.name, stem) == record_attr:
                 return attr
+        if record_attr not in defaults.index and record_attr in c.dynamic:
+            return record_attr
         return None
 
     def _stack_series(self, c: Components, wide: pd.DataFrame) -> pd.DataFrame:
