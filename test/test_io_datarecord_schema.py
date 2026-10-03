@@ -226,21 +226,22 @@ def test_declare_custom_dtype_mismatch_raises_for_a_shared_file() -> None:
         )
 
 
-def test_declare_custom_dtype_mismatch_tolerated_when_both_static() -> None:
-    """Two purely static custom columns that coincide in name only (never
-    sharing a physical file) do not raise, unlike a real registry clash.
+def test_declare_custom_dtype_mismatch_raises_even_when_both_static() -> None:
+    """A dtype mismatch raises even for two purely static custom columns:
+    one attribute has one dtype, and the manifest cannot say otherwise.
     """
     import narwhals as nw
+
+    from pypsa.network.io.datarecord.record import DatarecordExportError
 
     schema = build_schema(multiperiod=False, timestep_dtype="Int64", stochastic=False)
     declare_custom(
         schema, "Load", "foo", nw.Float64(), varying=False, multiperiod=False
     )
-    declare_custom(
-        schema, "Generator", "foo", nw.String(), varying=False, multiperiod=False
-    )
-    assert "foo" in schema.types["Load"].attributes
-    assert "foo" in schema.types["Generator"].attributes
+    with pytest.raises(DatarecordExportError, match="foo"):
+        declare_custom(
+            schema, "Generator", "foo", nw.String(), varying=False, multiperiod=False
+        )
 
 
 def test_declare_custom_registry_clash_raises() -> None:

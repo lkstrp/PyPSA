@@ -44,7 +44,6 @@ from pypsa.network.io.datarecord.schema import (
     custom_dim_attr_name,
     declare_custom,
     port_columns,
-    pypsa_name,
     record_name,
 )
 
@@ -326,14 +325,27 @@ class NetworkRecord:
         their dim rather than granted to a type (`declare_custom`).
         """
         multiperiod = self.n.has_periods
+        stochastic = self.n.has_scenarios
         for c in (*self._components, *self._dim_components.values()):
             for attr, dtype in _custom_static_attrs(c).items():
                 declare_custom(
-                    schema, c.name, attr, dtype, varying=False, multiperiod=multiperiod
+                    schema,
+                    c.name,
+                    attr,
+                    dtype,
+                    varying=False,
+                    multiperiod=multiperiod,
+                    stochastic=stochastic,
                 )
             for attr, dtype in _custom_series_attrs(c).items():
                 declare_custom(
-                    schema, c.name, attr, dtype, varying=True, multiperiod=multiperiod
+                    schema,
+                    c.name,
+                    attr,
+                    dtype,
+                    varying=True,
+                    multiperiod=multiperiod,
+                    stochastic=stochastic,
                 )
         schema.meta.pop(_CUSTOM_ATTRS_META_KEY, None)
 
@@ -421,18 +433,22 @@ class NetworkRecord:
     def _dim_attr_long_frame(self, dim: str, attr: str) -> pd.DataFrame:
         """`(scenario, dim, attribute, breakpoint, value)` rows for one stochastic carrier/shape attribute.
 
-        `attr` is the record-wide attribute name; default values are dropped,
-        as for a component's long input rows.
+        `attr` is the record-wide attribute name. For a registry attribute,
+        default values are dropped, as for a component's long input rows. A
+        custom attribute has no registry default, so none are dropped.
         """
         c = self._dim_components[dim]
         defaults = c.defaults
-        pypsa_attr = pypsa_name(c.name, attr)
+        registry = {record_name(c.name, a): a for a in _DIM_ATTRS[dim]}
+        prefix = f"{dim}_"
+        pypsa_attr = registry.get(attr, attr[len(prefix) :])
         static = c.static[pypsa_attr]
         if dim == SHAPE and pypsa_attr == "geometry":
             static = static.to_wkt()
         rows = static.rename("value").reset_index().rename(columns={"name": dim})
-        default = _default(defaults.at[pypsa_attr, "default"])
-        rows = _drop_default(rows, default)
+        if attr in registry:
+            default = _default(defaults.at[pypsa_attr, "default"])
+            rows = _drop_default(rows, default)
         rows["attribute"] = attr
         rows["breakpoint"] = None
         return rows[[SCENARIO, dim, "attribute", "breakpoint", "value"]]
@@ -540,15 +556,18 @@ class NetworkRecord:
         """Carrier/shape attribute's record-wide name -> its dim, for a stochastic network only.
 
         Empty otherwise: a non-stochastic network's carrier/shape attributes
-        are columns of their axis file, not long input rows.
+        are columns of their axis file, not long input rows. Custom dim
+        attributes are included alongside the registry ones.
         """
         if not self.n.has_scenarios:
             return {}
-        return {
-            record_name(self._dim_components[dim].name, attr): dim
-            for dim in self._dim_components
-            for attr in _DIM_ATTRS[dim]
-        }
+        result: dict[str, str] = {}
+        for dim, c in self._dim_components.items():
+            for attr in _DIM_ATTRS[dim]:
+                result[record_name(c.name, attr)] = dim
+            for attr in _custom_static_attrs(c):
+                result[custom_dim_attr_name(dim, attr)] = dim
+        return result
 
     @cached_property
     def outputs(self) -> LazyFrames:
@@ -618,6 +637,9 @@ class NetworkRecord:
                 continue
             if name not in seen:
                 seen.append(name)
+        for attr in _custom_static_attrs(c):
+            if attr in diverging and attr not in seen:
+                seen.append(attr)
         for attr in _custom_series_attrs(c):
             if attr not in seen:
                 seen.append(attr)
@@ -785,7 +807,8 @@ class NetworkRecord:
         """Which of `c`'s own columns writes `record_attr` (undo `record_name`).
 
         A custom attribute carries no override, so its record-wide name is
-        the PyPSA column itself.
+        the PyPSA column itself, whether it lives in `c.dynamic` (time-varying)
+        or `c.static` (a scenario-diverging static column).
         """
         defaults = c.defaults
         ports = port_columns(c)
@@ -795,7 +818,9 @@ class NetworkRecord:
                 continue
             if record_name(c.name, stem) == record_attr:
                 return attr
-        if record_attr not in defaults.index and record_attr in c.dynamic:
+        if record_attr not in defaults.index and (
+            record_attr in c.dynamic or record_attr in c.static.columns
+        ):
             return record_attr
         return None
 
