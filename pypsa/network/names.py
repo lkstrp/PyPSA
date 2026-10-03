@@ -65,23 +65,26 @@ def name_owners(
     Checks every namespace type except `exclude`. A name absent from all of
     them is left out of the result, so an empty dict means no clash.
 
-    Tests each type's own name level against `names` with `isin`, which hits
-    a hash table built over the (usually short) `names` and never dedupes
-    the type's own, possibly scenario-repeated, level up front. `unique()`
-    only runs over the few hits, not the whole level.
+    A unique flat index is probed with `get_indexer`, which reuses the
+    index's cached hash table across calls. A scenario MultiIndex yields a
+    fresh name level on every call, so it is probed with `isin`, which only
+    hashes the (usually short) `names`.
     """
     owners: dict[str, list[str]] = {}
     for type_name in NAMESPACE_ORDER:
         if type_name == exclude:
             continue
         index = n.components[type_name].static.index
-        level = (
-            index.get_level_values(-1) if isinstance(index, pd.MultiIndex) else index
-        )
-        hits = level.isin(names)
-        if not hits.any():
-            continue
-        for name in level[hits].unique():
+        if isinstance(index, pd.MultiIndex) or not index.is_unique:
+            level = (
+                index.get_level_values(-1)
+                if isinstance(index, pd.MultiIndex)
+                else index
+            )
+            found = level[level.isin(names)].unique()
+        else:
+            found = names[index.get_indexer(names) >= 0].unique()
+        for name in found:
             owners.setdefault(str(name), []).append(type_name)
     for types in owners.values():
         types.sort()
