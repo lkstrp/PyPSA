@@ -93,7 +93,7 @@ def test_risk_neutral_equivalence_omega_zero(toy_network):
     # Stochastic risk-neutral (omega=0)
     n.set_scenarios({"volcano": 0.1, "no_volcano": 0.9})
     # degrade solar in volcano
-    n.generators_t.p_max_pu.loc[:, ("volcano", "solar")] *= 0.3
+    n.generators_t.p_max_pu.loc[:, ("volcano", "solar-Generator")] *= 0.3
 
     # Risk neutral run
     n.optimize(log_to_console=False)
@@ -116,14 +116,14 @@ def test_worst_case_equivalence_omega_one_single_tail(toy_network):
     # Deterministic: volcano-only as worst case baseline
     nd = toy_network.copy()
     # degrade solar in baseline w/o scenarios
-    nd.generators_t.p_max_pu.loc[:, ("solar")] *= 0.3
+    nd.generators_t.p_max_pu.loc[:, "solar-Generator"] *= 0.3
     nd.optimize(log_to_console=False)
     cap_det_worst = _capacities_mw(nd)
     obj_det_worst = _objective_bil(nd)
 
     # Stochastic with two scenarios
     n.set_scenarios({"volcano": 0.1, "no_volcano": 0.9})
-    n.generators_t.p_max_pu.loc[:, ("volcano", "solar")] *= 0.3
+    n.generators_t.p_max_pu.loc[:, ("volcano", "solar-Generator")] *= 0.3
 
     # CVaR with omega=1 and alpha capturing the worst scenario only
     # For p_worst = 0.1, set alpha = 1 - p_worst = 0.9 so 1/(1-alpha)*p_worst = 1
@@ -142,7 +142,7 @@ def test_monotone_objective_vs_omega(toy_network):
 
     # Setup stochastic
     n.set_scenarios({"volcano": 0.1, "no_volcano": 0.9})
-    n.generators_t.p_max_pu.loc[:, ("volcano", "solar")] *= 0.3
+    n.generators_t.p_max_pu.loc[:, ("volcano", "solar-Generator")] *= 0.3
 
     # Risk-neutral baseline
     n.optimize(log_to_console=False)
@@ -360,7 +360,7 @@ def test_cvar_with_zero_opex(toy_network):
     """
     n = toy_network.copy()
     # Remove all generators with non-zero marginal cost
-    n.remove("Generator", "load shedding")
+    n.remove("Generator", "load shedding-Generator")
     n.remove("Generator", "gas")
 
     # Stochastic setup + CVaR

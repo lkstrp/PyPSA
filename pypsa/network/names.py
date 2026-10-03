@@ -5,8 +5,9 @@
 """Cross-type component name namespace.
 
 PyPSA v2 treats component names as unique across a subset of component
-types, the namespace types. Carrier, Shape, SubNetwork and the standard
-types sit outside that namespace and may reuse a namespace type's name.
+types, the namespace types. Shape, SubNetwork and the standard types sit
+outside that namespace and may reuse a namespace type's name: a shape is
+conventionally named after the bus it describes.
 
 This module answers "who already holds this name" for the namespace types,
 and formats the answer as the export-check error wording. `check_names_free`
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 NAMESPACE_ORDER: tuple[str, ...] = (
     "Bus",
+    "Carrier",
     "Line",
     "Transformer",
     "Link",
@@ -42,7 +44,12 @@ NAMESPACE_ORDER: tuple[str, ...] = (
     "ShuntImpedance",
     "GlobalConstraint",
 )
-"""The namespace types, in rename order (buses, branches, one-ports, global constraints)."""
+"""The namespace types, in rename order (buses, carriers, branches, one-ports, global constraints).
+
+Carrier sits right after Bus so that on a clash it yields only to a bus and
+every other type yields to it: downstream code filters by carrier name far
+more often than by a generator's.
+"""
 
 
 def _name_level(index: pd.Index) -> pd.Index:
@@ -102,8 +109,8 @@ def format_clashes(owners: dict[str, list[str]]) -> str:
 def check_names_free(n: Network, cls_name: str, names: pd.Index) -> None:
     """Raise if any of `names` is already held by another namespace type.
 
-    No-op for exempt types (Carrier, Shape, SubNetwork, the standard types)
-    and while the check is suspended with `unchecked_names`. Only the `name`
+    No-op for exempt types (Shape, SubNetwork, the standard types) and while
+    the check is suspended with `unchecked_names`. Only the `name`
     level is checked for a MultiIndex, never scenario labels.
     """
     if cls_name not in NAMESPACE_ORDER:

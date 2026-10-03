@@ -227,12 +227,16 @@ class ComponentsTransformMixin:
         if self.attached:
             n = self.n_save
             for component in n.components:
-                col_name = self.name.lower()  # TODO: Generalize
-                cols = [
-                    f"{col_name}{port}"
-                    for port in component.ports
-                    if f"{col_name}{port}" in component.static.columns
-                ]
+                if self.name == "Carrier":
+                    # One `carrier` column per type, never port-suffixed.
+                    cols = ["carrier"] if "carrier" in component.static.columns else []
+                else:
+                    col_name = self.name.lower()  # TODO: Generalize
+                    cols = [
+                        f"{col_name}{port}"
+                        for port in component.ports
+                        if f"{col_name}{port}" in component.static.columns
+                    ]
                 if cols and not component.static.empty:
                     component.static[cols] = component.static[cols].replace(kwargs)
 
@@ -256,8 +260,8 @@ class ComponentsTransformMixin:
 
         Every type refuses a target already present within its own type,
         including a target reused by more than one rename in the same call.
-        Namespace types (Generator, Bus, ...) additionally refuse a target
-        already held by another namespace type, since Carrier, Shape and the
+        Namespace types (Generator, Bus, Carrier, ...) additionally refuse a
+        target already held by another namespace type, since Shape and the
         other exempt types sit outside that namespace.
         """
         own_names = _name_level(self.static.index).unique().difference(kwargs.keys())

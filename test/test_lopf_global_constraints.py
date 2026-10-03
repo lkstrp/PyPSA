@@ -205,7 +205,7 @@ def test_1884():
     # cheap wind is capped at 50, so expensive gas must cover the rest
     n.add(
         "Generator",
-        ["wind", "gas"],
+        ["wind_gen", "gas_gen"],
         bus="b",
         carrier=["wind", "gas"],
         p_nom_extendable=True,
@@ -222,7 +222,7 @@ def test_1884():
     )
 
     n.optimize()
-    assert n.c.generators.static.p_nom_opt["wind"] == pytest.approx(50)
+    assert n.c.generators.static.p_nom_opt["wind_gen"] == pytest.approx(50)
 
 
 def test_transmission_cost_limit_overnight_cost():
