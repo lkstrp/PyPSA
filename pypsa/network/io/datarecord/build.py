@@ -20,18 +20,21 @@ from pypsa.descriptors import _update_ports_component_attrs
 from pypsa.network.io.datarecord.record import NETWORK_ATTRS
 from pypsa.network.io.datarecord.schema import (
     _BUS,
-    _DIM_ATTRS,
     _ENTITY,
-    DIM_TYPES,
+    CARRIER,
+    CARRIER_ATTR,
     ENTITY_TYPE,
     PERIOD,
     PERIOD_WEIGHTINGS,
     PORT,
     SCENARIO,
     SCENARIO_WEIGHTINGS,
+    SHAPE,
+    SHAPE_GEOMETRY,
+    SHAPE_NAME,
+    SHAPE_TYPE,
     SNAPSHOT_WEIGHTINGS,
     TIMESTEP,
-    custom_dim_pypsa_name,
     port_columns,
     pypsa_name,
     record_name,
@@ -259,6 +262,17 @@ def _filter_rows(
     return rows.merge(wanted, on=[_ENTITY, _BUS])
 
 
+def _custom_columns(record: Record, ctype: str) -> dict[str, str]:
+    """Record-wide name -> PyPSA column for `ctype`'s custom attributes, in the exported column order.
+
+    Written by the export under `schema.meta["pypsa"]["custom_attributes"]`.
+    The two differ only for a `custom_fallback_name`. Empty for a record
+    with none.
+    """
+    meta = record.schema.meta.get("pypsa") or {}
+    return dict((meta.get("custom_attributes") or {}).get(ctype) or {})
+
+
 def _stem_ports(
     ports: dict[str, tuple[str, str]],
 ) -> dict[str, list[tuple[str | None, str]]]:
@@ -289,6 +303,7 @@ def _add_component_type(
     ctype = c.name
     bus_cols = _bus_columns(c)
     stem_ports = _stem_ports(port_columns(c))
+    custom = _custom_columns(record, ctype)
 
     deferred: list[tuple[str, pd.DataFrame, pd.DataFrame]] = []
     for record_attr in record.schema.attributes_for(ctype):
@@ -296,7 +311,7 @@ def _add_component_type(
             continue
         rows = _attr_rows(cache, record, "inputs", record_attr)
         targets = stem_ports.get(record_attr) or [
-            (None, pypsa_name(ctype, record_attr))
+            (None, custom.get(record_attr, pypsa_name(ctype, record_attr)))
         ]
         for port, attr in targets:
             if attr in static.columns:
@@ -320,6 +335,19 @@ def _add_component_type(
                 static[attr] = key.map(values)
             if not series.empty or not piecewise.empty:
                 deferred.append((attr, series, piecewise))
+
+    # Custom columns came from two places (the member frame, then the long
+    # files), so restore the order the exported network held them in.
+    # Registry columns are sorted by `_import_components_from_df` itself.
+    rank = {attr: i for i, attr in enumerate(custom.values())}
+    extra = [
+        col
+        for col in static.columns
+        if col not in c.defaults.index and col not in (_ENTITY, "scenario")
+    ]
+    ordered = [col for col in static.columns if col not in extra]
+    ordered += sorted(extra, key=lambda col: rank.get(col, len(rank)))
+    static = static[ordered]
 
     if stochastic:
         static = static.set_index(["scenario", _ENTITY])
@@ -399,12 +427,14 @@ def _import_entity_type(
     ports: pd.DataFrame,
     cache: dict[str, pd.DataFrame],
     *,
+    carriers: pd.Series,
     multiperiod: bool,
     stochastic: bool,
 ) -> None:
     """Import one entity type's wide frame, then its series and piecewise data."""
     c = n.components[ctype]
     static = _collect(record.entity_types[ctype])
+    static = static.rename(columns=_custom_columns(record, ctype))
     if ENTITY_TYPE in static.columns:
         static = static.drop(columns=[ENTITY_TYPE])
     if not stochastic and "scenario" in static.columns:
@@ -422,6 +452,11 @@ def _import_entity_type(
             n, where=[f"bus{label}" for label in labels], c_name=ctype
         )
     static = _pivot_buses(static, ports, c)
+    if CARRIER_ATTR in c.defaults.index:
+        # A component without a `carrier` row keeps the registry default.
+        static[CARRIER_ATTR] = (
+            static[_ENTITY].map(carriers).fillna(c.defaults.at[CARRIER_ATTR, "default"])
+        )
     if stochastic:
         static = _broadcast_scenarios(static, n.scenarios)
 
@@ -431,68 +466,52 @@ def _import_entity_type(
     _add_outputs(n, c, cache, record, multiperiod=multiperiod)
 
 
-def _dim_attr_values(rows: pd.DataFrame, dim: str) -> pd.Series:
-    """One carrier/shape attribute's long rows as a `(scenario, name)`-indexed value series.
+def _carrier_map(record: Record) -> pd.Series:
+    """Entity -> carrier name from the `carrier` group, empty if it has no rows."""
+    if CARRIER not in record.groups:
+        return pd.Series(dtype=object)
+    rows = _collect(record.groups[CARRIER])
+    rows = rows.drop_duplicates(subset=[_ENTITY])
+    return pd.Series(rows[CARRIER].to_numpy(), index=rows[_ENTITY].astype(str))
 
-    The read path returns rows duplicated on `(scenario, dim)` for these,
-    dropped here before indexing.
+
+def _add_shapes(record: Record, n: Network, *, stochastic: bool) -> None:
+    """Rebuild Shape from the `shape` group, after every entity type is in place.
+
+    A row's entity is the shape's `idx`, its type the `component`, and the
+    `shape_type` coordinate its `type`. `shape_name` restores the PyPSA name,
+    and every other payload column is a custom Shape attribute.
     """
-    return rows.drop_duplicates(subset=[SCENARIO, dim]).set_index([SCENARIO, dim])[
-        "value"
-    ]
-
-
-def _add_dim_component(
-    n: Network, ctype: str, dim: str, record: Record, *, stochastic: bool
-) -> None:
-    """Rebuild Carrier or Shape from its `dim` axis frame.
-
-    A non-stochastic frame carries every attribute as a column already. A
-    stochastic one carries only the names, overlaid here with each
-    attribute's per-scenario long rows, registry and custom alike.
-    """
-    if dim not in record.dims:
+    if SHAPE not in record.groups:
         return
-    frame = _collect(record.dims[dim])
-    if frame.empty:
+    rows = _collect(record.groups[SHAPE])
+    if rows.empty:
         return
+    entity_types = _collect(record.dims[_ENTITY]).drop_duplicates(subset=[_ENTITY])
+    component = pd.Series(
+        entity_types[ENTITY_TYPE].astype(str).to_numpy(),
+        index=entity_types[_ENTITY].astype(str),
+    )
+    frame = pd.DataFrame(
+        {
+            "name": rows[SHAPE_NAME].astype(str),
+            "geometry": rows[SHAPE_GEOMETRY],
+            "component": rows[_ENTITY].astype(str).map(component),
+            "idx": rows[_ENTITY].astype(str),
+            "type": rows[SHAPE_TYPE].astype(str),
+        }
+    )
+    reserved = {_ENTITY, SHAPE_TYPE, SHAPE_GEOMETRY, SHAPE_NAME, "deleted"}
+    custom = _custom_columns(record, "Shape")
+    for col in rows.columns:
+        if col not in reserved:
+            frame[custom.get(col, col)] = rows[col].to_numpy()
     if stochastic:
         frame = _broadcast_scenarios(frame, n.scenarios)
-        registry = {record_name(ctype, attr): attr for attr in _DIM_ATTRS[dim]}
-        # Iterates `record.schema.attributes` (insertion-ordered) rather than
-        # `record.attributes` (a set), so column order matches the network's
-        # exported static columns.
-        order = [
-            record_attr
-            for record_attr in record.schema.attributes
-            if record_attr in registry or record_attr.startswith(f"{dim}_")
-        ]
-        for record_attr in order:
-            attr = registry.get(record_attr, custom_dim_pypsa_name(dim, record_attr))
-            if record_attr not in record.attributes:
-                continue
-            rows = _collect(record.attributes[record_attr])
-            if rows.empty:
-                continue
-            values = _dim_attr_values(rows, dim)
-            key = pd.MultiIndex.from_frame(frame[[SCENARIO, dim]])
-            frame[attr] = key.map(values)
-        frame = frame.set_index([SCENARIO, dim])
-        frame.index.names = ["scenario", "name"]
+        frame = frame.set_index(["scenario", "name"])
     else:
-        frame = frame.rename(
-            columns={record_name(ctype, attr): attr for attr in _DIM_ATTRS[dim]}
-        )
-        frame = frame.rename(
-            columns={
-                col: custom_dim_pypsa_name(dim, col)
-                for col in frame.columns
-                if col.startswith(f"{dim}_")
-            }
-        )
-        frame = frame.set_index(dim)
-        frame.index.name = "name"
-    n._import_components_from_df(frame, ctype)
+        frame = frame.set_index("name")
+    n._import_components_from_df(frame, "Shape")
 
 
 def network_from_record(record: Record, n: Network) -> None:
@@ -514,30 +533,22 @@ def network_from_record(record: Record, n: Network) -> None:
         if PORT in record.attributes
         else pd.DataFrame(columns=[_ENTITY, _BUS, "value"])
     )
+    carriers = _carrier_map(record)
     cache: dict[str, pd.DataFrame] = {}
 
-    if "Bus" in record.entity_types:
-        _import_entity_type(
-            n,
-            "Bus",
-            record,
-            ports,
-            cache,
-            multiperiod=multiperiod,
-            stochastic=stochastic,
-        )
-    for dim, ctype in DIM_TYPES.items():
-        _add_dim_component(n, ctype, dim, record, stochastic=stochastic)
-
-    for ctype in sorted(set(record.entity_types) - {"Bus"}):
+    # Bus and Carrier first, as the other types reference them.
+    first = [t for t in ("Bus", "Carrier") if t in record.entity_types]
+    for ctype in (*first, *sorted(set(record.entity_types) - set(first))):
         _import_entity_type(
             n,
             ctype,
             record,
             ports,
             cache,
+            carriers=carriers,
             multiperiod=multiperiod,
             stochastic=stochastic,
         )
+    _add_shapes(record, n, stochastic=stochastic)
 
     n._broadcast_standard_types()

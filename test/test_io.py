@@ -1190,18 +1190,55 @@ class TestDatarecord:
         assert rows["breakpoint"].notna().any()
         assert "capital_cost" not in rec.entity_types["StorageUnit"].to_native().columns
 
-    def test_carrier_and_shape_are_dims_not_entity_types(self):
+    def test_carrier_is_an_entity_type_referenced_through_a_group(self):
         n = pypsa.Network()
         n.add("Bus", "b0")
         n.add("Carrier", "solar", co2_emissions=1.0)
+        n.add("Generator", "g0", bus="b0", carrier="solar")
         with pytest.warns(UserWarning, match="experimental"):
             rec = n.to_datarecord()
 
-        assert "Carrier" not in rec.schema.entity_types
+        assert "Carrier" in rec.schema.entity_types
         assert "Shape" not in rec.schema.entity_types
-        assert "carrier" in rec.dims
-        carrier_dim = rec.dims["carrier"].to_native()
-        assert set(carrier_dim["carrier"]) == {"solar"}
+        carriers = rec.entity_types["Carrier"].to_native().set_index("entity")
+        assert carriers.loc["solar", "co2_emissions"] == 1.0
+        assert "carrier" not in rec.entity_types["Generator"].to_native().columns
+        rows = rec.groups["carrier"].to_native()
+        assert set(map(tuple, rows[["entity", "carrier"]].to_numpy())) == {
+            ("g0", "solar")
+        }
+
+    def test_undeclared_default_carrier_gets_no_group_row(self):
+        """Bus's default `"AC"` without a Carrier row is not a reference."""
+        n = pypsa.Network()
+        n.add("Bus", "b0")
+        with pytest.warns(UserWarning, match="experimental"):
+            rec = n.to_datarecord()
+        assert "carrier" not in rec.groups
+
+    def test_dangling_carrier_raises(self):
+        from pypsa.network.io.datarecord.record import DatarecordExportError
+
+        n = pypsa.Network()
+        n.add("Bus", "b0")
+        n.add("Generator", "g0", bus="b0", carrier="wind")
+        with pytest.warns(UserWarning, match="experimental"):
+            with pytest.raises(DatarecordExportError, match="wind") as exc_info:
+                n.to_datarecord()
+        assert "n.add(\"Carrier\", ['wind'])" in str(exc_info.value)
+
+    def test_scenario_varying_carrier_raises(self):
+        from pypsa.network.io.datarecord.record import DatarecordExportError
+
+        n = pypsa.Network()
+        n.add("Bus", "b0")
+        n.add("Carrier", ["gas", "coal"])
+        n.add("Generator", "g0", bus="b0", carrier="gas")
+        n.set_scenarios({"low": 0.5, "high": 0.5})
+        n.c.generators.static.loc[("high", "g0"), "carrier"] = "coal"
+        with pytest.warns(UserWarning, match="experimental"):
+            with pytest.raises(DatarecordExportError, match="varies by scenario"):
+                n.to_datarecord()
 
     def test_carrier_attributes_round_trip(self, tmp_path):
         n = pypsa.Network()
@@ -1212,13 +1249,67 @@ class TestDatarecord:
         with pytest.warns(UserWarning, match="experimental"):
             rec = n.to_datarecord()
 
-        carrier_dim = rec.dims["carrier"].to_native().set_index("carrier")
-        assert carrier_dim.loc["gas", "co2_emissions"] == 0.2
-        assert carrier_dim.loc["gas", "color"] == "brown"
-        assert carrier_dim.loc["gas", "nice_name"] == "Natural Gas"
+        carriers = rec.entity_types["Carrier"].to_native().set_index("entity")
+        assert carriers.loc["gas", "co2_emissions"] == 0.2
+        assert carriers.loc["gas", "color"] == "brown"
+        assert carriers.loc["gas", "nice_name"] == "Natural Gas"
 
         n, n2 = self._round_trip(n, tmp_path)
         assert custom_equals(n, n2)
+
+    def test_shape_is_a_group_keyed_by_component_and_kind(self):
+        from shapely.geometry import Point
+
+        n = pypsa.Network()
+        n.add("Bus", ["b0", "b1"])
+        n.add(
+            "Shape",
+            ["b0", "b0 offshore", "b1"],
+            geometry=[Point(0, 0), Point(1, 1), Point(2, 2)],
+            component="Bus",
+            idx=["b0", "b0", "b1"],
+            type=["onshore", "offshore", "onshore"],
+        )
+        with pytest.warns(UserWarning, match="experimental"):
+            rec = n.to_datarecord()
+
+        assert set(rec.dims["shape_type"].to_native()["shape_type"]) == {
+            "onshore",
+            "offshore",
+        }
+        rows = rec.groups["shape"].to_native().set_index(["entity", "shape_type"])
+        assert rows.loc[("b0", "offshore"), "shape_name"] == "b0 offshore"
+        assert rows.loc[("b1", "onshore"), "geometry"] == "POINT (2 2)"
+
+    def test_shape_without_component_raises(self):
+        from shapely.geometry import Point
+
+        from pypsa.network.io.datarecord.record import DatarecordExportError
+
+        n = pypsa.Network()
+        n.add("Bus", "b0")
+        n.add("Shape", "free", geometry=Point(0, 0))
+        with pytest.warns(UserWarning, match="experimental"):
+            with pytest.raises(DatarecordExportError, match="free"):
+                n.to_datarecord()
+
+    def test_two_shapes_of_one_kind_on_one_component_raise(self):
+        from shapely.geometry import Point
+
+        from pypsa.network.io.datarecord.record import DatarecordExportError
+
+        n = pypsa.Network()
+        n.add("Bus", "b0")
+        n.add(
+            "Shape",
+            ["s0", "s1"],
+            geometry=[Point(0, 0), Point(1, 1)],
+            component="Bus",
+            idx="b0",
+        )
+        with pytest.warns(UserWarning, match="experimental"):
+            with pytest.raises(DatarecordExportError, match="same type"):
+                n.to_datarecord()
 
     # -- import: round-trip parity ---------------------------------------
 
@@ -1295,12 +1386,18 @@ class TestDatarecord:
         assert (n.scenario_weightings == n2.scenario_weightings).all().all()
         assert custom_equals(n, n2)
 
-    def test_round_trip_carrier_and_generator_share_a_name(self, tmp_path):
+    def test_round_trip_shape_named_like_its_bus(self, tmp_path):
+        """Shape stays outside the unique-name namespace, and `shape_name`
+        carries the name through the record.
+        """
+        from shapely.geometry import Point
+
         n = pypsa.Network()
         n.add("Bus", "b0")
-        n.add("Carrier", "solar", co2_emissions=1.0)
-        n.add("Generator", "solar", bus="b0", carrier="solar")
+        n.add("Shape", "b0", geometry=Point(0, 0), component="Bus", idx="b0")
         n, n2 = self._round_trip(n, tmp_path)
+        assert list(n2.c.shapes.static.index) == ["b0"]
+        n.c.shapes.static["geometry"] = n2.c.shapes.static["geometry"]
         assert custom_equals(n, n2)
 
     def test_round_trip_stochastic_carrier_attribute_per_scenario(self, tmp_path):
@@ -1350,7 +1447,7 @@ class TestDatarecord:
         n.c.shapes.static["geometry"] = n2.c.shapes.static["geometry"]
         assert custom_equals(n, n2)
 
-    def test_round_trip_stochastic_shape_type_per_scenario(self, tmp_path):
+    def test_round_trip_stochastic_shapes(self, tmp_path):
         from shapely.geometry import Point
 
         n = pypsa.Network()
@@ -1364,10 +1461,36 @@ class TestDatarecord:
             type="country",
         )
         n.set_scenarios({"low": 0.5, "high": 0.5})
-        n.c.shapes.static.loc[("high", "s0"), "type"] = "offshore"
         n, n2 = self._round_trip(n, tmp_path)
-        assert n2.c.shapes.static.loc[("low", "s0"), "type"] == "country"
-        assert n2.c.shapes.static.loc[("high", "s0"), "type"] == "offshore"
+        assert n2.c.shapes.static.loc[("high", "s0"), "type"] == "country"
+        n.c.shapes.static["geometry"] = n2.c.shapes.static["geometry"]
+        assert custom_equals(n, n2)
+
+    def test_scenario_varying_shape_raises(self):
+        from shapely.geometry import Point
+
+        from pypsa.network.io.datarecord.record import DatarecordExportError
+
+        n = pypsa.Network()
+        n.add("Bus", "b0")
+        n.add("Shape", "s0", geometry=Point(0, 0), component="Bus", idx="b0")
+        n.set_scenarios({"low": 0.5, "high": 0.5})
+        n.c.shapes.static.loc[("high", "s0"), "type"] = "offshore"
+        with pytest.warns(UserWarning, match="experimental"):
+            with pytest.raises(DatarecordExportError, match="vary by scenario"):
+                n.to_datarecord()
+
+    def test_round_trip_custom_shape_attribute(self, tmp_path):
+        from shapely.geometry import Point
+
+        n = pypsa.Network()
+        n.add("Bus", "b0")
+        n.add("Shape", "s0", geometry=Point(0, 0), component="Bus", idx="b0")
+        n.c.shapes.static["area_km2"] = 2.5
+        n.c.shapes.static["region"] = "north"
+        n, n2 = self._round_trip(n, tmp_path)
+        assert n2.c.shapes.static.at["s0", "area_km2"] == 2.5
+        assert n2.c.shapes.static.at["s0", "region"] == "north"
         n.c.shapes.static["geometry"] = n2.c.shapes.static["geometry"]
         assert custom_equals(n, n2)
 
@@ -1435,9 +1558,10 @@ class TestDatarecord:
         assert list(n2.c.generators.dynamic["shared_custom"]["cg1"]) == [1.0, 2.0]
         assert custom_equals(n, n2)
 
-    def test_custom_time_varying_p_nom_on_bus_raises(self):
-        from pypsa.network.io.datarecord.record import DatarecordExportError
-
+    def test_round_trip_custom_time_varying_p_nom_on_bus(self, tmp_path):
+        """A custom declaration that cannot share the registry attribute's
+        shape is written under a type-prefixed name and mapped back on import.
+        """
         n = pypsa.Network()
         n.set_snapshots(range(2))
         n.add("Bus", "cb3")
@@ -1446,16 +1570,19 @@ class TestDatarecord:
         )
         with pytest.warns(UserWarning, match="experimental"):
             rec = n.to_datarecord()
-        with pytest.raises(DatarecordExportError, match="Bus") as exc_info:
-            rec.schema  # noqa: B018
-        assert "p_nom" in str(exc_info.value)
+        assert "bus_p_nom" in rec.schema.types["Bus"].attributes
+        assert rec.schema.meta["pypsa"]["custom_attributes"]["Bus"] == {
+            "bus_p_nom": "p_nom"
+        }
 
-    def test_custom_carrier_series_raises(self):
-        """Carrier/Shape attributes are dim columns with no `timestep` axis,
-        so a custom time-varying one cannot be written.
+        n, n2 = self._round_trip(n, tmp_path)
+        assert list(n2.c.buses.dynamic["p_nom"]["cb3"]) == [1.0, 2.0]
+        assert custom_equals(n, n2)
+
+    def test_round_trip_custom_carrier_series(self, tmp_path):
+        """Carrier is an entity type, so a custom time-varying column takes
+        the ordinary long-file path.
         """
-        from pypsa.network.io.datarecord.record import DatarecordExportError
-
         n = pypsa.Network()
         n.set_snapshots(range(2))
         n.add("Bus", "cb4")
@@ -1463,24 +1590,47 @@ class TestDatarecord:
         n.c.carriers.dynamic["custom_ts"] = pd.DataFrame(
             {"gas": [1.0, 2.0]}, index=n.snapshots
         )
-        with pytest.warns(UserWarning, match="experimental"):
-            rec = n.to_datarecord()
-        with pytest.raises(DatarecordExportError, match="varying"):
-            rec.schema  # noqa: B018
+        n, n2 = self._round_trip(n, tmp_path)
+        assert list(n2.c.carriers.dynamic["custom_ts"]["gas"]) == [1.0, 2.0]
+        assert custom_equals(n, n2)
 
-    def test_custom_carrier_attribute_named_attribute_raises(self):
-        """A custom Carrier column named `attribute` must not silently
-        overwrite GlobalConstraint's own `carrier_attribute` attribute.
+    def test_custom_carrier_efficiency_takes_fallback_name(self, tmp_path):
+        """ac_dc_meshed's static Carrier `efficiency` cannot share the
+        connection-addressed `efficiency` file, so it is `carrier_efficiency`
+        in the record and `efficiency` again after import.
         """
-        from pypsa.network.io.datarecord.record import DatarecordExportError
-
         n = pypsa.Network()
         n.add("Bus", "cb5")
         n.add("Carrier", "gas", co2_emissions=0.2)
-        n.c.carriers.static["attribute"] = "co2_emissions"
+        n.c.carriers.static["efficiency"] = 0.9
         with pytest.warns(UserWarning, match="experimental"):
             rec = n.to_datarecord()
-        with pytest.raises(DatarecordExportError, match="carrier_attribute"):
+        carriers = rec.entity_types["Carrier"].to_native()
+        assert "carrier_efficiency" in carriers.columns
+        assert "efficiency" not in carriers.columns
+
+        n, n2 = self._round_trip(n, tmp_path)
+        assert n2.c.carriers.static.at["gas", "efficiency"] == 0.9
+        assert custom_equals(n, n2)
+
+    def test_custom_shape_series_raises(self):
+        """The shape group has no `timestep` axis, so a custom time-varying
+        Shape column cannot be written.
+        """
+        from shapely.geometry import Point
+
+        from pypsa.network.io.datarecord.record import DatarecordExportError
+
+        n = pypsa.Network()
+        n.set_snapshots(range(2))
+        n.add("Bus", "cb6")
+        n.add("Shape", "s0", geometry=Point(0, 0), component="Bus", idx="cb6")
+        n.c.shapes.dynamic["custom_ts"] = pd.DataFrame(
+            {"s0": [1.0, 2.0]}, index=n.snapshots
+        )
+        with pytest.warns(UserWarning, match="experimental"):
+            rec = n.to_datarecord()
+        with pytest.raises(DatarecordExportError, match="varying"):
             rec.schema  # noqa: B018
 
     def test_solved_network_record_has_no_topology_outputs(

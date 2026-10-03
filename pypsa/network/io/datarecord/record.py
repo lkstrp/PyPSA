@@ -26,11 +26,11 @@ from datarecord.record import Flags, LazyFrames
 from pypsa.network.io.datarecord.schema import (
     _BUS,
     _CONNECTION,
-    _DIM_ATTRS,
     _ENTITY,
     _EXCLUDED_TYPES,
     _TOPOLOGY_OUTPUTS,
-    DIM_TYPES,
+    CARRIER,
+    CARRIER_ATTR,
     ENTITY_TYPE,
     PERIOD,
     PERIOD_WEIGHTINGS,
@@ -38,11 +38,12 @@ from pypsa.network.io.datarecord.schema import (
     SCENARIO,
     SCENARIO_WEIGHTINGS,
     SHAPE,
+    SHAPE_GEOMETRY,
+    SHAPE_NAME,
+    SHAPE_TYPE,
     TIMESTEP,
     DatarecordExportError,
     build_schema,
-    custom_dim_attr_name,
-    custom_dim_pypsa_name,
     declare_custom,
     port_columns,
     record_name,
@@ -72,8 +73,9 @@ NETWORK_ATTRS = (
 def _exported_components(n: Network) -> list[Components]:
     """Component types with data to write: non-empty, standard types excluded.
 
-    `_EXCLUDED_TYPES` (templates and derived, non-schema types) are never
-    exported: the schema grants no entity-type label for them.
+    `_EXCLUDED_TYPES` (templates, derived non-schema types, and Shape, which
+    is the `shape` group) are never exported as entity types: the schema
+    grants no entity-type label for them.
     """
     return [
         c
@@ -139,6 +141,95 @@ def _check_same_bus_twice(components: list[Components]) -> None:
         raise DatarecordExportError(msg)
 
 
+def _static_once(c: Components) -> pd.DataFrame:
+    """`c.static` with the scenario level dropped and one row per name."""
+    static = c.static
+    if isinstance(static.index, pd.MultiIndex):
+        static = static.droplevel(SCENARIO)
+        static = static[~static.index.duplicated()]
+    return static
+
+
+def _check_carrier_references(n: Network, components: list[Components]) -> None:
+    """Raise if a component names a carrier the network does not declare, or one that varies by scenario.
+
+    An empty carrier, or one equal to the type's registry default (Bus's
+    `"AC"`), is not a reference when undeclared: no `carrier` row is written
+    and import restores the default. Any other undeclared name is an error,
+    since the `carrier` group cannot point at an entity the record lacks.
+    """
+    declared = set(_name_level(n.components["Carrier"].static.index).astype(str))
+    dangling: dict[str, set[str]] = {}
+    for c in components:
+        if CARRIER_ATTR not in c.static.columns:
+            continue
+        if _scenario_varying(c, [CARRIER_ATTR]):
+            msg = (
+                f"{c.name} carrier varies by scenario, which the datarecord format "
+                f"cannot represent: a component has one carrier"
+            )
+            raise DatarecordExportError(msg)
+        default = c.defaults.at[CARRIER_ATTR, "default"]
+        carriers = c.static[CARRIER_ATTR].astype(str)
+        missing = carriers[~carriers.isin(declared) & (carriers != "")]
+        missing = missing[missing != default] if isinstance(default, str) else missing
+        for name in missing.unique():
+            dangling.setdefault(str(name), set()).add(c.name)
+    if dangling:
+        names = ", ".join(
+            f"{k} ({', '.join(sorted(v))})" for k, v in sorted(dangling.items())
+        )
+        add = ", ".join(repr(k) for k in sorted(dangling))
+        msg = (
+            f"carriers referenced but not defined in n.carriers: {names}; "
+            f'declare them first with n.add("Carrier", [{add}])'
+        )
+        raise DatarecordExportError(msg)
+
+
+def _check_shapes(n: Network, components: list[Components]) -> None:
+    """Raise for a shape the `shape` group cannot key.
+
+    A shape is `(component, type) -> geometry`, so it must name an exported
+    component, no two shapes may describe one component with the same type,
+    and no shape column may differ across scenarios.
+    """
+    c = n.components["Shape"]
+    if c.static.empty:
+        return
+    varying = _scenario_varying(c, list(c.static.columns))
+    if varying:
+        msg = (
+            f"Shape columns {sorted(varying)} vary by scenario, which the "
+            f"datarecord format cannot represent: geography has one value"
+        )
+        raise DatarecordExportError(msg)
+    static = _static_once(c)
+    names_by_type = {
+        x.name: set(_name_level(x.static.index).astype(str)) for x in components
+    }
+    unattached = [
+        str(name)
+        for name, row in static.iterrows()
+        if str(row["idx"]) not in names_by_type.get(str(row["component"]), set())
+    ]
+    if unattached:
+        msg = (
+            f"shapes must describe an exported component through `component` and "
+            f"`idx`, but these do not: {', '.join(unattached)}"
+        )
+        raise DatarecordExportError(msg)
+    key = static[["component", "idx", "type"]].astype(str)
+    dup = key.duplicated(keep=False)
+    if dup.any():
+        offenders = ", ".join(
+            f"{name} ({row['component']} {row['idx']}, type {row['type']!r})"
+            for name, row in key[dup].iterrows()
+        )
+        msg = f"two shapes describe the same component with the same type: {offenders}"
+        raise DatarecordExportError(msg)
+
+
 def _timestep_dtype_name(n: Network) -> str:
     """`Int64` or `Datetime`: the narwhals dtype name for the timestep level."""
     snapshots = n.snapshots
@@ -179,9 +270,8 @@ def _drop_default_columns(
 ) -> None:
     """Replace each column's default-valued cells with NaN, in place.
 
-    Shared by `_member_frame` and `_carrier_shape_dim_frame`, both of which
-    write a wide frame where a cell equal to the registry default is left
-    unwritten. Skips a column absent from `frame` or `defaults`.
+    A cell equal to the registry default is left unwritten in a wide frame.
+    Skips a column absent from `frame` or `defaults`.
     """
     for col in columns:
         if col not in frame.columns or col not in defaults.index:
@@ -263,9 +353,10 @@ class NetworkRecord:
 
     Validates eagerly on construction and raises `DatarecordExportError` for a
     shape the record cannot hold: names claimed by more than one exported
-    type, or a component on the same bus twice. Snapshots that are neither
-    integer- nor datetime-typed raise the same error, but only once `schema`
-    is accessed.
+    type, a component on the same bus twice, a carrier referenced but not
+    declared, or a shape that describes no exported component. Snapshots that
+    are neither integer- nor datetime-typed raise the same error, but only
+    once `schema` is accessed.
 
     Parameters
     ----------
@@ -283,13 +374,15 @@ class NetworkRecord:
         """Present `n` as a `Record`, validating eagerly."""
         self.n = n
         self._components = _exported_components(n)
-        self._dim_components = {
-            dim: n.components[ctype]
-            for dim, ctype in DIM_TYPES.items()
-            if not n.components[ctype].static.empty
-        }
+        self._shapes = n.components["Shape"]
+        # (type, PyPSA column) <-> record-wide name for custom attributes,
+        # filled when `schema` declares them.
+        self._custom_names: dict[tuple[str, str], str] = {}
+        self._custom_columns: dict[tuple[str, str], str] = {}
         _check_collisions(self._components)
         _check_same_bus_twice(self._components)
+        _check_carrier_references(n, self._components)
+        _check_shapes(n, self._components)
 
     # -- Record protocol ----------------------------------------------------
 
@@ -301,51 +394,60 @@ class NetworkRecord:
         """
         n = self.n
         schema = build_schema(
-            multiperiod=n.has_periods,
-            timestep_dtype=_timestep_dtype_name(n),
-            stochastic=n.has_scenarios,
+            multiperiod=n.has_periods, timestep_dtype=_timestep_dtype_name(n)
         )
-        self._declare_custom_attrs(schema)
+        custom = self._declare_custom_attrs(schema)
         schema.meta["pypsa"] = {
             "attributes": {k: _scalar(getattr(n, k)) for k in NETWORK_ATTRS},
             "crs": n.crs.to_wkt() if n.crs is not None else None,
             "meta": dict(n.meta),
+            "custom_attributes": custom,
         }
         return schema
 
-    def _declare_custom_attrs(self, schema: Schema) -> None:
+    def _declare_custom_attrs(self, schema: Schema) -> dict[str, dict[str, str]]:
         """Grant every custom static or time-varying attribute to its type(s).
 
-        Carrier and Shape's custom static columns are declared too, over
-        their dim rather than granted to a type (`declare_custom`).
+        Shape's custom static columns are declared too, as payload of the
+        `shape` group (`declare_custom`). Fills `_custom_names` and returns
+        `{type: {record name: PyPSA column}}` for the manifest's meta, static
+        columns first in the order the network holds them, so import can
+        both undo a `custom_fallback_name` and restore the column order.
         """
         multiperiod = self.n.has_periods
-        stochastic = self.n.has_scenarios
-        for c in (*self._components, *self._dim_components.values()):
-            for attr, dtype in _custom_static_attrs(c).items():
-                declare_custom(
+        shapes = [self._shapes] if not self._shapes.static.empty else []
+        custom: dict[str, dict[str, str]] = {}
+        for c in (*self._components, *shapes):
+            declared = [
+                (attr, dtype, False) for attr, dtype in _custom_static_attrs(c).items()
+            ] + [(attr, dtype, True) for attr, dtype in _custom_series_attrs(c).items()]
+            for attr, dtype, varying in declared:
+                name = declare_custom(
                     schema,
                     c.name,
                     attr,
                     dtype,
-                    varying=False,
+                    varying=varying,
                     multiperiod=multiperiod,
-                    stochastic=stochastic,
                 )
-            for attr, dtype in _custom_series_attrs(c).items():
-                declare_custom(
-                    schema,
-                    c.name,
-                    attr,
-                    dtype,
-                    varying=True,
-                    multiperiod=multiperiod,
-                    stochastic=stochastic,
-                )
+                self._custom_names[(c.name, attr)] = name
+                self._custom_columns[(c.name, name)] = attr
+                custom.setdefault(c.name, {})[name] = attr
+        return custom
+
+    def _custom_record_name(self, c: Components, attr: str) -> str:
+        """Record-wide name of one of `c`'s custom columns, declaring the schema first."""
+        self.schema  # noqa: B018
+        return self._custom_names[(c.name, attr)]
+
+    def _custom_column(self, c: Components, record_attr: str) -> str | None:
+        """`c`'s custom column written as `record_attr`, or None if it is not one."""
+        self.schema  # noqa: B018
+        return self._custom_columns.get((c.name, record_attr))
 
     @cached_property
     def dims(self) -> LazyFrames:
-        """Axis frames, keyed by dim: `timestep`, `period`, `scenario`, `entity`, `carrier`, `shape`."""
+        """Axis frames, keyed by dim: `timestep`, `period`, `scenario`, `entity`, `shape_type`."""
         n = self.n
         axes: dict[str, Any] = {}
         timestep = n.snapshot_weightings.reset_index()
@@ -370,81 +472,18 @@ class NetworkRecord:
         axes[SCENARIO] = scenario
 
         keys = tuple(d for d in (TIMESTEP, PERIOD, SCENARIO) if not axes[d].empty)
-        keys = (*keys, _ENTITY, *self._dim_components)
+        keys = (*keys, _ENTITY)
+        if not self._shapes.static.empty:
+            keys = (*keys, SHAPE_TYPE)
         return LazyFrames(keys, lambda key: self._dim_frame(key, axes))
 
     def _dim_frame(self, key: str, axes: dict[str, pd.DataFrame]) -> Any:
         if key == _ENTITY:
             return nw.from_native(self._entity_axis_frame()).lazy()
-        if key in self._dim_components:
-            return nw.from_native(self._carrier_shape_dim_frame(key)).lazy()
+        if key == SHAPE_TYPE:
+            types = _static_once(self._shapes)["type"].astype(str).unique()
+            return nw.from_native(pd.DataFrame({SHAPE_TYPE: types})).lazy()
         return nw.from_native(axes[key]).lazy()
-
-    def _carrier_shape_dim_frame(self, dim: str) -> pd.DataFrame:
-        """One row per carrier/shape name, non-stochastic attribute columns included.
-
-        A stochastic network carries only the name column here. Its
-        attributes vary by scenario and are written as long rows instead
-        (`_dim_attr_long_frame`). Default values are dropped as for a
-        component's static columns, and columns are named by each
-        attribute's record-wide name (`record_name`), not its PyPSA one.
-        """
-        c = self._dim_components[dim]
-        defaults = c.defaults
-        static = c.static
-        if isinstance(static.index, pd.MultiIndex):
-            static = static.droplevel(SCENARIO)
-            static = static[~static.index.duplicated()]
-        frame = static.reset_index().rename(columns={"name": dim})
-        if self.n.has_scenarios:
-            return frame[[dim]]
-
-        _drop_default_columns(frame, _DIM_ATTRS[dim], defaults)
-
-        if dim == SHAPE and "geometry" in frame.columns:
-            # Cast to plain DataFrame before the WKT swap. Assigning text into
-            # a GeoDataFrame's geometry column warns that it no longer holds
-            # geometries.
-            wkt = frame["geometry"].to_wkt()
-            frame = pd.DataFrame(frame)
-            frame["geometry"] = wkt
-        custom = list(_custom_static_attrs(c))
-        _cast_custom_string_columns(frame, custom)
-        frame = frame.rename(
-            columns={
-                **{col: record_name(c.name, col) for col in _DIM_ATTRS[dim]},
-                **{col: custom_dim_attr_name(dim, col) for col in custom},
-            }
-        )
-        return frame[
-            [
-                dim,
-                *(record_name(c.name, col) for col in _DIM_ATTRS[dim]),
-                *(custom_dim_attr_name(dim, col) for col in custom),
-            ]
-        ]
-
-    def _dim_attr_long_frame(self, dim: str, attr: str) -> pd.DataFrame:
-        """`(scenario, dim, attribute, breakpoint, value)` rows for one stochastic carrier/shape attribute.
-
-        `attr` is the record-wide attribute name. For a registry attribute,
-        default values are dropped, as for a component's long input rows. A
-        custom attribute has no registry default, so none are dropped.
-        """
-        c = self._dim_components[dim]
-        defaults = c.defaults
-        registry = {record_name(c.name, a): a for a in _DIM_ATTRS[dim]}
-        pypsa_attr = registry.get(attr, custom_dim_pypsa_name(dim, attr))
-        static = c.static[pypsa_attr]
-        if dim == SHAPE and pypsa_attr == "geometry":
-            static = static.to_wkt()
-        rows = static.rename("value").reset_index().rename(columns={"name": dim})
-        if attr in registry:
-            default = _default(defaults.at[pypsa_attr, "default"])
-            rows = _drop_default(rows, default)
-        rows["attribute"] = attr
-        rows["breakpoint"] = None
-        return rows[[SCENARIO, dim, "attribute", "breakpoint", "value"]]
 
     def _entity_axis_frame(self) -> pd.DataFrame:
         """`(entity, entity_type, deleted)` across every exported type."""
@@ -482,12 +521,13 @@ class NetworkRecord:
         custom: list[str] = []
         columns = []
         for col in c.static.columns:
-            if col in ports or col in ("g_pu", "b_pu"):
+            if col in ports or col in ("g_pu", "b_pu", CARRIER_ATTR):
                 continue
             if col not in defaults.index:
-                if col in custom_series:
-                    # Also time-varying, so it lives in its long file only,
-                    # like a registry attribute whose `varying` flag routes it there.
+                if col in custom_series or self._custom_in_long_file(c, col):
+                    # Also time-varying, or declared so record-wide, so it
+                    # lives in its long file only, like a registry attribute
+                    # whose `varying` flag routes it there.
                     continue
                 columns.append(col)
                 custom.append(col)
@@ -508,13 +548,28 @@ class NetworkRecord:
         frame = static.reset_index().rename(columns={"name": _ENTITY})
         _drop_default_columns(frame, tuple(frame.columns), defaults)
         _cast_custom_string_columns(frame, custom)
-        return frame
+        return frame.rename(
+            columns={col: self._custom_record_name(c, col) for col in custom}
+        )
 
     @cached_property
     def groups(self) -> LazyFrames:
-        """The `connection` group's rows, one frame across every type."""
+        """The `connection`, `carrier` and `shape` groups' rows, one frame each across every type.
+
+        `carrier` and `shape` are present only when they have rows.
+        """
+        builders = {
+            _CONNECTION: self._connection_frame,
+            CARRIER: lambda: self._carrier_rows,
+            SHAPE: self._shape_frame,
+        }
+        keys = [_CONNECTION]
+        if not self._carrier_rows.empty:
+            keys.append(CARRIER)
+        if not self._shapes.static.empty:
+            keys.append(SHAPE)
         return LazyFrames(
-            (_CONNECTION,), lambda _: nw.from_native(self._connection_frame()).lazy()
+            tuple(keys), lambda key: nw.from_native(builders[key]()).lazy()
         )
 
     def _connection_frame(self) -> pd.DataFrame:
@@ -526,6 +581,55 @@ class NetworkRecord:
         return pd.concat(frames, ignore_index=True).drop_duplicates()
 
     @cached_property
+    def _carrier_rows(self) -> pd.DataFrame:
+        """`(entity, carrier)` for every component naming a declared carrier.
+
+        An undeclared carrier is an empty string or the type's default
+        (`_check_carrier_references` refused anything else), and gets no row.
+        """
+        declared = set(
+            _name_level(self.n.components["Carrier"].static.index).astype(str)
+        )
+        frames = []
+        for c in self._components:
+            if CARRIER_ATTR not in c.static.columns:
+                continue
+            carriers = _static_once(c)[CARRIER_ATTR].astype(str)
+            carriers = carriers[carriers.isin(declared)]
+            if carriers.empty:
+                continue
+            rows = (
+                carriers.rename(CARRIER).reset_index().rename(columns={"name": _ENTITY})
+            )
+            rows[_ENTITY] = rows[_ENTITY].astype(str)
+            frames.append(rows[[_ENTITY, CARRIER]])
+        if not frames:
+            return pd.DataFrame(columns=[_ENTITY, CARRIER])
+        return pd.concat(frames, ignore_index=True)
+
+    def _shape_frame(self) -> pd.DataFrame:
+        """`(entity, shape_type, geometry, shape_name, <custom>...)`, one row per shape.
+
+        `idx` is the entity, `type` the kind, `component` is implied by the
+        entity's type. Geometry is written as WKT.
+        """
+        c = self._shapes
+        static = _static_once(c)
+        custom = list(_custom_static_attrs(c))
+        frame = pd.DataFrame(
+            {
+                _ENTITY: static["idx"].astype(str).to_numpy(),
+                SHAPE_TYPE: static["type"].astype(str).to_numpy(),
+                SHAPE_GEOMETRY: static["geometry"].to_wkt().to_numpy(),
+                SHAPE_NAME: static.index.astype(str).to_numpy(),
+            }
+        )
+        for col in custom:
+            frame[col] = static[col].to_numpy()
+        _cast_custom_string_columns(frame, custom)
+        return frame
+
+    @cached_property
     def attributes(self) -> LazyFrames:
         """Long input frames, keyed by record-wide attribute name."""
         names: dict[str, list[Components]] = {}
@@ -534,33 +638,10 @@ class NetworkRecord:
                 names.setdefault(attr, []).append(c)
             if c.ports:
                 names.setdefault(PORT, []).append(c)
-        dim_attrs = self._stochastic_dim_attrs()
-        keys = (*names, *dim_attrs)
-
-        def _build(attr: str) -> Any:
-            if attr in dim_attrs:
-                dim = dim_attrs[attr]
-                return nw.from_native(self._dim_attr_long_frame(dim, attr)).lazy()
-            return nw.from_native(self._long_frame(attr, names[attr])).lazy()
-
-        return LazyFrames(keys, _build)
-
-    def _stochastic_dim_attrs(self) -> dict[str, str]:
-        """Carrier/shape attribute's record-wide name -> its dim, for a stochastic network only.
-
-        Empty otherwise, since a non-stochastic network's carrier/shape
-        attributes are columns of their axis file, not long input rows. Custom dim
-        attributes are included alongside the registry ones.
-        """
-        if not self.n.has_scenarios:
-            return {}
-        result: dict[str, str] = {}
-        for dim, c in self._dim_components.items():
-            for attr in _DIM_ATTRS[dim]:
-                result[record_name(c.name, attr)] = dim
-            for attr in _custom_static_attrs(c):
-                result[custom_dim_attr_name(dim, attr)] = dim
-        return result
+        return LazyFrames(
+            tuple(names),
+            lambda attr: nw.from_native(self._long_frame(attr, names[attr])).lazy(),
+        )
 
     @cached_property
     def outputs(self) -> LazyFrames:
@@ -616,7 +697,7 @@ class NetworkRecord:
         diverging = _scenario_varying(c, list(c.static.columns))
         seen: list[str] = []
         for attr in defaults.index:
-            if attr == "name":
+            if attr in ("name", CARRIER_ATTR):
                 continue
             if str(defaults.at[attr, "status"]).startswith("Output"):
                 continue
@@ -631,12 +712,26 @@ class NetworkRecord:
             if name not in seen:
                 seen.append(name)
         for attr in _custom_static_attrs(c):
-            if attr in diverging and attr not in seen:
-                seen.append(attr)
+            name = self._custom_record_name(c, attr)
+            if (attr in diverging or self._custom_in_long_file(c, attr)) and (
+                name not in seen
+            ):
+                seen.append(name)
         for attr in _custom_series_attrs(c):
-            if attr not in seen:
-                seen.append(attr)
+            name = self._custom_record_name(c, attr)
+            if name not in seen:
+                seen.append(name)
         return seen
+
+    def _custom_in_long_file(self, c: Components, attr: str) -> bool:
+        """Whether a custom static column's record-wide spec is time-varying.
+
+        True when it joined a registry attribute some other type varies in
+        time, so the column's values are timestep-NULL rows of that long file
+        rather than a member-frame column.
+        """
+        spec = self.schema.attributes[self._custom_record_name(c, attr)]
+        return TIMESTEP in spec.dims
 
     def _output_attrs(self, c: Components) -> list[str]:
         defaults = c.defaults
@@ -799,9 +894,9 @@ class NetworkRecord:
     def _source_attr(self, c: Components, record_attr: str) -> str | None:
         """Which of `c`'s own columns writes `record_attr` (undo `record_name`).
 
-        A custom attribute carries no override, so its record-wide name is
-        the PyPSA column itself, whether it lives in `c.dynamic` (time-varying)
-        or `c.static` (a scenario-diverging static column).
+        A custom attribute is looked up through the names `schema` declared
+        it under, whether it lives in `c.dynamic` (time-varying) or `c.static`
+        (a scenario-diverging static column, or one routed to a long file).
         """
         defaults = c.defaults
         ports = port_columns(c)
@@ -811,11 +906,7 @@ class NetworkRecord:
                 continue
             if record_name(c.name, stem) == record_attr:
                 return attr
-        if record_attr not in defaults.index and (
-            record_attr in c.dynamic or record_attr in c.static.columns
-        ):
-            return record_attr
-        return None
+        return self._custom_column(c, record_attr)
 
     def _stack_series(self, c: Components, wide: pd.DataFrame) -> pd.DataFrame:
         """Melt a `snapshots x components` frame into long rows."""

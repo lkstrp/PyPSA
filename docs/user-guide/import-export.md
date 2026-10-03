@@ -37,13 +37,15 @@ Two networks with a disjunct set of component indices can be **merged** with [`n
 
 !!! note "Unique component names"
 
-    Component names must be unique across `Bus`, `Line`, `Transformer`, `Link`, `Process`,
-    `Generator`, `Load`, `StorageUnit`, `Store`, `ShuntImpedance` and `GlobalConstraint`,
-    not just within one type. `n.add()`, `n1.merge(n2)`, `n.copy()` and
+    Component names must be unique across `Bus`, `Carrier`, `Line`, `Transformer`, `Link`,
+    `Process`, `Generator`, `Load`, `StorageUnit`, `Store`, `ShuntImpedance` and
+    `GlobalConstraint`, not just within one type. `n.add()`, `n1.merge(n2)`, `n.copy()` and
     [`n.rename_component_names()`][pypsa.Network.rename_component_names] refuse a name
-    already held by another of these types. `Carrier`, `Shape`, `SubNetwork` and the
-    standard types (`LineType`, `TransformerType`) sit outside this namespace and may
-    reuse a name from it, so a carrier `"solar"` can sit next to a generator `"solar"`.
+    already held by another of these types, so a carrier `"solar"` cannot sit next to a
+    generator `"solar"`. Renaming a carrier rewrites the `carrier` column of every
+    component that referenced it. `Shape`, `SubNetwork` and the standard types
+    (`LineType`, `TransformerType`) sit outside this namespace and may reuse a name from
+    it, so a shape may be named after the bus it describes.
 
 ## CSV Files
 
@@ -164,14 +166,26 @@ n_import = pypsa.Network("foo/bar")
 
     Every network already has unique names across component types (see
     [Adding, Removing & Merging](#adding-removing-merging)), so export needs no
-    preparation. `Carrier` and `Shape` round-trip as their own record dimensions
-    rather than as component types. Custom static and time-varying attributes
-    round-trip as declared attributes. A custom attribute shared by two component
-    types must have the same dtype on both, or export raises a
-    `DatarecordExportError`. Links and processes keep every port (`bus2`,
-    `efficiency2`, `p2`, ...). Derived topology (`sub_network`, `Bus.generator`) is
-    not written, so an imported network's `n.sub_networks` is empty until a solve
-    or an explicit [`n.determine_network_topology()`][pypsa.Network.determine_network_topology]
+    preparation. `Carrier` is an entity type like any other, and a component's
+    `carrier` is written as the record's `carrier` group pointing at that entity.
+    Every carrier a component names must therefore exist in `n.carriers`, or export
+    raises a `DatarecordExportError` naming the `n.add("Carrier", ...)` call to make.
+    An empty carrier, or one equal to the type's default (a bus's `"AC"`) that is
+    not declared, is simply not written. A component's carrier may not differ
+    between scenarios. `Shape` is not a component type in the record but the
+    `shape` group, keyed by the component a shape describes (`component`, `idx`) and
+    its `type`, carrying the geometry as WKT and the shape's PyPSA name. Every shape
+    must describe a component, two shapes of one type on one component are refused,
+    and shape columns may not differ between scenarios. Custom static and
+    time-varying attributes round-trip as declared attributes. A custom attribute
+    shared by two component types must have the same dtype on both, or export
+    raises a `DatarecordExportError`. A custom column named like a registry
+    attribute of another shape (a static Carrier `efficiency`) is written as
+    `<type>_<name>` and mapped back on import. Links and processes keep every port
+    (`bus2`, `efficiency2`, `p2`, ...). Derived topology (`sub_network`,
+    `Bus.generator`) is not written, so an imported network's `n.sub_networks` is
+    empty until a solve or an explicit
+    [`n.determine_network_topology()`][pypsa.Network.determine_network_topology]
     call. Snapshots must still be integer- or datetime-typed. After import, a
     time-series frame's columns follow the component's static index order, which
     can differ from the order they had in the source network.
