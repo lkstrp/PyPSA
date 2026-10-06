@@ -240,7 +240,7 @@ def test_investment_period_without_multi_invest_raises(glc_type, carrier_attribu
     n.add("Load", "l", bus="b", p_set=50)
     n.add(
         "Generator",
-        ["gas", "wind"],
+        ["gas gen", "wind gen"],
         bus="b",
         carrier=["gas", "wind"],
         p_nom=100,
