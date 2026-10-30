@@ -2908,7 +2908,9 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
         -------
         pd.Series | pd.DataFrame
             Weighted prices per bus or group (Series), or the full per-bus
-            time series if `groupby_time=False` (DataFrame).
+            time series if `groupby_time=False` (DataFrame). On networks with
+            investment periods, the weighted prices come as a DataFrame with
+            one column per period, like the other time-aggregating statistics.
 
         Examples
         --------
@@ -2996,8 +2998,8 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
             raise ValueError(msg)
 
         wp = weights * prices
-        a = self._weighted_sum_per_network(wp, sns_weights)
-        b = self._weighted_sum_per_network(weights, sns_weights)
+        a = self._aggregate_with_weights(wp, sns_weights, "sum")
+        b = self._aggregate_with_weights(weights, sns_weights, "sum")
         df = a / b
 
         if groupers:
