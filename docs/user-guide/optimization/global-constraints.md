@@ -9,11 +9,11 @@ SPDX-License-Identifier: CC-BY-4.0
 Global constraints apply to more than one component at once and are stored under a unique `name` in `n.global_constraints`. Several pre-defined types of global constraints are available (`type`).
 For instance, for defining emission limits, transmission expansion limits, or technology capacity expansion limits using the `sense` and `constant` attributes.
 
-By default, global constraints span across all investment periods. For models with multiple investment periods, global constraints can be limited to affect only single investment period (e.g. an emission limit for a specific year) by specifying the in the attribute `investment_period`. The shadow price of each global constraint is stored in the attribute `mu`.
+By default, global constraints span across all investment periods. For models with multiple investment periods, global constraints can be limited to affect only single investment period (e.g. an emission limit for a specific year) by specifying the in the attribute `investment_period`. The shadow price of each global constraint is stored in the attribute `mu`. Flow-based rows store theirs per snapshot in `mu_ram` instead.
 
 !!! note "Naming Convention"
 
-    Global constraints carry the name scheme `GlobalConstraint-{name}` in the Linopy model.
+    Global constraints carry the name scheme `GlobalConstraint-{name}` in the Linopy model. All `flow_based` rows share the one constraint `GlobalConstraint-ram`, indexed by `name`. Their net positions and the balance of the net positions are `FlowBased-net_position` and `FlowBased-balance`.
 
 ## Primary Energy
 
@@ -177,3 +177,70 @@ This global constraint is added in the function `define_growth_limit()` and carr
     | $P_l$  | `n.{lines,transformers}.s_nom_opt` | Decision Variable |#
     | $\gamma_s$ | `n.carriers.max_relative_growth` | Parameter |
     | $\Gamma_s$ | `n.carriers.max_growth` | Parameter |
+
+## Flow-Based Market Coupling
+
+Global constraints with `type="flow_based"` implement flow-based market coupling. Each row is one critical network element and contingency (CNEC), with the zonal power transfer distribution factors (PTDF) in the columns `ptdf_<name>` and the remaining available margin in `ram`. See the [component page](../components/global-constraints.md#flow-based-domains) for how to store a domain.
+
+The columns name zones $z \in Z$, which are buses, and corridors $l \in L$, which are links. Each zone gets a net position $NP_{z,t}$ that enters its nodal balance, so the zonal price $\pi_{z,t}$ stays the dual of the balance:
+
+$$\sum \text{injections}_{z,t} - NP_{z,t} = 0 \quad \forall z, t \quad \leftrightarrow \quad \pi_{z,t}$$
+
+The net positions balance across all zones,
+
+$$\sum_{z} NP_{z,t} = 0 \quad \forall t,$$
+
+and every CNEC $c$ limits the flow they cause, together with the flows $p_{l,t}$ of the corridor links:
+
+$$\sum_{z} \mathrm{PTDF}_{c,z,t}\, NP_{z,t} + \sum_{l} \mathrm{PTDF}_{c,l,t}\, p_{l,t} \leq \mathrm{RAM}_{c,t} \quad \forall c, t \quad \leftrightarrow \quad \mu_{c,t}$$
+
+$NP_{z,t}$ is the net injection of the zone bus, including the flows of its links, and has no bounds. The shadow price $\mu_{c,t} \leq 0$, and $|\mu_{c,t}|$ is the welfare gained per MW of additional RAM on the CNEC. The zonal price differences follow from the binding CNECs:
+
+$$\pi_{z_1,t} - \pi_{z_2,t} = \sum_{c} \mu_{c,t} \left(\mathrm{PTDF}_{c,z_1,t} - \mathrm{PTDF}_{c,z_2,t}\right)$$
+
+**Net-position convention and link columns.** The flow of a link touching a zone is already inside the net positions of the zones it connects. A link column therefore carries
+
+$$\mathrm{PTDF}_{c,l} = h_{c,l} - \left(\eta_l\, \mathrm{PTDF}_{c,\text{bus1}} - \mathrm{PTDF}_{c,\text{bus0}}\right),$$
+
+where $h_{c,l}$ is the sensitivity of the CNEC to the link flow $p_l$ (positive from `bus0` to `bus1`), and the PTDF of a bus that is no zone is 0. Two cases:
+
+- A lossless corridor link ($\eta_l = 1$) from zone `A` to zone `B` with its own CNECs `L (+)` and `L (-)` has $\mathrm{PTDF}_{c,l} = \pm 1$ on these (where the zone PTDFs are 0) and $\mathrm{PTDF}_{c,l} = 0$ on the other CNECs. There $h_{c,l} = \mathrm{PTDF}_{c,B} - \mathrm{PTDF}_{c,A}$: the corridor flow reaches these CNECs only through the net positions it moves, $-p_l$ at `A` and $+p_l$ at `B`.
+- Advanced hybrid coupling: a hub link `H` from an external bus `X` into zone `B` with $h_{c,H} = 0$, the PTDF of the reference zone, has `ptdf_H = -ptdf_B`. This reproduces a model in which the external generator sits at the reference zone. Standard hybrid coupling instead subtracts the forecast flow over such a border from `ram`.
+
+A link from a zone to a bus that is no zone does not need a column. Its flow then only moves the net position of the zone.
+
+**Time variation.** `ram` and every `ptdf_<name>` column may be time series in `n.global_constraints_t`, and static and time-varying columns can be mixed. The MultiIndex form of [`add_flow_based`][pypsa.components.GlobalConstraints.add_flow_based] writes them.
+
+**Validation.** Building the model raises a `ValueError` when
+
+- a `ptdf_<name>` column names neither a bus nor a link, or both;
+- a line or transformer connects two zone buses;
+- a link connects two zone buses but has no `ptdf_<name>` column;
+- a link column touches no zone bus;
+- a zone bus has no attached components;
+- `ram` is NaN on a snapshot where the row binds;
+- `investment_period` is set on a model optimised without `multi_investment_periods=True`, or lies outside `n.investment_periods`.
+
+Indirect paths between zones through buses that are no zones are not detected, and the [consistency check][pypsa.Network.consistency_check] does not cover the domain.
+
+**Investment periods.** With `multi_investment_periods=True`, a row with `investment_period` binds only in the snapshots of that period. Rows of a period outside the optimised snapshots are skipped without a message, so rolling horizons work.
+
+**Results.** The shadow prices $\mu_{c,t}$, the duals of `GlobalConstraint-ram`, are stored in `n.global_constraints_t.mu_ram`. The zonal prices are in `n.buses_t.marginal_price`, and the net position of a zone is the net injection `n.buses_t.p` of its bus. The net-position variable and the dual of its balance are only kept in the model, as `n.model["FlowBased-net_position"].solution` and `n.model.constraints["FlowBased-balance"].dual`. Nothing is written to `n.buses`.
+
+**Stochastic networks.** The domain applies to every scenario, and the net positions get a `scenario` dimension. Domains that differ between scenarios are not supported. `n.buses_t.p` holds zeros on stochastic networks, so read the net positions from `n.model["FlowBased-net_position"].solution`.
+
+This global constraint is added in the functions `define_flow_based_variables()` and `define_flow_based_constraints()` and carries the names `GlobalConstraint-ram`, `FlowBased-net_position` and `FlowBased-balance`.
+
+??? note "Mapping symbols to component attributes"
+
+    | Symbol | Attribute | Type |
+    |--------|-----------|------|
+    | $NP_{z,t}$ | `n.model["FlowBased-net_position"]` | Decision Variable |
+    | $p_{l,t}$ | `n.links_t.p0` | Decision Variable |
+    | $\pi_{z,t}$ | `n.buses_t.marginal_price` | Dual Variable |
+    | $\mu_{c,t}$ | `n.global_constraints_t.mu_ram` | Dual Variable |
+    | $\mathrm{PTDF}_{c,z}$, $\mathrm{PTDF}_{c,l}$ | `n.global_constraints.ptdf_<name>` / `n.global_constraints_t.ptdf_<name>` | Parameter |
+    | $\mathrm{RAM}_{c,t}$ | `n.global_constraints.ram` / `n.global_constraints_t.ram` | Parameter |
+    | $\eta_l$ | `n.links.efficiency` | Parameter |
+
+The examples [Flow-Based Market Coupling](../../examples/fbmc-simple-example.ipynb) and [Determining Flow-Based Domains](../../examples/fbmc-building-domain.ipynb) clear and build a domain on a three-zone system.
