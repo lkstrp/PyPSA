@@ -427,6 +427,61 @@ class TestStatisticsFunctions:
         actual = fom_result.values.sum()
         assert abs(actual - expected) < TOLERANCE
 
+    def test_overnight_cost_multi_period(self):
+        """Test overnight_cost() counts each asset once, in its first active period."""
+        n = pypsa.Network()
+        n.set_snapshots(pd.MultiIndex.from_product([[2030, 2040], ["t0", "t1"]]))
+        n.investment_periods = [2030, 2040]
+        n.add("Bus", "bus")
+        n.add(
+            "Generator",
+            "gen2030",
+            bus="bus",
+            build_year=2030,
+            lifetime=30,
+            overnight_cost=1000,
+            discount_rate=0.05,
+            p_nom=100,
+            p_nom_opt=100,
+        )
+        n.add(
+            "Generator",
+            "gen2040",
+            bus="bus",
+            build_year=2040,
+            overnight_cost=1000,
+            discount_rate=0.05,
+            p_nom=10,
+            p_nom_opt=10,
+        )
+        n.add(
+            "Generator",
+            "gen_retired",
+            bus="bus",
+            build_year=1990,
+            lifetime=20,
+            overnight_cost=1000,
+            p_nom_opt=1,
+        )
+        n.add(
+            "Generator",
+            "gen_no_cost",
+            bus="bus",
+            build_year=2030,
+            lifetime=30,
+            p_nom_opt=5,
+        )
+
+        result = n.statistics.overnight_cost(groupby=False)
+
+        assert ("Generator", "gen_retired") not in result.index
+        assert result.loc[("Generator", "gen_no_cost")].isna().all()
+        assert result.loc[("Generator", "gen2030"), 2030] == pytest.approx(100000)
+        assert np.isnan(result.loc[("Generator", "gen2030"), 2040])
+        assert np.isnan(result.loc[("Generator", "gen2040"), 2030])
+        assert result.loc[("Generator", "gen2040"), 2040] == pytest.approx(10000)
+        assert result.sum().sum() == pytest.approx(110000)
+
 
 class TestMultiComponentScenarios:
     """Test cost split with multiple component types."""

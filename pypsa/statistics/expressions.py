@@ -1061,8 +1061,9 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
         Returns
         -------
         pd.DataFrame
-            Annuitized overnight investment costs with components as rows and a single column
-            of aggregated values.
+            Overnight investment costs with components as rows and a single column
+            of aggregated values. On multi-period networks, the cost of an asset appears
+            once, in the first investment period in which it is active.
 
         See Also
         --------
@@ -1075,7 +1076,17 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
         def func(n: Network, c: str, port: str) -> pd.Series:
             comp = n.c[c]
             capacity = comp.static[f"{nominal_attrs[c]}_opt"]
-            return capacity * comp.overnight_cost
+            cost = capacity * comp.overnight_cost
+            if not n.has_investment_periods:
+                return cost
+            periods = n.investment_periods
+            active = pd.concat({p: comp.get_active_assets(p) for p in periods}, axis=1)
+            first = active.idxmax(axis=1)[active.any(axis=1)]
+            return pd.concat(
+                {p: cost[first.index].where(first == p) for p in periods},
+                axis=1,
+                names=[periods.name],
+            )
 
         df = self._aggregate_components(
             func,
