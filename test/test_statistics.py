@@ -1068,6 +1068,36 @@ class TestPortEfficiency:
         expected = mixed_link_eff.components[component].dynamic[f"{eff_param}3"]
         pd.testing.assert_frame_equal(result, expected)
 
+    @staticmethod
+    @pytest.fixture(scope="class")
+    def shadowed_link_eff(base_network, eff1, component):
+        """Network whose static efficiency is overridden by a later series."""
+        n = base_network.copy()
+        name = f"{component.lower()}_shadow"
+        n.add(component, name, bus0="bus0", bus1="bus1", p_nom=100, **{eff1: 0.9})
+        n.c[component].dynamic[eff1] = pd.DataFrame(
+            {name: [0.7, 0.8, 0.9]}, index=n.snapshots
+        )
+        return n
+
+    def test_shadowed_static_returns_default(self, shadowed_link_eff, component, eff1):
+        default = shadowed_link_eff.c[component].defaults.loc[eff1, "default"]
+        result = port_efficiency(shadowed_link_eff, component, port=1)
+        assert result.item() == default
+
+    def test_shadowed_static_xarray_returns_default(
+        self, shadowed_link_eff, component, eff1
+    ):
+        default = shadowed_link_eff.c[component].defaults.loc[eff1, "default"]
+        result = port_efficiency(shadowed_link_eff, component, port=1, as_xarray=True)
+        assert result.item() == default
+
+    def test_shadowed_static_installed_capacity(self, shadowed_link_eff, component):
+        result = shadowed_link_eff.statistics.installed_capacity(
+            components=component, at_port=1
+        )
+        assert result.item() == pytest.approx(100)
+
 
 def test_1144():
     """
