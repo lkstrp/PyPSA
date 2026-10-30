@@ -18,6 +18,7 @@ from pypsa.common import (
     equals,
     generate_colors,
     list_as_string,
+    match_carriers,
     normalize_carrier_nice_names,
 )
 from pypsa.definitions.structures import Dict
@@ -525,3 +526,24 @@ class TestNormalizeCarrierNiceNames:
     def test_empty_nice_names(self):
         empty = pd.Series(["", ""], index=["a", "b"])
         assert normalize_carrier_nice_names(empty, "a") == "a"
+
+
+@pytest.mark.parametrize(
+    ("selection", "expected"),
+    [
+        ("AC", ["AC"]),
+        ("H2", ["H2"]),
+        ("^A", ["AC"]),
+        ("A.*|D.*", ["AC", "DC"]),
+        ("gas", []),
+        (["AC", "gas"], ["AC"]),
+    ],
+)
+def test_match_carriers(selection, expected):
+    carriers = pd.Series(["AC", "DC", "AC", "H2", np.nan])
+    assert list(match_carriers(carriers, selection)) == expected
+
+
+def test_match_carriers_rejects_other_types():
+    with pytest.raises(TypeError, match="must be a string or list-like"):
+        match_carriers(pd.Series(["AC"]), 1)

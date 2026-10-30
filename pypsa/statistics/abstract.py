@@ -15,7 +15,7 @@ import pandas as pd
 from pandas.api.types import is_list_like
 
 from pypsa._options import options
-from pypsa.common import normalize_carrier_nice_names
+from pypsa.common import match_carriers, normalize_carrier_nice_names
 from pypsa.statistics.grouping import groupers
 
 if TYPE_CHECKING:
@@ -296,19 +296,8 @@ class AbstractStatisticsAccessor(ABC):
         if isinstance(bus_carriers.index, pd.MultiIndex):
             bus_carriers = bus_carriers.groupby(level="name").first()
 
-        port_carriers = buses.map(bus_carriers)
-        if isinstance(bus_carrier, str):
-            if bus_carrier in bus_carriers.unique():
-                mask = port_carriers == bus_carrier
-            else:
-                mask = port_carriers.str.contains(bus_carrier, regex=True)
-        elif is_list_like(bus_carrier):
-            mask = port_carriers.isin(bus_carrier)
-        else:
-            msg = f"Argument `bus_carrier` must be a string or list-like, got {type(bus_carrier)}"
-            raise TypeError(msg)
-        # links may have empty ports which results in NaNs
-        mask = mask.where(mask.notnull(), False)
+        # links may have empty ports which map to NaN and are never selected
+        mask = buses.map(bus_carriers).isin(match_carriers(bus_carriers, bus_carrier))
         return self._select(obj, buses.index[mask])
 
     def _filter_carrier(

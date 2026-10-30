@@ -252,6 +252,27 @@ def test_bus_carrier_selection_with_list(ac_dc_network_r):
     assert not df.empty
 
 
+def test_energy_balance_accepts_bus_carrier_regex(ac_dc_network_r):
+    """Regex `bus_carrier` resolves the unit like the filter resolves the rows."""
+    n = ac_dc_network_r
+    n.c.buses.static.loc[n.c.buses.static.carrier == "AC", "unit"] = "MWh_el"
+    n.c.buses.static.loc[n.c.buses.static.carrier == "DC", "unit"] = "MWh_dc"
+
+    df = n.statistics.energy_balance(bus_carrier="^AC$")
+    assert not df.empty
+    assert df.attrs["unit"] == "MWh_el"
+
+    df = n.statistics.energy_balance(bus_carrier="A.*|D.*")
+    assert not df.empty
+    assert df.attrs["unit"] == "carrier dependent"
+
+    assert not n.statistics.supply(bus_carrier="A.*").empty
+    assert not n.statistics.withdrawal(bus_carrier="A.*").empty
+
+    with pytest.raises(ValueError, match="Bus carriers.*not in network"):
+        n.bus_carrier_unit("NonExistent")
+
+
 @pytest.mark.parametrize(
     "stat_func",
     ["capex", "optimal_capacity", "installed_capacity"],
