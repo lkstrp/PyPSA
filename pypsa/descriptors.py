@@ -326,7 +326,7 @@ def _update_ports_component_attrs(
                     index=n.snapshots, columns=c.static.index[:0], dtype=float
                 )
                 c.dynamic[target] = df
-            elif attr in static_attrs and target not in c.static.columns:
+            if defaults.loc[target, "static"] and target not in c.static.columns:
                 c.static[target] = defaults.loc[target, "default"]
 
         c.ctype = replace(c.ctype, defaults=defaults)

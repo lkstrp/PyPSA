@@ -292,6 +292,33 @@ def test_update_ports_component_attrs():
     assert "cyclic_delay2" in link_defaults.index
 
 
+def test_update_ports_fills_static_default_for_existing_rows():
+    """Links added before a later link introduces a new port get its default efficiency."""
+    n = pypsa.Network()
+    n.add("Bus", ["b0", "b1", "b2"])
+    n.add("Link", "early", bus0="b0", bus1="b1", p_nom=10)
+    n.add("Link", "multi", bus0="b0", bus1="b1", bus2="b2", p_nom=10, efficiency2=0.5)
+    n.add("Link", "late", bus0="b0", bus1="b1", p_nom=10)
+
+    assert n.c.links.static.loc["early", "efficiency2"] == 1.0
+    assert n.c.links.static["efficiency2"].notna().all()
+
+    capacity = n.statistics.installed_capacity(
+        components="Link", at_port="bus2", groupby=False
+    )
+    assert capacity.loc[["early", "multi", "late"]].tolist() == [10, 5, 10]
+
+
+def test_update_ports_fills_static_default_for_existing_process_rows():
+    """Processes added before a later process introduces a new port get its default rate."""
+    n = pypsa.Network()
+    n.add("Bus", ["b0", "b1", "b2"])
+    n.add("Process", "early", bus0="b0", bus1="b1", p_nom=10)
+    n.add("Process", "multi", bus0="b0", bus1="b1", bus2="b2", p_nom=10, rate2=0.5)
+
+    assert n.c.processes.static.loc["early", "rate2"] == 1.0
+
+
 def test_update_ports_column_ordering():
     """Test that bus2, bus3, efficiency2, efficiency3 are inserted after bus1, efficiency."""
     n = pypsa.Network()
