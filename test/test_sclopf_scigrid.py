@@ -224,3 +224,56 @@ def test_optimize_security_constrained_invalid_outages_raise(branch_outages, mat
         n.optimize.optimize_security_constrained(
             branch_outages=branch_outages, multi_investment_periods=True
         )
+
+
+def _bridge_network() -> pypsa.Network:
+    """Triangle a-b-c with the radial line c-d, whose outage islands bus d."""
+    n = pypsa.Network()
+    n.add("Bus", ["a", "b", "c", "d"])
+    n.add("Line", "ab", bus0="a", bus1="b", x=1.0, r=0.01, s_nom=100)
+    n.add("Line", "bc", bus0="b", bus1="c", x=1.0, r=0.01, s_nom=100)
+    n.add("Line", "ca", bus0="c", bus1="a", x=1.0, r=0.01, s_nom=100)
+    n.add("Line", "cd", bus0="c", bus1="d", x=1.0, r=0.01, s_nom=100)
+    n.add("Generator", "g_a", bus="a", p_nom=200, marginal_cost=10)
+    n.add("Generator", "g_d", bus="d", p_nom=100, marginal_cost=50)
+    n.add("Load", "l_b", bus="b", p_set=50)
+    n.add("Load", "l_d", bus="d", p_set=30)
+    return n
+
+
+def test_optimize_security_constrained_bridge_outage(caplog):
+    n = _bridge_network()
+
+    with caplog.at_level("WARNING", logger="pypsa.optimization.abstract"):
+        status, condition = n.optimize.optimize_security_constrained()
+
+    assert (status, condition) == ("ok", "optimal")
+    sub_network = n.c.sub_networks.static.obj.iloc[0]
+    assert np.isfinite(sub_network.BODF).all()
+    assert list(sub_network.bridges_i) == [("Line", "cd")]
+
+    records = [r for r in caplog.records if "would split sub-network" in r.message]
+    assert len(records) == 1
+    assert "('Line', 'cd')" in records[0].message
+
+    constraint = n.model.constraints[
+        "Line-fix-s-upper-security-for-Line-outage-in-sub-network-0"
+    ]
+    assert list(constraint.indexes["Line-outage"]) == ["ab", "bc", "ca"]
+
+
+def test_optimize_security_constrained_only_bridge_outages(caplog):
+    n = _bridge_network()
+
+    with caplog.at_level("WARNING", logger="pypsa.optimization.abstract"):
+        status, condition = n.optimize.optimize_security_constrained(
+            branch_outages=["cd"]
+        )
+
+    assert (status, condition) == ("ok", "optimal")
+    assert "('Line', 'cd')" in caplog.text
+    assert not [c for c in n.model.constraints if "security" in c]
+
+    caplog.clear()
+    n.optimize.optimize_security_constrained(branch_outages=["ab"])
+    assert "would split" not in caplog.text

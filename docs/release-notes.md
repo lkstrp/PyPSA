@@ -31,6 +31,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 ### Bug Fixes
 
+- Fix [`n.optimize.optimize_security_constrained()`][pypsa.optimization.OptimizationAccessor.optimize_security_constrained] building `NaN` and infinite coefficients for the outage of a branch whose removal splits a sub-network. Such outages are now skipped with a warning naming the branches, [`sn.calculate_BODF()`][pypsa.SubNetwork.calculate_BODF] sets their factors to zero and lists them in `sn.bridges_i`, and [`n.lpf_contingency()`][pypsa.Network.lpf_contingency] warns about them. See [#2085](https://github.com/PyPSA/PyPSA/issues/2085).
 - **Behavior change**: The `{Component}-{attr}_set` constraints (e.g. `Generator-p_nom_set`) use the dimension `name` instead of `{Component}-{attr}_set_i`, like all other constraints. Custom constraints in `extra_functionality` that select on the old dimension need updating. (<!-- md:pr 2052 -->)
 - Fix maintenance of modular committable components that are not extendable returning status `('ok', 'unknown')` without a solution. (<!-- md:pr 2100 -->)
 - Fix [`n.statistics.prices()`][pypsa.statistics.StatisticsAccessor.prices] with `groupby` dropping the `scenario` level of stochastic networks and the `network` level of network collections, averaging their prices together. Grouped prices now keep these levels like the ungrouped prices. (<!-- md:pr 2103 -->)

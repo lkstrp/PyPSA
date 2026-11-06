@@ -1006,6 +1006,7 @@ class NetworkPowerFlowMixin(_NetworkABC):
             sub_network._branches = sub_network.branches()
             sub_network.calculate_BODF()
 
+        bridges = []
         for branch in branch_outages:
             if not isinstance(branch, tuple):
                 logger.warning("No type given for %s, assuming it is a line", branch)
@@ -1014,6 +1015,8 @@ class NetworkPowerFlowMixin(_NetworkABC):
             sub_network = self.c.sub_networks.static.obj[
                 passive_branches.sub_network[branch]
             ]
+            if branch in sub_network.bridges_i:
+                bridges.append(branch)
 
             branch_i = sub_network._branches.index.get_loc(branch)
             p0_new = p0_base + pd.Series(
@@ -1023,6 +1026,14 @@ class NetworkPowerFlowMixin(_NetworkABC):
             p0_new.name = branch
 
             p0 = pd.concat([p0, p0_new], axis=1)
+
+        if bridges:
+            logger.warning(
+                "The outage of %s splits its sub-network, which the linear "
+                "contingency analysis cannot capture. The flows of the other "
+                "branches are left at their base case values.",
+                bridges,
+            )
 
         return p0
 
@@ -1084,6 +1095,9 @@ class SubNetworkPowerFlowMixin:
 
         Note that BODF_{ll} = -1.
 
+        For a bridge, a branch whose removal splits the sub-network, the column
+        is set to zero and the branch is listed in ``sub_network.bridges_i``.
+
         Parameters
         ----------
         skip_pre : bool, default False
@@ -1099,10 +1113,14 @@ class SubNetworkPowerFlowMixin:
         # build LxL version of PTDF
         branch_PTDF = self.PTDF * self.K
 
+        # a bridge carries all power injected across itself
+        self_ptdf = np.diag(branch_PTDF)
+        is_bridge = np.isclose(self_ptdf, 1.0, rtol=0.0, atol=1e-8)
+        self.bridges_i = self.branches_i(active_only=True)[is_bridge]
+
         with np.errstate(divide="ignore"):
-            denominator = csr_matrix(
-                (1 / (1 - np.diag(branch_PTDF)), (r_[:num_branches], r_[:num_branches]))
-            )
+            factors = np.where(is_bridge, 0.0, 1 / (1 - self_ptdf))
+        denominator = csr_matrix((factors, (r_[:num_branches], r_[:num_branches])))
 
         self.BODF = branch_PTDF * denominator
 
