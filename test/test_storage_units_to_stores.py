@@ -280,9 +280,8 @@ def test_name_clash_raises():
     n = pypsa.Network()
     n.add("Bus", "bus")
     n.add("StorageUnit", "x", bus="bus")
-    n.add("Store", "x", bus="bus")
-    with pytest.raises(ValueError, match="already exist"):
-        n.c.storage_units.convert_to_stores()
+    with pytest.raises(ValueError, match="StorageUnit"):
+        n.add("Store", "x", bus="bus")
 
 
 def test_stochastic_network_raises():

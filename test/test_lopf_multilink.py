@@ -116,7 +116,7 @@ def n():
 
         n.add(
             "Store",
-            f"biomass{str(i)}",
+            f"biomass-store{str(i)}",
             bus=f"biomass{str(i)}",
             e_nom_extendable=True,
             marginal_cost=biomass_marginal_cost[i],

@@ -2,8 +2,11 @@
 #
 # SPDX-License-Identifier: MIT
 
+import importlib.util
 import logging
 import os
+import shutil
+import tempfile
 import warnings
 from pathlib import Path
 
@@ -16,6 +19,48 @@ from shapely.geometry import Polygon
 
 import pypsa
 from pypsa.constants import DEFAULT_EPSG
+from pypsa.version import __version_base__
+
+EXAMPLE_NETWORKS = Path(__file__).parents[1] / "examples" / "networks"
+
+# datarecord is an optional extra that is not installed on Python 3.11.
+collect_ignore_glob = (
+    ["test_io_datarecord*.py", "benchmarks/*"]
+    if importlib.util.find_spec("datarecord") is None
+    else []
+)
+
+
+_EXAMPLE_CACHE: dict = {}
+
+
+def _install_example_cache():
+    """Serve the in-repo example networks to `pypsa.examples` instead of the web.
+
+    Called from `pytest_configure` so module-level loads during collection
+    (e.g. `test_docs.py`) are redirected too. Runs once per xdist worker.
+    """
+    root = Path(tempfile.mkdtemp(prefix="pypsa-examples-"))
+    folder = root / f"v{__version_base__}"
+    folder.mkdir()
+    for name in (
+        "ac-dc-meshed",
+        "storage-hvdc",
+        "scigrid-de",
+        "model-energy",
+        "stochastic-network",
+    ):
+        src = EXAMPLE_NETWORKS / name / f"{name}.nc"
+        shutil.copy(src, folder / f"{name.replace('-', '_')}.nc")
+    _EXAMPLE_CACHE["root"] = root
+    _EXAMPLE_CACHE["original"] = pypsa.examples._cache_root
+    pypsa.examples._cache_root = lambda: root
+
+
+def pytest_unconfigure(config):
+    if "root" in _EXAMPLE_CACHE:
+        pypsa.examples._cache_root = _EXAMPLE_CACHE.pop("original")
+        shutil.rmtree(_EXAMPLE_CACHE.pop("root"))
 
 
 @pytest.fixture
@@ -92,10 +137,17 @@ def pytest_addoption(parser):
         default=False,
         help="Run the matplotlib image comparison tests (mpl_image_compare)",
     )
+    parser.addoption(
+        "--run-slow",
+        action="store_true",
+        default=False,
+        help="Run tests marked slow (benchmark harness smoke tests)",
+    )
 
 
 def pytest_configure(config):
     """Configure pytest session with custom options."""
+    _install_example_cache()
     if config.getoption("--new-components-api"):
         pypsa.options.api.new_components_api = True
     _configure_linopy_semantics(config)
@@ -124,15 +176,18 @@ def _configure_linopy_semantics(config):
 
 
 def pytest_collection_modifyitems(config, items):
-    """Skip image comparison tests unless --run-plot-tests is given."""
-    if config.getoption("--run-plot-tests"):
-        return
-    skip = pytest.mark.skip(
+    """Skip image comparison tests and slow tests unless their options are given."""
+    skip_plots = pytest.mark.skip(
         reason="Need --run-plot-tests option to run plot image tests"
     )
+    skip_slow = pytest.mark.skip(reason="Need --run-slow option to run slow tests")
     for item in items:
-        if "mpl_image_compare" in item.keywords:
-            item.add_marker(skip)
+        if "mpl_image_compare" in item.keywords and not config.getoption(
+            "--run-plot-tests"
+        ):
+            item.add_marker(skip_plots)
+        if "slow" in item.keywords and not config.getoption("--run-slow"):
+            item.add_marker(skip_slow)
 
 
 COMPONENT_NAMES = [
@@ -265,10 +320,12 @@ def ac_dc_shapes(ac_dc_network):
     # Convert to GeoSeries
     geo_series = gpd.GeoSeries(bboxes, crs=DEFAULT_EPSG)
 
+    # Shape names must not clash with the load names, which are also bus names
+    shape_names = "shape " + geo_series.index
     n.add(
         "Shape",
-        name=geo_series.index,
-        geometry=geo_series,
+        name=shape_names,
+        geometry=geo_series.set_axis(shape_names),
         idx=geo_series.index,
         component="Bus",
     )

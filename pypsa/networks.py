@@ -63,6 +63,7 @@ from pypsa.version import __version_base__
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterator, Sequence
 
+    from datarecord.protocols import RecordLike
     from scipy.sparse import spmatrix
 
     from pypsa.components.legacy import Component
@@ -87,6 +88,11 @@ class Network(
 
     <!-- md:badge-version v0.1.0 --> | <!-- md:guide design.md -->
     """
+
+    deduplicated_names: dict[str, dict[str, str]]
+    """Renames `{Type: {old: new}}` made by the last import to keep names unique
+    across entity types, see [pypsa.network.names.deduplicate_names][]. Empty on a
+    fresh network or when no name clashed."""
 
     # Optimization
     _multi_invest: int
@@ -139,6 +145,8 @@ class Network(
         # Set attributes
         self._name = name
         self._meta: dict = {}
+        self.deduplicated_names = {}
+        self._names_unchecked = False
         self._crs: CRS = CRS.from_epsg(DEFAULT_EPSG)
 
         # Dimensions
@@ -201,13 +209,49 @@ class Network(
             elif str(import_name).endswith((".xls", ".xlsx", ".xlsm", ".xlsb")):
                 self.import_from_excel(import_name)
             elif isinstance(import_name, Path) and import_name.is_dir():
-                self.import_from_csv_folder(import_name)
+                if (import_name / "manifest.json").is_file():
+                    self.import_from_datarecord(import_name)
+                else:
+                    self.import_from_csv_folder(import_name)
             else:
-                msg = f"import_name '{import_name}' is not a valid .h5 file, .nc file or directory."
+                msg = (
+                    f"import_name '{import_name}' is not a valid .h5 file, .nc file, "
+                    "Excel file, csv folder or datarecord folder."
+                )
                 raise ValueError(msg)
 
         for key, value in kwargs.items():
             setattr(self, key, value)
+
+    @classmethod
+    def from_datarecord(cls, record: RecordLike) -> Network:
+        """Build a network from a datarecord `Record`.
+
+        Requires the optional `datarecord` package
+        (`pip install 'pypsa[datarecord]'`).
+
+        Parameters
+        ----------
+        record : RecordLike
+            The record to build from, e.g. `Workspace.process().at(path)`.
+
+        Returns
+        -------
+        pypsa.Network
+            The network the record describes.
+
+        Raises
+        ------
+        UnsupportedRecordError
+            If the record lacks something a network needs.
+
+        """
+        from pypsa.network.io._common import require_datarecord  # noqa: PLC0415
+
+        require_datarecord()
+        from pypsa.network.io.datarecord import PyPSA  # noqa: PLC0415
+
+        return PyPSA.build(record)
 
     def __str__(self) -> str:
         """Get a string representation of the network.

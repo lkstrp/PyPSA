@@ -382,7 +382,7 @@ def test_url_loading_respects_network_option():
 
     # Test that URL loading works when network requests are allowed
     with pypsa.option_context("general.allow_network_requests", True):
-        with patch("pypsa.network.io.urlretrieve") as mock_urlretrieve:
+        with patch("pypsa.network.io._common.urlretrieve") as mock_urlretrieve:
             with patch("tempfile.NamedTemporaryFile") as mock_temp:
                 mock_temp.return_value.__enter__.return_value.name = "/tmp/test"
 

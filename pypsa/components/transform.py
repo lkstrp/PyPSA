@@ -17,10 +17,12 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
+import pandas as pd
+
+from pypsa.network.names import check_names_free
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-    import pandas as pd
 
     from pypsa.definitions.structures import Dict
 
@@ -206,6 +208,9 @@ class ComponentsTransformMixin:
         if not all(isinstance(v, str) for v in kwargs.values()):
             msg = "New names must be strings."
             raise ValueError(msg)
+
+        if self.attached:
+            check_names_free(self.n_save, self.name, pd.Index(list(kwargs.values())))
 
         # Rename component name definitions
         self.static = self.static.rename(index=kwargs)

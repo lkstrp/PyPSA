@@ -156,6 +156,7 @@ nav:
       - Transform: api/networks/transform.md
       - Descriptors: api/networks/descriptors.md
       - IO: api/networks/io.md
+      - Names: api/networks/names.md
       - Power Flow: api/networks/power-flow.md
       - Optimize: api/networks/optimize.md
       - Constraints: api/networks/constraints.md

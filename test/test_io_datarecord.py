@@ -1,0 +1,1855 @@
+# SPDX-FileCopyrightText: datarecord contributors
+#
+# SPDX-License-Identifier: MIT
+
+"""The datarecord tool: verify a record, build a network, read it back.
+
+Notes
+-----
+- [consuming a record](https://energy-models.github.io/datarecord/design/tools/)
+"""
+
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+import pandas as pd
+import pytest
+
+pytest.importorskip("datarecord")
+
+import duckdb
+from datarecord import Workspace
+from datarecord.schema.categories import matching
+from datarecord.store.manifest import read_schema
+from datarecord.tools.base import Requirements, Schema, UnsupportedRecordError
+from datarecord_helpers import (
+    assert_networks_equal,
+    empty_child,
+    export_network,
+    relation,
+    schema,
+    unpacked,
+    write_attribute,
+    write_component,
+    write_schema,
+)
+from duckdb import DuckDBPyRelation
+
+from pypsa.network.io.datarecord import PyPSA
+from pypsa.network.io.datarecord.schema import CTYPE, _input_names, _registry_schema
+from pypsa.network.io.datarecord.source import _colliding_names, _weightings
+from pypsa.network.names import unchecked_names
+
+
+@pytest.fixture
+def workspace():
+    ws = Workspace()
+    yield ws
+    ws.close()
+
+
+@pytest.fixture
+def store(workspace, tmp_path):
+    return workspace.store(str(tmp_path))
+
+
+@pytest.fixture(scope="session")
+def ac_dc():
+    """PyPSA's `ac_dc_meshed`, from the in-repo examples."""
+    import pypsa
+
+    return pypsa.examples.ac_dc_meshed()
+
+
+@pytest.fixture(scope="module")
+def single_revision(tmp_path_factory, ac_dc):
+    """`ac_dc` exported once for the module, for tests that only read it."""
+    workspace = Workspace()
+    yield export_network(ac_dc, workspace.store(str(tmp_path_factory.mktemp("ac_dc"))))
+    workspace.close()
+
+
+@pytest.fixture(scope="module")
+def solved(single_revision):
+    """The network `single_revision` builds, optimised once for the module."""
+    n = PyPSA.build(single_revision.record)
+    n.optimize(solver_name="highs")
+    return n
+
+
+@pytest.fixture
+def exported(single_revision, workspace, tmp_path):
+    """A copy of `single_revision`'s store, for a test to rewrite its files or schema."""
+    uri = str(tmp_path / "ac_dc")
+    shutil.copytree(single_revision.store.uri, uri)
+    (revision,) = workspace.store(uri).revisions()
+    return revision
+
+
+def _results_over(revision, n):
+    """`n`'s results, written as a thin layer over `revision`."""
+    layer = PyPSA.to_datarecord(
+        n, revision.record.con, results_only=True, base=revision.record
+    )
+    return revision.child(layer)
+
+
+def _sub_networks(revision) -> list[str]:
+    return _sub_networks_of(revision.record.dims["sub_network"])
+
+
+def _sub_networks_of(axis) -> list[str]:
+    return sorted(axis.df()["sub_network"])
+
+
+def _prices(revision) -> pd.DataFrame:
+    price = revision.record.attributes["marginal_price"].df()
+    return price.pivot(index="snapshot", columns="bus", values="value")
+
+
+def _flat(rel: DuckDBPyRelation) -> pd.DataFrame:
+    """A connection attribute's rows with the `connection` struct spread to `entity` and `bus`."""
+    return rel.project("*, connection.entity AS entity, connection.bus AS bus").df()
+
+
+def test_requirements_falsy_when_empty():
+    """`bool(Requirements())` distinguishes "nothing missing" from "nothing checked"."""
+    assert not Requirements()
+    assert Requirements(dims=frozenset({"snapshot"}))
+    assert "dims ['snapshot']" in Requirements(dims=frozenset({"snapshot"})).describe()
+    assert Requirements().describe() == "nothing"
+
+
+def test_build_takes_only_a_record(workspace, ac_dc):
+    """A `RecordLike` that is no `Record` is refused, the tool's own network source included."""
+    with pytest.raises(TypeError, match="builds from a Record"):
+        PyPSA.build(PyPSA.to_datarecord(ac_dc, workspace.con))
+
+
+def test_verify_accepts_a_complete_record(single_revision):
+    """A record written by `export_to_parquet` supplies everything PyPSA needs."""
+    assert not PyPSA.verify(single_revision.record)
+
+
+@pytest.mark.parametrize("dim", ["ctype", "role"])
+def test_the_tool_writes_no_type_or_role_axis(single_revision, dim):
+    """The schema lists every type and role, so the record reads them from it.
+
+    Notes
+    -----
+    - [a dim with one_of](https://energy-models.github.io/datarecord/design/model/dims/#a-dim-with-one_of)
+    """
+    record = single_revision.record
+    layer = Path(single_revision.store.layer_dir(single_revision.id))
+    assert not (layer / "dims" / f"{dim}.parquet").exists()
+    one_of = record.schema.dimensions[dim].one_of
+    assert one_of is not None
+    assert record.dims[dim].df()[dim].tolist() == list(one_of), (
+        "every label of `one_of`, those the network leaves unused included"
+    )
+
+
+@pytest.mark.parametrize("role", ["input", "output", "attached"])
+def test_flags_per_role_name_the_attributes_reaching_a_connection_of_it(
+    single_revision, role
+):
+    """`role` categorizes `connection`, so `flags(role=...)` reads as `flags(ctype=...)` does.
+
+    Notes
+    -----
+    - [categories](https://energy-models.github.io/datarecord/design/model/properties/#categories)
+    """
+    record = single_revision.record
+    tuples = matching(record.properties["connection"], {"role": (role,)})
+    over = [
+        a for a in record.attributes if "connection" in record.schema.coordinates_of(a)
+    ]
+    reaching = {
+        a
+        for a in over
+        if record.attributes[a]
+        .join(tuples.project("connection"), "connection")
+        .limit(1)
+        .fetchall()
+    }
+    assert set(record.flags(role=role)) == reaching
+
+
+def test_buses_and_carriers_are_labels_of_their_dims(single_revision, ac_dc):
+    """`n.buses` and `n.carriers` are the `bus` and `carrier` axes, under PyPSA's names.
+
+    Notes
+    -----
+    - [properties](https://energy-models.github.io/datarecord/design/model/properties/#properties)
+    """
+    record = single_revision.record
+    assert not {"Bus", "Carrier"} & set(record.schema.dimensions["ctype"].one_of or ())
+    assert record.properties["bus"].columns == [
+        "bus",
+        "carrier",
+        "type",
+        "x",
+        "y",
+        "unit",
+        "location",
+    ]
+    assert record.properties["carrier"].columns == [
+        "carrier",
+        "color",
+        "nice_name",
+    ]
+    assert record.schema.attributes["v_nom"].dims == {"bus", "scenario"}
+    assert record.schema.attributes["co2_emissions"].dims == {"carrier", "scenario"}
+
+    built = PyPSA.build(record)
+    for ctype in ("Bus", "Carrier"):
+        original = ac_dc.c[ctype].static
+        pd.testing.assert_frame_equal(
+            built.c[ctype].static[original.columns],
+            original,
+            check_dtype=False,
+            check_index_type=False,
+        )
+
+
+def test_an_unlisted_carrier_is_added_and_an_empty_one_is_none(store):
+    """A carrier named but not in `n.carriers` becomes a label; `""` names none.
+
+    Notes
+    -----
+    - [properties](https://energy-models.github.io/datarecord/design/model/properties/#properties)
+    """
+    n = _north()
+    n.add("Carrier", "AC", color="black")
+    n.add("Generator", "wind", bus="north", carrier="wind")
+
+    record = export_network(n, store).record
+    assert record.dims["carrier"].df()["carrier"].tolist() == ["AC", "wind"]
+    carriers = record.properties["entity"].df()
+    assert carriers.set_index("entity")["carrier"].isna().to_dict() == {
+        "gen": True,
+        "wind": False,
+    }, "an empty carrier is stored as NULL"
+
+    built = PyPSA.build(record)
+    assert built.c.Carrier.static.index.to_list() == ["AC", "wind"]
+    assert built.c.Generator.static["carrier"].to_dict() == {"gen": "", "wind": "wind"}
+
+
+def test_a_property_is_addressed_by_its_subject(single_revision):
+    """`x` is a line's reactance and `bus.x` a bus's coordinate; `carrier` alone is neither.
+
+    Notes
+    -----
+    - [properties](https://energy-models.github.io/datarecord/design/model/properties/#properties)
+    - [set](https://energy-models.github.io/datarecord/design/use/editing/#set)
+    """
+    from datarecord.mutable import WorkingRecord
+
+    w = WorkingRecord(single_revision.record)
+    w.set("x", 0.5, entity="0")
+    w.set("bus.x", 10.2, bus="London")
+
+    x = w.attributes["x"].df().set_index("entity")["value"]
+    assert x["0"] == 0.5
+    assert "London" not in x.index, "`x` reaches no bus"
+    buses = w.properties["bus"].df().set_index("bus")
+    assert buses.at["London", "x"] == 10.2
+    with pytest.raises(KeyError, match=r"`bus\.carrier` or `entity\.carrier`"):
+        w.set("carrier", "AC")
+
+
+def test_a_carrier_is_a_live_label(single_revision):
+    """`entity.carrier` names a label, and a label named is not removed.
+
+    Notes
+    -----
+    - [add / remove](https://energy-models.github.io/datarecord/design/use/editing/#add-remove)
+    """
+    from datarecord.mutable import WorkingRecord
+
+    w = WorkingRecord(single_revision.record)
+    with pytest.raises(KeyError, match="coal"):
+        w.set("entity.carrier", "coal", entity="Manchester Gas")
+    with pytest.raises(ValueError, match="entity.carrier"):
+        w.remove("carrier", ["gas"])
+
+
+def test_a_value_its_type_does_not_take_is_reported_and_left_out(single_revision):
+    """A broadcast reaches every entity; the build keeps it to the types taking it.
+
+    Notes
+    -----
+    - [a value its type does not take](https://energy-models.github.io/datarecord/design/tools/pypsa/#a-value-its-type-does-not-take)
+    """
+    from datarecord.mutable import WorkingRecord
+
+    w = WorkingRecord(single_revision.record)
+    w.set("p_max_pu", 0.9)
+
+    report = PyPSA.verify(w)
+    assert not report, "a value its type does not take fails no build"
+    assert {("Load", "p_max_pu"), ("Line", "p_max_pu")} <= report.ignored
+    assert ("Link", "p_max_pu") not in report.ignored, "a link takes p_max_pu"
+    n = PyPSA.build(w)
+    assert (n.c.Link.static["p_max_pu"] == 0.9).all()
+    assert "p_max_pu" not in n.c.Load.static
+    assert "p_max_pu" not in n.c.Load.dynamic
+
+
+def _add_generator(w, name: str) -> None:
+    w.add("entity", [name], ctype="Generator")
+    w.add("connection", [{"entity": name, "bus": "b"}], role="attached")
+
+
+@pytest.mark.parametrize(
+    ("layers", "built"),
+    [
+        (
+            [
+                lambda w: (
+                    w.set("p_max_pu", 0.5, entity="g1"),
+                    w.set("p_max_pu", 0.6, entity="g2"),
+                ),
+                lambda w: w.set("p_max_pu", 0.9, scenario="high"),
+            ],
+            {
+                ("low", "g1"): 0.5,
+                ("low", "g2"): 0.6,
+                ("high", "g1"): 0.9,
+                ("high", "g2"): 0.9,
+            },
+        ),
+        (
+            [
+                lambda w: w.set("p_max_pu", 0.9, scenario="high"),
+                lambda w: w.set("p_max_pu", 0.5, entity="g1"),
+            ],
+            {
+                ("low", "g1"): 0.5,
+                ("low", "g2"): 1.0,
+                ("high", "g1"): 0.5,
+                ("high", "g2"): 0.9,
+            },
+        ),
+        (
+            [
+                lambda w: w.set("p_max_pu", 0.9),
+                lambda w: _add_generator(w, "g3"),
+            ],
+            {
+                ("low", "g1"): 0.9,
+                ("low", "g2"): 0.9,
+                ("low", "g3"): 0.9,
+                ("high", "g1"): 0.9,
+                ("high", "g2"): 0.9,
+                ("high", "g3"): 0.9,
+            },
+        ),
+    ],
+    ids=["scenario-crosses-entities", "entity-crosses-a-scenario", "added-member"],
+)
+def test_a_build_settles_rows_of_several_layers_by_the_broadcast_rule(
+    store, layers, built
+):
+    """Rows as written, a deeper layer crossing a shallower one, build each member's value.
+
+    Notes
+    -----
+    - [the broadcast rule](https://energy-models.github.io/datarecord/design/model/attributes/#the-broadcast-rule)
+    """
+    from datarecord.mutable import WorkingRecord
+
+    import pypsa
+
+    n = pypsa.Network()
+    n.set_snapshots(pd.date_range("2030-01-01", periods=2, freq="h"))
+    n.add("Bus", "b")
+    n.add("Generator", ["g1", "g2"], bus="b")
+    n.set_scenarios({"low": 0.5, "high": 0.5})
+    revision = export_network(n, store)
+    for edit in layers:
+        w = WorkingRecord(revision.record)
+        edit(w)
+        revision = revision.child(w.edits)
+
+    static = PyPSA.build(revision.record).c.Generator.static
+    assert static["p_max_pu"].to_dict() == built
+
+
+def test_verify_reports_an_entity_attached_to_no_bus(single_revision):
+    """Removing a bus removes its connections; what was attached to it is unbuildable.
+
+    Notes
+    -----
+    - [deletion](https://energy-models.github.io/datarecord/design/layers/removal/)
+    """
+    from datarecord.mutable import WorkingRecord
+
+    w = WorkingRecord(single_revision.record)
+    w.remove("bus", ["Manchester"])
+
+    missing = PyPSA.verify(w).attributes
+    assert {("Generator", "bus"), ("Load", "bus")} <= missing
+    assert ("Link", "bus0") not in missing, "no link is at Manchester"
+
+
+def test_requires_reports_the_records_own_types(single_revision):
+    """`requires` is record-dependent: PyPSA's axes plus this record's types."""
+    req = PyPSA.requires(single_revision.record)
+    assert {"snapshot", "period", "scenario"} <= req.dims
+    assert "Generator" in req.categories
+    # Required attributes come from PyPSA's registry, not a list we maintain.
+    assert ("Generator", "bus") in req.attributes
+    assert ("Line", "x") in req.attributes
+    # `name` is the member identity, never an attribute row.
+    assert not [a for a in req.attributes if a[1] == "entity"]
+
+
+def test_verify_reports_a_missing_dim(exported):
+    """A schema that declares no `scenario` dim cannot build a network.
+
+    Notes
+    -----
+    - [consuming a record](https://energy-models.github.io/datarecord/design/tools/)
+    """
+    revision = exported
+    _with_schema(revision, dims={"snapshot": "datetime"}, partial=set())
+
+    missing = PyPSA.verify(revision.record)
+    assert missing
+    assert missing.dims == {"period", "scenario"}
+    # A build refuses rather than failing deep inside PyPSA.
+    with pytest.raises(UnsupportedRecordError, match="scenario"):
+        PyPSA.build(revision.record)
+
+
+def test_verify_reports_a_type_the_tool_does_not_know(exported):
+    """A type outside PyPSA's registry is reported by `verify`, not raised in the fold.
+
+    The type must be one the *schema* declares - `ctype` has `one_of` and
+    its list is upheld everywhere, so a record cannot hold a type its own
+    schema excludes. What it can hold is a type this tool has no
+    registry entry for, which reads back fine and is this tool's business rather
+    than the record layer's. `Requirements.categories` is what carries it.
+
+    Notes
+    -----
+    - [entity types](https://energy-models.github.io/datarecord/design/model/properties/#categories)
+    - [consuming a record](https://energy-models.github.io/datarecord/design/tools/)
+    """
+    revision, store = exported, exported.store
+    # Declared alongside PyPSA's own types, since the `one_of` labels pin the
+    # vocabulary.
+    declared = read_schema(store)
+    assert declared.categorizing("entity") == (CTYPE,)
+    dim = declared.dimensions[CTYPE]
+    assert dim.one_of is not None, "PyPSA lists its types on the dim"
+    write_schema(
+        declared.model_copy(
+            update={
+                "dimensions": {
+                    **declared.dimensions,
+                    CTYPE: dim.model_copy(update={"one_of": (*dim.one_of, "Widget")}),
+                }
+            }
+        ),
+        revision.store,
+    )
+    write_component(revision, "Widget", [{"entity": "w1"}])
+
+    missing = PyPSA.verify(revision.record)
+    assert missing.categories == {"Widget"}
+    # The types PyPSA does know are not reported.
+    assert "Generator" not in missing.categories
+    with pytest.raises(UnsupportedRecordError, match="Widget"):
+        PyPSA.build(revision.record)
+
+
+_DIMS = {
+    "snapshot": "datetime",
+    "period": "int",
+    "scenario": "str",
+}
+
+
+def _with_schema(revision, **kwargs) -> None:
+    """Redeclare the record's schema, keeping the attributes it already declares.
+
+    Written directly rather than through `write_record`, which would reject an
+    incompatible redeclaration - here the point is to hand the tool a
+    schema it must report on rather than one the writer accepted.
+
+    Notes
+    -----
+    - [versioning](https://energy-models.github.io/datarecord/design/model/schema/#versioning)
+    """
+    was = read_schema(revision.store)
+    now = schema(**kwargs)
+    labelled = {d: spec for d, spec in was.dimensions.items() if d not in _DIMS}
+    redeclared = {d: s for d, s in now.dimensions.items() if d not in labelled}
+    now = now.model_copy(update={"dimensions": {**labelled, **redeclared}})
+    # Keep the old attributes, but drop any dim a redeclaration removed from
+    # their address - an attribute over a dim the schema no longer declares is
+    # rejected at construction, and the point here is the redeclared dims, not a
+    # stale attribute reference to a gone one.
+    addressable = set(now.dimensions)
+    attributes = {
+        name: pruned
+        for name, spec in was.attributes.items()
+        if (pruned := spec.model_copy(update={"dims": spec.dims & addressable})).dims
+    }
+    now = now.model_copy(
+        update={
+            "attributes": attributes,
+            "properties": was.properties,
+            "meta": was.meta,
+        }
+    )
+    write_schema(now, revision.store)
+
+
+def test_verify_reports_a_snapshot_key(exported):
+    """`snapshot` as a key is reported, not crashed on.
+
+    A limit of this tool's *representation*, not of the layer format: PyPSA's
+    static/series split needs a component's whole series for an attribute to
+    come from one layer, so a stored `snapshot = NULL` broadcast row and a
+    descendant's per-snapshot row would coexist with no single container to
+    put the result in. The record layer therefore permits the
+    declaration - every file does carry the column - and the tool catches it.
+
+    Notes
+    -----
+    - [partial](https://energy-models.github.io/datarecord/design/layers/tree/#partial-the-granularity-of-an-override)
+    """
+    revision = exported
+    _with_schema(revision, partial={"scenario", "snapshot"})
+
+    missing = PyPSA.verify(revision.record)
+    assert ("owner_map_key", "snapshot") in missing.unsupported_keys
+    assert "snapshot" in missing.describe()
+    with pytest.raises(UnsupportedRecordError, match="snapshot"):
+        PyPSA.build(revision.record)
+
+
+def test_verify_reports_a_missing_required_attribute(exported, ac_dc):
+    """A component type with no `bus` anywhere - no connection row supplies it.
+
+    A port's bus is the `connection` tuple itself, declared as no attribute, so
+    no default can stand in for it.
+    """
+    revision, store = exported, exported.store
+    # A Generator member with no connection row supplying its bus
+    # (https://energy-models.github.io/datarecord/design/tools/pypsa/#ports).
+    write_component(revision, "Generator", [{"entity": "g1"}])
+    # One file across every type, so the Generators' rows are dropped from it
+    # rather than a per-type file being unlinked.
+    path = Path(store.layer_dir(revision.id), "dims", "connection.parquet")
+    rows = pd.read_parquet(path)
+    generators = set(ac_dc.c["Generator"].static.index) | {"g1"}
+    entities = rows["connection"].map(lambda c: c["entity"])
+    rows[~entities.isin(generators)].to_parquet(path, index=False)
+
+    write_component(revision, "Line", [{"entity": "l1"}])
+
+    missing = PyPSA.verify(revision.record)
+    assert ("Generator", "bus") in missing.attributes
+    assert ("Line", "x") not in missing.attributes, (
+        "PyPSA declares the required `x` with a default, resolvable with no row"
+    )
+
+
+def test_verify_reports_a_piecewise_linear_attribute(exported):
+    """A curve is stored correctly; it is the PyPSA translation that cannot express it.
+
+    Notes
+    -----
+    - [wide and long rows](https://energy-models.github.io/datarecord/design/model/attributes/#wide-and-long-rows)
+    """
+    revision, store = exported, exported.store
+    write_attribute(
+        store.layer_dir(revision.id),
+        "marginal_cost",
+        [{"entity": "Manchester Wind", "value": 20.0}],
+    )
+    assert not PyPSA.verify(revision.record).unsupported_values, (
+        "the same attribute without breakpoints is not reported"
+    )
+
+    revision = empty_child(revision)
+    write_attribute(
+        store.layer_dir(revision.id),
+        "marginal_cost",
+        [
+            {
+                "entity": "Manchester Wind",
+                "breakpoint": x,
+                "value": v,
+            }
+            for x, v in ((0.0, 20.0), (50.0, 35.0))
+        ],
+    )
+
+    missing = PyPSA.verify(revision.record)
+    assert ("Generator", "marginal_cost") in missing.unsupported_values
+    assert "piecewise-linear" in missing.describe()
+    with pytest.raises(UnsupportedRecordError):
+        PyPSA.build(revision.record)
+
+
+def _north():
+    """A bus `north` and a generator at it, over two snapshots."""
+    import pypsa
+
+    n = pypsa.Network()
+    n.set_snapshots(pd.date_range("2030-01-01", periods=2, freq="h"))
+    n.add("Bus", "north")
+    n.add("Generator", "gen", bus="north")
+    return n
+
+
+def test_to_datarecord_rejects_a_cross_type_name_collision(workspace):
+    """PyPSA scopes names per type; a record scopes them across every entity type.
+
+    Reported rather than repaired: renaming to `Generator:north` would hand back
+    a network whose components PyPSA can no longer find by their own names, so
+    the mismatch is the caller's to reconcile.
+
+    Notes
+    -----
+    - [a label is unique within its dim](https://energy-models.github.io/datarecord/design/storage/format/#a-label-is-unique-within-its-dim)
+    - [consuming a record](https://energy-models.github.io/datarecord/design/tools/)
+    """
+    n = _north()
+    n.add("Generator", "north", bus="north")
+    with unchecked_names(n):
+        n.add("Load", "north", bus="north")
+
+    with pytest.raises(
+        UnsupportedRecordError, match="more than one component type"
+    ) as raised:
+        PyPSA.to_datarecord(n, workspace.con)
+    assert raised.value.missing.names == {"north"}
+    assert "Generator, Load" in str(raised.value)
+    assert "deduplicate_names" in str(raised.value)
+
+
+def test_a_name_clash_message_caps_the_names_at_ten(workspace):
+    n = _north()
+    with unchecked_names(n):
+        for i in range(12):
+            n.add("Bus", f"x{i}")
+            n.add("Generator", f"x{i}", bus=f"x{i}")
+            n.add("Load", f"x{i}", bus=f"x{i}")
+    with pytest.raises(UnsupportedRecordError, match="and 2 more"):
+        PyPSA.to_datarecord(n, workspace.con)
+
+
+def test_a_bus_and_a_generator_may_share_a_name(store):
+    """A bus is a label of `bus`, not an entity, so `north` is one of each."""
+    n = _north()
+    n.add("Generator", "north", bus="north")
+
+    record = export_network(n, store).record
+    assert record.dims["bus"].df()["bus"].tolist() == ["north"]
+    assert "north" in record.dims["entity"].df()["entity"].tolist()
+    assert_networks_equal(PyPSA.build(record), n)
+
+
+@pytest.mark.parametrize(
+    ("columns", "clashing"),
+    [
+        ({"Carrier": ("efficiency", 0.9)}, {("Carrier", "efficiency")}),
+        (
+            {"Bus": ("country", "DE"), "Generator": ("country", "DE")},
+            {("Bus", "country"), ("Generator", "country")},
+        ),
+    ],
+    ids=["registry-attribute", "two-dims"],
+)
+def test_to_datarecord_rejects_a_custom_column_declared_over_another_dim(
+    workspace, columns, clashing
+):
+    """A custom column is an attribute over its type's dim, one name one spec.
+
+    A carrier's own `efficiency` meets the per-port attribute; `country` on a
+    bus and on a generator would be one attribute over two dims.
+    """
+    n = _north()
+    n.add("Carrier", "AC")
+    for ctype, (column, value) in columns.items():
+        n.c[ctype].static[column] = value
+
+    with pytest.raises(UnsupportedRecordError, match="another shape") as raised:
+        PyPSA.to_datarecord(n, workspace.con)
+    assert raised.value.missing.columns == clashing
+
+
+@pytest.mark.parametrize(
+    ("ctype", "column", "value", "dim"),
+    [
+        ("Bus", "country", "site", "bus"),
+        ("Generator", "location", "site", "entity"),
+        ("Generator", "e_nom", 5.0, "entity"),
+    ],
+    ids=["bus", "beside-a-bus-property", "named-like-another-types-input"],
+)
+def test_a_custom_column_round_trips_on_its_own_type(store, ctype, column, value, dim):
+    """A column PyPSA's registry lacks is an attribute over its type's dim.
+
+    A generator's own `location` is no clash with `bus.location`, a property,
+    and its own `e_nom` is built onto it though the registry gives `e_nom` to
+    a store alone.
+    """
+    n = _north()
+    n.c.Bus.static["location"] = "DE1"
+    n.c[ctype].static[column] = value
+
+    record = export_network(n, store).record
+    assert record.schema.attributes[column].dims == {dim, "scenario"}
+    assert_networks_equal(PyPSA.build(record), n)
+
+
+def test_shapes_round_trip_in_their_crs(store):
+    """A geometry is stored as WKT, its CRS in the schema's `meta`.
+
+    Notes
+    -----
+    - [geometry](https://energy-models.github.io/datarecord/design/tools/pypsa/#geometry)
+    """
+    import shapely
+    from geopandas.testing import assert_geodataframe_equal
+
+    import pypsa
+
+    n = pypsa.Network()
+    n.to_crs("EPSG:3035")
+    n.set_snapshots(pd.date_range("2030-01-01", periods=2, freq="h"))
+    n.add("Bus", "north")
+    n.add(
+        "Shape",
+        ["north onshore", "north offshore"],
+        geometry=[shapely.box(0, 0, 1, 1), shapely.Point(2, 3)],
+        idx="north",
+        component="Bus",
+        type=["onshore", "offshore"],
+    )
+
+    record = export_network(n, store).record
+    assert record.schema.meta["crs"] == "EPSG:3035"
+    stored = record.attributes["geometry"].df()
+    assert sorted(stored["value"]) == [
+        "POINT (2 3)",
+        "POLYGON ((1 0, 1 1, 0 1, 0 0, 1 0))",
+    ]
+    built = PyPSA.build(record)
+    assert built.crs == n.crs
+    assert_geodataframe_equal(built.c.Shape.static, n.c.Shape.static)
+
+
+def test_sub_networks_are_labels_of_their_own_dim(store, ac_dc):
+    """PyPSA numbers SubNetworks `0`, `1`, ... as it numbers Lines, which a dim of their own keeps apart.
+
+    Notes
+    -----
+    - [writing results](https://energy-models.github.io/datarecord/design/tools/pypsa/#writing-results)
+    """
+    n = ac_dc.copy()
+    n.determine_network_topology()
+    assert set(n.c["SubNetwork"].static.index) & set(n.c["Line"].static.index)
+
+    revision = export_network(n, store)
+    record = revision.record
+    names = _sub_networks(revision)
+    assert names == [str(i) for i in range(4)]
+    pointed = set(record.attributes["sub_network"].df()["value"])
+    assert pointed <= set(names), "a `sub_network` value names a `sub_network` label"
+    carriers = record.properties["sub_network"].df()["carrier"]
+    assert set(carriers) <= set(record.dims["carrier"].df()["carrier"])
+
+    built = PyPSA.build(record)
+    assert sorted(built.c["SubNetwork"].static.index) == ["0", "1", "2", "3"]
+
+
+def test_a_derived_v_nom_stays_on_the_bus(store, ac_dc):
+    """`calculate_dependent_values` copies the bus's `v_nom` onto lines and shunts.
+
+    The record keeps `v_nom` over `bus` alone, and `build` gets the copies
+    back once PyPSA recomputes them.
+    """
+    n = ac_dc.copy()
+    n.add("ShuntImpedance", "shunt", bus="London", b=0.1)
+    n.calculate_dependent_values()
+
+    record = export_network(n, store).record
+    assert record.schema.attributes["v_nom"].dims == {"bus", "scenario"}
+
+    built = PyPSA.build(record)
+    built.calculate_dependent_values()
+    assert_networks_equal(built, n)
+
+
+def test_a_solved_network_exports(store, solved):
+    """`optimize` leaves the derived `Line.v_nom` behind, which `build` recomputes."""
+    built = PyPSA.build(export_network(solved, store).record)
+    built.calculate_dependent_values()
+    pd.testing.assert_series_equal(
+        built.c.Line.static.v_nom, solved.c.Line.static.v_nom
+    )
+
+
+def test_a_stochastic_network_is_not_a_false_collision():
+    """A `(scenario, name)` index is one name per component, not one per scenario.
+
+    Comparing the index tuples would report every scenario's copy as a distinct
+    name while missing a real cross-type clash.
+    """
+    import pypsa
+
+    n = pypsa.Network()
+    n.set_scenarios(["a", "b"])
+    n.add("Bus", "north")
+    n.add("Generator", "north gen", bus="north")
+
+    assert not _colliding_names(n)
+
+
+def test_pypsa_schema_is_the_identity(single_revision):
+    """PyPSA defines the record vocabulary, so nothing is renamed.
+
+    The seam still routes every attribute, so an entry added later takes
+    effect with no change to `build`.
+
+    Notes
+    -----
+    - [consuming a record](https://energy-models.github.io/datarecord/design/tools/)
+    """
+    assert PyPSA.schema.attrs == {}
+    assert PyPSA.schema.sources("Generator", "p_max_pu") == ("p_max_pu",)
+    record = single_revision.record
+    identity = PyPSA.schema.resolve(record, "Generator", "p_max_pu", {}, record.flags())
+    assert identity.fetchall() == relation(single_revision, "p_max_pu").fetchall()
+
+
+def test_schema_renames_and_computes():
+    """A rename maps one source; a computed attribute maps several (`Attr.compute`)."""
+    from datarecord.tools.base import Attr
+
+    schema = Schema(
+        {
+            "Generator": (
+                Attr(name="p_max_pu", source=("availability",)),
+                Attr(
+                    name="marginal_cost",
+                    source=("fuel_cost", "efficiency"),
+                    compute=lambda fuel, eff: fuel,
+                ),
+            )
+        }
+    )
+    assert schema.sources("Generator", "p_max_pu") == ("availability",)
+    assert schema.sources("Generator", "marginal_cost") == ("fuel_cost", "efficiency")
+    # Anything unmapped, and any other type, stays the identity.
+    assert schema.sources("Generator", "p_nom") == ("p_nom",)
+    assert schema.sources("Link", "p_max_pu") == ("p_max_pu",)
+    # A multi-source rename with no way to combine them is a declaration bug.
+    with pytest.raises(ValueError, match="exactly one"):
+        Attr(name="x", source=("a", "b"))
+
+
+def test_a_solved_network_exports_its_results_long_form(single_revision, solved):
+    """A solved network's results are attributes, keyed by name, long-form.
+
+    Notes
+    -----
+    - [consuming a record](https://energy-models.github.io/datarecord/design/tools/)
+    """
+    n = solved
+
+    results = PyPSA.to_datarecord(n, single_revision.record.con).attributes
+    assert "p" in results
+    assert "p_nom_opt" in results
+
+    # Relations, lazy so a tool may fetch on demand (https://energy-models.github.io/datarecord/design/tools/).
+    assert isinstance(results["p"], DuckDBPyRelation)
+    p = results["p"].df()
+    # The long schema's columns (https://energy-models.github.io/datarecord/design/use/reading/), so the write path can persist it as-is -
+    # and no `ctype`, an attribute row being keyed by `name` (https://energy-models.github.io/datarecord/design/storage/format/#a-label-is-unique-within-its-dim).
+    assert {"connection", "snapshot", "scenario", "value"} <= set(p.columns)
+    assert "ctype" not in p.columns
+    assert "period" not in p.columns, "a series over `snapshot` reaches its period"
+    assert set(p["attribute"].tolist()) == {"p"}
+    # Series output: one row per (name, snapshot), for the Generator rows -
+    # selected by name, since the frame no longer carries the type.
+    gens = set(n.c["Generator"].static.index)
+    gen = _flat(results["p"]).query("entity in @gens")
+    assert len(gen) == len(n.snapshots) * len(gens)
+
+    # A static output has no snapshot, and only the components whose value
+    # differs from the default appear (some generators solve to p_nom_opt=0).
+    nom = results["p_nom_opt"].df()
+    nom = nom[nom["entity"].isin(gens)]
+    assert "snapshot" not in nom.columns
+    nonzero = n.c["Generator"].static["p_nom_opt"] != 0.0
+    assert set(nom["entity"]) == set(n.c["Generator"].static.index[nonzero])
+
+
+def test_an_export_skips_results_still_at_their_default(single_revision):
+    """An unsolved network yields no `p`/`p_nom_opt` rows.
+
+    Notes
+    -----
+    - [writing results](https://energy-models.github.io/datarecord/design/tools/pypsa/#writing-results)
+    """
+    n = PyPSA.build(single_revision.record)
+    results = PyPSA.to_datarecord(n, single_revision.record.con).attributes
+    assert "p" not in results
+    assert "p_nom_opt" not in results
+
+
+def test_a_solved_p_is_one_row_per_connection(single_revision, solved):
+    """`p` holds a row per `(entity, bus)` per snapshot, each port's own sign.
+
+    Notes
+    -----
+    - [results on connections](https://energy-models.github.io/datarecord/design/tools/pypsa/#results-on-connections)
+    """
+    n = solved
+
+    p = _flat(PyPSA.to_datarecord(n, single_revision.record.con).attributes["p"])
+    connections = unpacked(single_revision.record.dims["connection"])
+    per_connection = p.groupby(["entity", "bus"]).size()
+    assert set(per_connection.index) == set(
+        zip(connections["entity"], connections["bus"])
+    ), "every connection carries `p`, and nothing else does"
+    assert (per_connection == len(n.snapshots)).all(), "one row per snapshot"
+
+    lines = n.c["Line"]
+    line = lines.static.index[0]
+    for port in ("0", "1"):
+        bus = lines.static.at[line, f"bus{port}"]
+        rows = p[(p["entity"] == line) & (p["bus"] == bus)].set_index("snapshot")
+        expected = lines.dynamic[f"p{port}"][line]
+        assert np.allclose(rows["value"].reindex(expected.index), expected), (
+            f"`p{port}` lands on the line's bus{port} connection"
+        )
+
+
+def test_bus_results_are_keyed_by_bus(exported, solved):
+    """`marginal_price`, `v_mag_pu` and `v_ang` are over `bus`; `Bus.p` is `p_bus`, off the connection-level `p`.
+
+    `build` copies a result into the network like any attribute.
+
+    Notes
+    -----
+    - [results on connections](https://energy-models.github.io/datarecord/design/tools/pypsa/#results-on-connections)
+    - [writing results](https://energy-models.github.io/datarecord/design/tools/pypsa/#writing-results)
+    """
+    revision = _results_over(exported, solved)
+    schema = revision.record.schema
+    over_bus = {
+        a for a, spec in _registry_schema().attributes.items() if "bus" in spec.dims
+    }
+    assert over_bus - _input_names() == {
+        "marginal_price",
+        "v_mag_pu",
+        "v_ang",
+        "net_position",
+        "p_bus",
+    }
+    assert not solved.c["Bus"].dynamic["p"].empty, "PyPSA did compute a `Bus.p`"
+    assert "bus" not in schema.attributes["p"].dims
+    assert "bus" in schema.attributes["p_bus"].dims
+
+    expected = solved.c["Bus"].dynamic["marginal_price"]
+    wide = _prices(revision)
+    assert np.allclose(wide[expected.columns].reindex(expected.index), expected)
+
+    built = PyPSA.build(revision.record).c["Bus"].dynamic["marginal_price"]
+    pd.testing.assert_frame_equal(
+        built[expected.columns],
+        expected,
+        check_names=False,
+        check_freq=False,
+        check_index_type=False,
+    )
+
+
+def test_a_child_reads_its_parents_results_and_the_latest_wins(exported, solved):
+    """A result is an attribute: it inherits through layers, a later one standing over it.
+
+    Notes
+    -----
+    - [writing results](https://energy-models.github.io/datarecord/design/tools/pypsa/#writing-results)
+    """
+    revision = _results_over(exported, solved)
+    expected = _prices(revision)
+    pd.testing.assert_frame_equal(_prices(empty_child(revision)), expected)
+
+    n = PyPSA.build(revision.record)
+    n.c["Bus"].dynamic["marginal_price"] *= 2
+    resolved = _results_over(revision, n)
+    pd.testing.assert_frame_equal(_prices(empty_child(resolved)), expected * 2)
+
+
+def test_a_re_solve_leaves_no_stale_sub_network(exported, solved):
+    """A results layer replaces `base`'s SubNetworks rather than adding to them.
+
+    Notes
+    -----
+    - [writing results](https://energy-models.github.io/datarecord/design/tools/pypsa/#writing-results)
+    """
+    revision = _results_over(exported, solved)
+    *kept, dropped = sorted(solved.c["SubNetwork"].static.index)
+    assert _sub_networks(revision) == sorted([*kept, dropped])
+    entities = revision.record.dims["entity"].df()
+    assert entities.equals(exported.record.dims["entity"].df()), (
+        "a results layer leaves the entity axis alone"
+    )
+
+    n = PyPSA.build(revision.record)
+    n.remove("SubNetwork", dropped)
+    resolved = _results_over(revision, n)
+    assert _sub_networks(resolved) == sorted(kept)
+    slack = resolved.record.attributes["slack_bus"].df()
+    assert dropped not in set(slack["sub_network"]), "its results went with it"
+
+
+@pytest.mark.parametrize(
+    ("over_solved", "listed"), [(False, None), (True, [])], ids=["unsolved", "solved"]
+)
+def test_results_without_sub_networks_list_none(exported, solved, over_solved, listed):
+    """A solve without SubNetworks restates a `sub_network` axis `base` has empty, and writes none where it has none.
+
+    Notes
+    -----
+    - [writing results](https://energy-models.github.io/datarecord/design/tools/pypsa/#writing-results)
+    """
+    base = _results_over(exported, solved) if over_solved else exported
+    n = PyPSA.build(base.record)
+    n.remove("SubNetwork", n.c["SubNetwork"].static.index)
+    n.c["Bus"].dynamic["marginal_price"] = pd.DataFrame(
+        1.0, index=n.snapshots, columns=n.c["Bus"].static.index
+    )
+    record = _results_over(base, n).record
+    axis = record.dims.get("sub_network")
+    assert (None if axis is None else _sub_networks_of(axis)) == listed
+    assert "marginal_price" in record.attributes, "the results are written"
+    slack = record.attributes.get("slack_bus")
+    assert slack is None or slack.df().empty, "no stale SubNetwork keeps a result"
+
+
+@pytest.mark.parametrize(
+    ("ctype", "attr"), [("Line", "mu_upper"), ("Bus", "marginal_price")]
+)
+def test_a_result_a_re_solve_leaves_out_reads_as_null(exported, solved, ctype, attr):
+    """A results layer restates `base`'s results it does not write as NULL.
+
+    Built back, the network holds PyPSA's own default there.
+
+    Notes
+    -----
+    - [writing results](https://energy-models.github.io/datarecord/design/tools/pypsa/#writing-results)
+    """
+    n = PyPSA.build(_results_over(exported, solved).record)
+    n.c[ctype].dynamic[attr] = pd.DataFrame(
+        1.0, index=n.snapshots, columns=n.c[ctype].static.index
+    )
+    base = _results_over(exported, n)
+    n = PyPSA.build(base.record)
+    n.c[ctype].dynamic[attr] = n.c[ctype].dynamic[attr].iloc[:, :0]
+    resolved = _results_over(base, n)
+
+    def read(revision, name):
+        df = revision.record.attributes[name].df()
+        by = [c for c in df.columns if c not in ("breakpoint", "value")]
+        return df.sort_values(by).reset_index(drop=True)
+
+    stale = read(base, attr)
+    keys = [c for c in stale.columns if c not in ("breakpoint", "value")]
+    values = stale[keys].merge(read(resolved, attr), on=keys)["value"]
+    assert (stale["value"] == 1.0).all()
+    assert len(values) == len(stale)
+    assert values.isna().all(), "the stale value is gone"
+    c = PyPSA.build(resolved.record).c[ctype]
+    assert (c.dynamic[attr] == c.defaults.at[attr, "default"]).all().all(), (
+        "PyPSA fills its own default"
+    )
+    pd.testing.assert_frame_equal(read(resolved, "p_nom"), read(base, "p_nom"))
+
+
+@pytest.mark.parametrize("results_only", [True, False])
+def test_results_only_takes_base_exactly_with_it(single_revision, solved, results_only):
+    """A results layer is written over the record it was built from, a full export over nothing.
+
+    Notes
+    -----
+    - [writing results](https://energy-models.github.io/datarecord/design/tools/pypsa/#writing-results)
+    """
+    base = None if results_only else single_revision.record
+    with pytest.raises(ValueError, match="takes `base` exactly when"):
+        PyPSA.to_datarecord(
+            solved, single_revision.record.con, results_only=results_only, base=base
+        )
+
+
+def test_link_internal_power_is_p_internal(single_revision, solved):
+    """`Link.p` is power at no bus: an entity-level `p_internal`, no `bus`.
+
+    Notes
+    -----
+    - [results on connections](https://energy-models.github.io/datarecord/design/tools/pypsa/#results-on-connections)
+    """
+    n = solved
+
+    results = PyPSA.to_datarecord(n, single_revision.record.con).attributes
+    internal = results["p_internal"].df()
+    links = list(n.c["Link"].static.index)
+    assert "bus" not in internal.columns
+    assert set(internal["entity"]) == set(links)
+    assert len(internal) == len(n.snapshots) * len(links)
+    assert "p_internal" in _registry_schema().attributes
+
+
+def _three_port_link():
+    import pypsa
+
+    n = pypsa.Network()
+    n.set_snapshots(pd.date_range("2020-01-01", periods=2, freq="h"))
+    for bus in ("a", "b", "c"):
+        n.add("Bus", bus)
+    n.add("Link", "split", bus0="a", bus1="b", bus2="c")
+    return n
+
+
+def test_a_third_port_result_lands_on_its_connection(workspace):
+    """`p2` is `p` on the bus2 connection, declared though the bare registry has no `p2`.
+
+    Notes
+    -----
+    - [results on connections](https://energy-models.github.io/datarecord/design/tools/pypsa/#results-on-connections)
+    """
+    n = _three_port_link()
+    n.c["Link"].dynamic["p2"] = pd.DataFrame({"split": [1.0, 2.0]}, index=n.snapshots)
+
+    results = PyPSA.to_datarecord(n, workspace.con).attributes
+    assert "p2" not in results
+    assert "p" in _registry_schema().attributes, "the bare registry declares `p`"
+    p = _flat(results["p"])
+    assert p["bus"].to_list() == ["c", "c"], "a third port's flow is on bus2"
+    assert p["value"].to_list() == [1.0, 2.0]
+
+
+def test_a_three_port_record_writes_p_on_each_connection(store):
+    """Writing a three-port network puts every port's flow on its connection.
+
+    Notes
+    -----
+    - [results on connections](https://energy-models.github.io/datarecord/design/tools/pypsa/#results-on-connections)
+    """
+    n = _three_port_link()
+    flows = {"p0": [3.0, 4.0], "p1": [-1.0, -2.0], "p2": [-1.5, -1.5]}
+    for attr, values in flows.items():
+        n.c["Link"].dynamic[attr] = pd.DataFrame({"split": values}, index=n.snapshots)
+
+    revision = export_network(n, store)
+
+    p = _flat(relation(revision, "p")).sort_values(["bus", "snapshot"])
+    assert p.groupby("bus")["value"].apply(list).to_dict() == {
+        "a": flows["p0"],
+        "b": flows["p1"],
+        "c": flows["p2"],
+    }
+
+
+def test_a_stochastic_third_port_efficiency_survives_a_round_trip(store):
+    """Per-scenario port values are placed by connection like any other.
+
+    Notes
+    -----
+    - [ports](https://energy-models.github.io/datarecord/design/tools/pypsa/#ports)
+    """
+    n = _three_port_link()
+    n.set_scenarios({"low": 0.5, "high": 0.5})
+    n.c["Link"].static["efficiency"] = 0.5
+    n.c["Link"].static.loc[("low", "split"), "efficiency2"] = 0.2
+    n.c["Link"].static.loc[("high", "split"), "efficiency2"] = 0.4
+
+    built = PyPSA.build(export_network(n, store).record)
+
+    static = built.c["Link"].static
+    assert static[["efficiency", "efficiency2"]].to_dict("index") == {
+        ("low", "split"): {"efficiency": 0.5, "efficiency2": 0.2},
+        ("high", "split"): {"efficiency": 0.5, "efficiency2": 0.4},
+    }, "each scenario's port values land in their own columns"
+
+
+def test_a_static_attribute_differing_per_scenario_survives_a_round_trip(store):
+    """A fixed `p_nom` is an input and may differ per scenario, as PyPSA allows.
+
+    Notes
+    -----
+    - [entities and their properties](https://energy-models.github.io/datarecord/design/tools/pypsa/#entities-and-their-properties)
+    """
+    import pypsa
+
+    n = pypsa.Network()
+    n.set_snapshots(pd.date_range("2030-01-01", periods=2, freq="h"))
+    n.add("Bus", "b")
+    n.add("Generator", "g", bus="b", p_nom=10.0, marginal_cost=1.0)
+    n.add("Load", "l", bus="b", p_set=5.0)
+    n.set_scenarios({"low": 0.5, "high": 0.5})
+    n.c.generators.static.loc[("high", "g"), "p_nom"] = 20.0
+    n.consistency_check(strict=["scenario_invariant_attrs"])
+
+    static = PyPSA.build(export_network(n, store).record).c.generators.static
+    assert static[["p_nom", "marginal_cost"]].to_dict("index") == {
+        ("low", "g"): {"p_nom": 10.0, "marginal_cost": 1.0},
+        ("high", "g"): {"p_nom": 20.0, "marginal_cost": 1.0},
+    }, "p_nom keeps its scenario, a shared marginal_cost reaches both"
+
+
+@pytest.mark.parametrize(
+    ("attr", "per_scenario"),
+    [
+        ("p_nom", True),
+        ("p_nom_extendable", False),
+        ("p_nom_opt", False),
+    ],
+)
+def test_only_pypsas_scenario_invariant_attributes_lack_the_scenario_dim(
+    attr, per_scenario
+):
+    """Every stored attribute may differ per scenario, but those PyPSA keeps invariant."""
+    dims = _registry_schema().attributes[attr].dims
+    assert ("scenario" in dims) == per_scenario, dims
+
+
+def _three_port_process():
+    import pypsa
+
+    n = pypsa.Network()
+    n.set_snapshots(pd.date_range("2020-01-01", periods=2, freq="h"))
+    for bus in ("a", "b", "c"):
+        n.add("Bus", bus)
+    n.add("Process", "dri", bus0="a", bus1="b", bus2="c")
+    return n
+
+
+def test_process_rate_is_one_attribute_on_its_connections(workspace):
+    """`rate0`, `rate1`, `rate2` are one `rate`, a row per connection with its bus.
+
+    Notes
+    -----
+    - [ports](https://energy-models.github.io/datarecord/design/tools/pypsa/#ports)
+    """
+    n = _three_port_process()
+    n.c["Process"].static.loc["dri", ["rate0", "rate1", "rate2"]] = [-2.0, 1.5, 0.3]
+
+    inputs = PyPSA.to_datarecord(n, workspace.con).attributes
+    assert not {"rate0", "rate1", "rate2"} & set(inputs), "no positional names"
+    rate = _flat(inputs["rate"])
+    assert rate.set_index("bus")["value"].to_dict() == {"a": -2.0, "b": 1.5, "c": 0.3}
+    spec = _registry_schema().attributes["rate"]
+    assert "connection" in spec.dims
+    assert spec.default is None, "rate0 and rate1 default differently"
+
+
+@pytest.mark.parametrize(
+    ("network", "ctype", "name", "columns", "values"),
+    [
+        (
+            _three_port_link,
+            "Link",
+            "split",
+            ["efficiency", "efficiency2"],
+            [0.5, 0.3],
+        ),
+        (
+            _three_port_process,
+            "Process",
+            "dri",
+            ["rate0", "rate1", "rate2"],
+            [-2.0, 1.5, 0.3],
+        ),
+    ],
+    ids=["link-efficiency", "process-rate"],
+)
+def test_per_port_values_survive_a_round_trip(
+    store, network, ctype, name, columns, values
+):
+    """Each port's value comes back from its connection, not as PyPSA's default.
+
+    Notes
+    -----
+    - [ports](https://energy-models.github.io/datarecord/design/tools/pypsa/#ports)
+    """
+    n = network()
+    n.c[ctype].static.loc[name, columns] = values
+
+    built = PyPSA.build(export_network(n, store).record)
+
+    assert built.c[ctype].static.loc[name, columns].tolist() == values, (
+        "each port's value lands in its own column"
+    )
+    assert_networks_equal(built, n)
+
+
+@pytest.mark.parametrize(
+    ("network", "ctype", "name", "static", "series"),
+    [
+        (
+            _three_port_link,
+            "Link",
+            "split",
+            ("efficiency", 0.5),
+            ("efficiency2", [0.2, 0.4]),
+        ),
+        (_three_port_process, "Process", "dri", ("rate0", -2.0), ("rate1", [0.8, 1.2])),
+    ],
+    ids=["link-efficiency", "process-rate"],
+)
+def test_a_time_varying_port_survives_a_round_trip(
+    store, network, ctype, name, static, series
+):
+    """A series on one port is that port's series, beside another port's static value.
+
+    Notes
+    -----
+    - [ports](https://energy-models.github.io/datarecord/design/tools/pypsa/#ports)
+    """
+    (static_attr, static_value), (series_attr, values) = static, series
+    n = network()
+    n.c[ctype].static.loc[name, static_attr] = static_value
+    n.c[ctype].dynamic[series_attr] = pd.DataFrame(
+        {name: values}, index=n.snapshots
+    ).rename_axis(columns="name")
+
+    built = PyPSA.build(export_network(n, store).record)
+
+    assert built.c[ctype].dynamic[static_attr].empty, "the static port stays static"
+    assert built.c[ctype].static.at[name, static_attr] == static_value
+    assert built.c[ctype].dynamic[series_attr][name].to_list() == values
+    assert_networks_equal(built, n)
+
+
+def test_per_type_defaults_round_trip_with_nothing_written(store):
+    """A Load and a StorageUnit added without `sign` or `p_min_pu` build with their own defaults.
+
+    A default PyPSA differs per type is declared through `default_by`.
+
+    Notes
+    -----
+    - [AttributeSpec](https://energy-models.github.io/datarecord/design/model/attributes/#attributespec)
+    """
+    from datarecord.mutable import WorkingRecord
+
+    import pypsa
+
+    sign = _registry_schema().properties["entity"]["sign"]
+    assert sign.default_by["entity.ctype"]["Load"] == -1.0, (
+        "PyPSA declares a load's sign through `default_by`"
+    )
+
+    n = pypsa.Network()
+    n.set_snapshots(pd.date_range("2030-01-01", periods=2, freq="h"))
+    n.add("Bus", "b")
+    root = export_network(n, store)
+
+    staged = WorkingRecord(root.record)
+    staged.add("entity", ["l1"], ctype="Load")
+    staged.add("entity", ["su1"], ctype="StorageUnit")
+    staged.add(
+        "connection",
+        [{"entity": e, "bus": "b"} for e in ("l1", "su1")],
+        role="attached",
+    )
+    child = root.child(staged.edits)
+
+    inputs = Path(store.layer_dir(child.id)) / "attributes"
+    written = {p.stem for p in inputs.glob("*.parquet")} if inputs.exists() else set()
+    assert not {"sign", "p_min_pu"} & written, "a default is never stored"
+
+    built = PyPSA.build(child.record)
+    assert built.c["Load"].static.at["l1", "sign"] == -1, "a Load's own sign"
+    assert built.c["StorageUnit"].static.at["su1", "sign"] == 1
+    assert built.c["StorageUnit"].static.at["su1", "p_min_pu"] == -1, (
+        "a StorageUnit's own p_min_pu"
+    )
+
+
+def test_delays_are_rows_keyed_by_their_connections(workspace, store):
+    """A Process's `delay0`/`delay1` and a Link's `delay`/`delay2` are one `delay` per bus.
+
+    A Link leaves `delay` unsuffixed at bus1, so no suffix marks it per-port.
+    Never varying, it is still an attribute: long rows keyed by the connection,
+    where `role` is the connection's one property.
+
+    Notes
+    -----
+    - [ports](https://energy-models.github.io/datarecord/design/tools/pypsa/#ports)
+    """
+    n = _three_port_process()
+    n.c["Process"].static.loc["dri", ["delay0", "delay1"]] = [1, 2]
+    n.c["Process"].static.loc["dri", "cyclic_delay1"] = True
+    n.add("Link", "split", bus0="a", bus1="b", bus2="c", delay=3, delay2=4)
+
+    record = PyPSA.to_datarecord(n, workspace.con)
+    members = set(record.dims["entity"].columns)
+    assert not {"delay", "delay0", "delay2", "cyclic_delay1"} & members, (
+        "no positional names on the members"
+    )
+    assert set(record.properties["connection"].columns) == {"connection", "role"}, (
+        "a connection row carries its key and its property"
+    )
+    rows = unpacked(record.attributes["delay"])
+    delay = rows.set_index(["entity", "bus"])["value"].dropna().to_dict()
+    assert delay == {
+        ("dri", "a"): 1,
+        ("dri", "b"): 2,
+        ("dri", "c"): 0,
+        ("split", "b"): 3,
+        ("split", "c"): 4,
+    }, "bus0 of a Link has no delay"
+    assert _registry_schema().attributes["cyclic_delay"].dims == {
+        "connection",
+        "scenario",
+    }
+
+    built = PyPSA.build(export_network(n, store).record)
+    assert built.c["Link"].static.loc["split", ["delay", "delay2"]].tolist() == [3, 4]
+    assert built.c["Process"].static.loc["dri", "cyclic_delay1"]
+    assert_networks_equal(built, n)
+
+
+def test_a_nan_in_a_series_survives_the_melt(workspace):
+    """`UNPIVOT` drops nulls unless told otherwise; a NaN cell is still a row."""
+    import numpy as np
+
+    n = _three_port_link()
+    n.c["Link"].dynamic["p_max_pu"] = pd.DataFrame(
+        {"split": [1.0, np.nan]}, index=n.snapshots
+    )
+
+    rows = PyPSA.to_datarecord(n, workspace.con).attributes["p_max_pu"]
+    split = rows.filter("entity = 'split'")
+    assert len(split) == 2, "one row per snapshot, NaN included"
+
+
+def test_a_name_is_never_an_identifier_in_the_melt_or_pivot(store):
+    """Each name is stored and comes back as its own series.
+
+    `wind "north"` would end a quoted identifier, `snapshot` is the pivot's
+    group-by column, and `Gen` and `gen` one case-insensitive identifier.
+
+    Notes
+    -----
+    - [wide and long rows](https://energy-models.github.io/datarecord/design/model/attributes/#wide-and-long-rows)
+    """
+    import pypsa
+
+    names = ['wind "north"', "snapshot", "Gen", "gen"]
+    n = pypsa.Network()
+    n.set_snapshots(pd.date_range("2030-01-01", periods=2, freq="h"))
+    n.add("Bus", "north")
+    n.add("Generator", names, bus="north")
+    series = pd.DataFrame(
+        {name: [0.1 * i, 0.1 * i + 0.05] for i, name in enumerate(names, 1)},
+        index=n.snapshots,
+    )
+    n.c["Generator"].dynamic["p_max_pu"] = series
+
+    revision = store.root(PyPSA.to_datarecord(n, store.workspace.con))
+    rows = revision.record.attributes["p_max_pu"]
+    assert sorted(rows.project("entity, value").fetchall()) == sorted(
+        (name, value) for name in names for value in series[name]
+    ), "the melt stores each name's own series"
+    built = PyPSA.build(revision.record).c["Generator"].dynamic["p_max_pu"]
+    pd.testing.assert_frame_equal(
+        built[names],
+        series,
+        check_names=False,
+        check_freq=False,
+        check_column_type=False,
+    )
+
+
+def test_a_second_tool_needs_no_record_change():
+    """A tool is a plain object taking a record; adding one changes nothing here.
+
+    No registration and no name dispatch: conformance to `Tool` is structural,
+    so a second framework's module defines its own singleton and callers import
+    it.
+
+    Notes
+    -----
+    - [consuming a record](https://energy-models.github.io/datarecord/design/tools/)
+    """
+    from datarecord.tools.base import Tool
+
+    class FakeTool:
+        name = "fake"
+        schema = Schema()
+
+        def requires(self, record):
+            return Requirements(dims=frozenset({"snapshot"}))
+
+        def verify(self, record):
+            return Requirements(categories=frozenset({"Nope"}))
+
+        def build(self, record):
+            return "fake-model"
+
+        def to_datarecord(self, model, con, *, results_only=False, base=None):
+            return f"layer-of-{model}"
+
+    assert isinstance(FakeTool(), Tool), "conformance to `Tool` is structural"
+
+
+def test_schema_dims_stay_generic(exported):
+    """`Coords` carries a dim PyPSA knows nothing about; axis names live in the tool.
+
+    Declared but not `partial`, so the record's files need no column for it.
+    Keying it would be a different matter, reported by the tool against the
+    real record - see `test_verify_reports_a_snapshot_key`.
+    """
+    revision = exported
+    _with_schema(revision, dims={**_DIMS, "vintage": "str"})
+    record = revision.record
+    assert "vintage" in record.schema.dims
+    # No axis rows anywhere, so the dim is absent from the mapping rather than
+    # present-and-empty (https://energy-models.github.io/datarecord/design/use/reading/#relations).
+    assert "vintage" not in record.dims
+    # PyPSA's own required dims are still satisfied, and the extra dim is
+    # simply not something the tool looks at.
+    assert not PyPSA.verify(revision.record)
+    assert "vintage" in record.schema.long_columns
+
+
+def test_a_null_scenario_weight_reaches_every_scenario_its_own_row_does_not():
+    rows = pd.DataFrame({"scenario": [None, "high"], "value": [0.25, 0.5]})
+    con = duckdb.connect()
+    record = SimpleNamespace(attributes={"scenario_weight": con.from_df(rows)})
+    index = pd.Index(["low", "mid", "high"], name="scenario")
+    equal = pd.DataFrame({"weight": 1 / 3}, index=index)
+    weights = _weightings(record, "scenario", equal, con)
+    assert weights["weight"].to_dict() == {"low": 0.25, "mid": 0.25, "high": 0.5}, (
+        "a NULL-scenario row broadcasts; a scenario's own row wins"
+    )
+
+
+def test_snapshot_weightings_survive_a_round_trip(store, ac_dc):
+    """Each column of `snapshot_weightings` is a `snapshot_weighting_*` attribute."""
+    n = ac_dc.copy()
+    steps = np.arange(len(n.snapshots), dtype=float)
+    n.snapshot_weightings = pd.DataFrame(
+        {"objective": 2.0 + steps, "stores": 3.0, "generators": 0.5 * steps},
+        index=n.snapshots,
+    )
+
+    built = PyPSA.build(export_network(n, store).record)
+    pd.testing.assert_frame_equal(
+        built.snapshot_weightings,
+        n.snapshot_weightings,
+        check_freq=False,
+        check_index_type=False,
+    )
+
+
+@pytest.fixture(scope="module", params=["repeated", "distinct"])
+def multiperiod(request, ac_dc):
+    """`ac_dc` over two investment periods, with weightings of its own on both axes.
+
+    `repeated` runs every timestep in both periods, as `set_investment_periods`
+    does; `distinct` splits the timesteps between them.
+    """
+    n = ac_dc.copy()
+    if request.param == "repeated":
+        n.set_investment_periods([2030, 2040])
+    else:
+        periods = np.repeat([2030, 2040], len(n.snapshots) // 2)
+        n.set_snapshots(
+            pd.MultiIndex.from_arrays(
+                [periods, n.snapshots], names=["period", "timestep"]
+            )
+        )
+    n.investment_period_weightings = pd.DataFrame(
+        {"objective": [1.0, 0.6], "years": [10.0, 5.0]}, index=n.investment_periods
+    )
+    n.snapshot_weightings["objective"] = np.arange(len(n.snapshots), dtype=float)
+    return n
+
+
+@pytest.fixture(scope="module")
+def multiperiod_revision(tmp_path_factory, multiperiod):
+    """`multiperiod` exported once for the module."""
+    workspace = Workspace()
+    yield export_network(
+        multiperiod, workspace.store(str(tmp_path_factory.mktemp("multiperiod")))
+    )
+    workspace.close()
+
+
+@pytest.fixture(scope="module")
+def multiperiod_built(multiperiod_revision):
+    """The network `multiperiod_revision` builds."""
+    return PyPSA.build(multiperiod_revision.record)
+
+
+def test_a_multi_period_snapshot_is_one_flat_axis(multiperiod, multiperiod_revision):
+    """A repeated timestep makes the labels positions; a distinct one is the label.
+
+    Notes
+    -----
+    - [properties](https://energy-models.github.io/datarecord/design/model/properties/#properties)
+    """
+    schema = multiperiod_revision.record.schema
+    timesteps = multiperiod.snapshots.get_level_values("timestep")
+    repeated = not timesteps.is_unique
+    labels = multiperiod_revision.record.dims["snapshot"].df()["snapshot"]
+    expected = list(range(len(timesteps))) if repeated else list(timesteps)
+    assert labels.tolist() == expected
+    assert schema.dimensions["snapshot"].dtype == ("int" if repeated else "datetime")
+    assert set(schema.properties["snapshot"]) == (
+        {"period", "timestep"} if repeated else {"period"}
+    ), "a timestep property only where the label is a position"
+    assert schema.properties["snapshot"]["period"].one_of == "period"
+    if repeated:
+        assert schema.properties["snapshot"]["timestep"].one_of == "timestep", (
+            "a timestep is a label of the `timestep` dim"
+        )
+        steps = multiperiod_revision.record.dims["timestep"].df()["timestep"]
+        assert steps.tolist() == list(timesteps.unique()), "each timestep once"
+    assert schema.attributes["p_max_pu"].dims == {
+        "entity",
+        "snapshot",
+        "scenario",
+    }, "dims as in a single-period network"
+
+
+@pytest.mark.parametrize(
+    "axis",
+    [
+        pytest.param(lambda n: pd.DataFrame(index=n.snapshots), id="snapshots"),
+        pytest.param(lambda n: pd.DataFrame(index=n.investment_periods), id="periods"),
+        pytest.param(lambda n: n.snapshot_weightings, id="snapshot_weightings"),
+        pytest.param(lambda n: n.investment_period_weightings, id="period_weightings"),
+    ],
+)
+def test_a_multi_period_axis_survives_a_round_trip(
+    multiperiod, multiperiod_built, axis
+):
+    pd.testing.assert_frame_equal(
+        axis(multiperiod_built), axis(multiperiod), check_index_type=False
+    )
+
+
+def test_a_multi_period_network_survives_a_round_trip(multiperiod, multiperiod_built):
+    assert_networks_equal(multiperiod_built, multiperiod)
+
+
+@pytest.mark.parametrize("by", ["period", "snapshot"])
+def test_a_set_on_some_snapshots_keeps_the_rest_of_the_series(
+    multiperiod, multiperiod_revision, by
+):
+    """`period=2040` selects that period's snapshots, a property of `snapshot`.
+
+    Notes
+    -----
+    - [set](https://energy-models.github.io/datarecord/design/use/editing/#set)
+    """
+    from datarecord.mutable import WorkingRecord
+
+    record = multiperiod_revision.record
+    first = record.dims["snapshot"].limit(1).fetchall()[0][0]
+    periods = multiperiod.snapshots.get_level_values("period")
+    selector, changed = {
+        "period": ({"period": 2040}, periods == 2040),
+        "snapshot": ({"snapshot": first}, np.arange(len(periods)) == 0),
+    }[by]
+    staged = WorkingRecord(record)
+    staged.set("p_max_pu", 0.5, entity="Manchester Wind", **selector)
+
+    built = PyPSA.build(multiperiod_revision.child(staged.edits).record)
+    series = multiperiod.c["Generator"].dynamic["p_max_pu"]["Manchester Wind"]
+    pd.testing.assert_series_equal(
+        built.c["Generator"].dynamic["p_max_pu"]["Manchester Wind"],
+        series.where(~changed, 0.5),
+        check_index_type=False,
+    )
+
+
+def _round_trip(n, tmp_path):
+    import pypsa
+
+    n.export_to_datarecord(tmp_path / "record")
+    return pypsa.Network(tmp_path / "record")
+
+
+def test_an_unsolved_network_round_trips_through_a_folder(ac_dc, tmp_path):
+    assert_networks_equal(_round_trip(ac_dc, tmp_path), ac_dc)
+
+
+def test_a_solved_network_round_trips_through_a_folder(solved, tmp_path):
+    got = _round_trip(solved, tmp_path)
+    # `Bus.control`, `generator` and `sub_network` are derived, not stored: the solve set
+    # them, a build does not.
+    for column in ("control", "generator", "sub_network"):
+        got.c.buses.static[column] = solved.c.buses.static[column]
+    for ctype in ("Line", "ShuntImpedance"):
+        if "v_nom" in solved.c[ctype].static:
+            got.c[ctype].static["v_nom"] = solved.c[ctype].static["v_nom"]
+    assert_networks_equal(got, solved)
+
+
+def test_storage_hvdc_round_trips_through_a_folder(tmp_path):
+    import pypsa
+
+    n = pypsa.examples.storage_hvdc()
+    got = _round_trip(n, tmp_path)
+    # A carrier a bus names but `n.carriers` lacks comes back as a carrier.
+    extra = set(n.c.buses.static.carrier) - set(n.c.carriers.static.index)
+    assert extra <= set(got.c.carriers.static.index)
+    for carrier in extra:
+        n.add("Carrier", carrier)
+    assert_networks_equal(got, n)
+
+
+def test_bus_p_survives_a_round_trip(solved, tmp_path):
+    got = _round_trip(solved, tmp_path)
+    expected = solved.c.buses.dynamic["p"]
+    assert not expected.empty
+    pd.testing.assert_frame_equal(
+        got.c.buses.dynamic["p"][expected.columns],
+        expected,
+        check_dtype=False,
+        check_freq=False,
+        check_column_type=False,
+        check_index_type=False,
+    )
+
+
+def test_a_missing_path_names_the_datarecord_folder(tmp_path):
+    import pypsa
+
+    with pytest.raises(ValueError, match="datarecord folder"):
+        pypsa.Network(tmp_path / "missing")
+
+
+def test_a_csv_folder_still_dispatches_to_csv(ac_dc, tmp_path):
+    import pypsa
+
+    ac_dc.export_to_csv_folder(tmp_path / "csv")
+    got = pypsa.Network(tmp_path / "csv")
+    assert set(got.c.buses.static.index) == set(ac_dc.c.buses.static.index)
+
+
+def test_export_to_an_existing_directory_raises(ac_dc, tmp_path):
+    with pytest.raises(FileExistsError):
+        ac_dc.export_to_datarecord(tmp_path)
+
+
+def test_import_from_datarecord_fills_an_existing_network(ac_dc, tmp_path):
+    import pypsa
+
+    ac_dc.export_to_datarecord(tmp_path / "record")
+    n = pypsa.Network()
+    n.import_from_datarecord(tmp_path / "record")
+    assert_networks_equal(n, ac_dc)
+
+
+def test_a_stochastic_network_round_trips_through_a_folder(tmp_path):
+    import pypsa
+
+    n = pypsa.examples.stochastic_network()
+    if len(n.snapshots) == 1:
+        n.set_snapshots(pd.date_range("2030-01-01", periods=1, freq="h"))
+    n.export_to_datarecord(tmp_path / "record")
+    got = pypsa.Network(tmp_path / "record")
+    assert got.has_scenarios
+    pd.testing.assert_series_equal(
+        got.scenario_weightings["weight"],
+        n.scenario_weightings["weight"],
+        check_names=False,
+    )
+    other = pypsa.Network()
+    other.import_from_datarecord(tmp_path / "record")
+    assert list(other.scenarios) == list(n.scenarios)
+
+
+def test_a_link_on_one_bus_twice_is_refused(workspace):
+    n = _north()
+    n.add("Link", "loop", bus0="north", bus1="north")
+    with pytest.raises(UnsupportedRecordError, match="loop") as raised:
+        PyPSA.to_datarecord(n, workspace.con)
+    assert "bus0" in str(raised.value)
+    assert "bus1" in str(raised.value)
+
+
+def test_default_snapshots_are_refused(workspace):
+    import pypsa
+
+    n = pypsa.Network()
+    n.add("Bus", "north")
+    n.add("Generator", "gen", bus="north")
+    with pytest.raises(UnsupportedRecordError, match="set_snapshots"):
+        PyPSA.to_datarecord(n, workspace.con)
+
+
+def test_from_datarecord_without_the_package_names_the_extra(
+    single_revision, monkeypatch
+):
+    import pypsa
+
+    monkeypatch.setitem(sys.modules, "datarecord", None)
+    with pytest.raises(ImportError, match=r"pypsa\[datarecord\]"):
+        pypsa.Network.from_datarecord(single_revision.record)
+
+
+def test_importing_pypsa_imports_no_duckdb():
+    code = (
+        "import sys\nimport pypsa\n"
+        "assert 'duckdb' not in sys.modules\n"
+        "assert 'datarecord' not in sys.modules\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_repeated_buses_ignores_unset_ports():
+    """Empty ports are unset, however pandas stores the strings."""
+    import pypsa
+    from pypsa.network.io.datarecord.source import _repeated_buses
+
+    n = pypsa.Network()
+    n.add("Bus", ["a", "b"])
+    n.add("Link", ["l1", "l2"], bus0="a", bus1="b")
+    n.add("Link", "l3", bus0="a", bus1="b", bus2="a")
+    n.add("Link", "l4", bus0="a", bus1="b", bus3="b")
+    assert _repeated_buses(n) == [
+        "Link 'l3' has bus 'a' on bus0, bus2",
+        "Link 'l4' has bus 'b' on bus1, bus3",
+    ]
+
+
+def test_objective_survives_a_folder_round_trip(solved, tmp_path):
+    import pypsa
+
+    solved.export_to_datarecord(tmp_path / "record")
+    got = pypsa.Network(tmp_path / "record")
+    assert got.objective == pytest.approx(solved.objective)
+    assert got.objective_constant == pytest.approx(solved.objective_constant)
+
+
+def test_record_attributes_leave_out_names_unchecked(ac_dc):
+    from pypsa.network.io._common import _collect_network_attributes
+    from pypsa.network.names import unchecked_names
+
+    with unchecked_names(ac_dc):
+        attrs = _collect_network_attributes(ac_dc, skip={"srid"})
+    assert "_names_unchecked" not in attrs
+    assert "deduplicated_names" not in attrs

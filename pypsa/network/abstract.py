@@ -25,6 +25,10 @@ if TYPE_CHECKING:
 
 
 class _NetworkABC(ABC):
+    # Names
+    deduplicated_names: dict[str, dict[str, str]]
+    _names_unchecked: bool
+
     # Indexing
     snapshots: pd.Index | pd.MultiIndex
     snapshot_weightings: pd.DataFrame
