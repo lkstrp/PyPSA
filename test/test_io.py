@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 from geopandas.testing import assert_geodataframe_equal
 from numpy.testing import assert_array_almost_equal as equal
+from packaging.version import Version
 
 import pypsa
 
@@ -185,6 +186,25 @@ class TestNetcdf:
         scipy_network.export_to_netcdf(fn)
         reloaded = pypsa.Network(fn)
         assert reloaded.meta == scipy_network.meta
+
+    def test_netcdf_merge_roundtrip_weightings(self, tmp_path):
+        n = pypsa.Network()
+        n.set_snapshots(range(3))
+        n.add("Bus", "bus1")
+        n.add("Generator", "gen1", bus="bus1", p_nom=1)
+        path = tmp_path / "merge_roundtrip.nc"
+        n.export_to_netcdf(path)
+        reloaded = pypsa.Network(path)
+
+        m = pypsa.Network()
+        m.set_snapshots(range(3))
+        m.add("Bus", "bus2")
+        m.add("Generator", "gen2", bus="bus2", p_nom=1)
+        assert (reloaded.snapshot_weightings.dtypes == "float64").all()
+        # networks saved by older versions carry int64 weightings
+        m.snapshot_weightings = m.snapshot_weightings.astype(int)
+
+        reloaded.merge(m, with_time=True)
 
     def test_netcdf_io_Path(self, scipy_network, tmpdir):
         fn = tmpdir / "netcdf_export.nc"
@@ -749,6 +769,11 @@ def test_examples_consistency(tmp_path, example_network):
 
 @pytest.mark.skipif(
     sys.version_info < (3, 12), reason="Test requires Python 3.12 or higher"
+)
+# pandapower 3.5.6 still pins pandas~=2.3
+@pytest.mark.skipif(
+    Version(pd.__version__) >= Version("3.1"),
+    reason="pandapower 3.1.2 cannot build networks on pandas>=3.1 (TypeError on bool column expansion)",
 )
 @pytest.mark.parametrize("use_pandapower_index", [True, False])
 @pytest.mark.parametrize("extra_line_data", [True, False])

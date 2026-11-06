@@ -4,6 +4,7 @@
 
 import warnings
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -229,3 +230,21 @@ def test_add_fills_omitted_static_attributes_with_defaults(component, kwargs):
     empty = Network().c[component].static[static.columns]
     assert static.dtypes.equals(empty.dtypes)
     assert static.loc["x"].astype(object).equals(defaults.astype(object))
+
+
+def test_add_all_nan_string_attribute_takes_default():
+    n = Network()
+    fresh = n.c.generators.static.carrier.dtype
+    n.add("Bus", "b")
+    n.add("Generator", ["g0", "g1"], bus="b", carrier=[np.nan, np.nan])
+    carrier = n.c.generators.static.carrier
+    assert (carrier == "").all()
+    assert carrier.dtype == fresh
+
+
+def test_add_partially_nan_string_attribute_fills_only_nan():
+    n = Network()
+    n.add("Bus", "b")
+    n.add("Generator", ["g0", "g1"], bus="b", carrier=["gas", np.nan])
+    carrier = n.c.generators.static.carrier
+    assert carrier.tolist() == ["gas", ""]

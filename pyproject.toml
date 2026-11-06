@@ -34,7 +34,7 @@ dependencies = [
     "scipy",
     "pandas>=3.0",
     "pyarrow",
-    "xarray",
+    "xarray>=2025.12",
     "netcdf4",
     "linopy>=0.10.0",
     "matplotlib",
@@ -150,6 +150,12 @@ filterwarnings = [
     # numpy>=2.5 deprecations not yet handled by netCDF4 and matplotlib
     "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning",
     "ignore:The 'generic' unit for NumPy timedelta is deprecated:DeprecationWarning",
+
+    # Ignore tsam 2.3.9 setting the deprecated `mode.chained_assignment` option at import
+    "ignore:The 'mode.chained_assignment' option is deprecated:DeprecationWarning:tsam",
+
+    # Ignore tsam 2.3.9 passing the deprecated `inplace` keyword to `sort_index`
+    "ignore:The inplace keyword in DataFrame.sort_index is deprecated:DeprecationWarning:tsam",
 ]
 markers = [
     "mpl_image_compare",

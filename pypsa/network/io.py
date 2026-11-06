@@ -960,19 +960,22 @@ class _ExporterHDF5(_Exporter):
             pd.DataFrame(attrs, index=pd.Index([name], name="name")),
             format="table",
             index=False,
+            track_times=True,
         )
 
     def save_meta(self, meta: dict) -> None:
         """Save meta data (`n.meta`)."""
-        self.ds.put("/meta", pd.Series(json.dumps(meta)))
+        self.ds.put("/meta", pd.Series(json.dumps(meta)), track_times=True)
 
     def save_crs(self, crs: dict) -> None:
         """Save CRS of shapes of network."""
-        self.ds.put("/crs", pd.Series(json.dumps(crs)))
+        self.ds.put("/crs", pd.Series(json.dumps(crs)), track_times=True)
 
     def save_snapshots(self, snapshots: Sequence) -> None:
         """Save snapshots data."""
-        self.ds.put("/snapshots", snapshots, format="table", index=False)
+        self.ds.put(
+            "/snapshots", snapshots, format="table", index=False, track_times=True
+        )
 
     def save_investment_periods(self, investment_periods: pd.Index) -> None:
         """Save investment periods data."""
@@ -981,6 +984,7 @@ class _ExporterHDF5(_Exporter):
             investment_periods,
             format="table",
             index=False,
+            track_times=True,
         )
 
     def save_scenarios(self, scenarios: pd.DataFrame) -> None:
@@ -993,18 +997,28 @@ class _ExporterHDF5(_Exporter):
         df = df.rename_axis(index="name")
         self.index[list_name] = df.index
         df = df.reset_index()
-        self.ds.put("/" + list_name, df, format="table", index=False)
+        self.ds.put("/" + list_name, df, format="table", index=False, track_times=True)
 
     def save_series(self, list_name: str, attr: str, df: pd.DataFrame) -> None:
         """Save dynamic components data."""
         df = df.set_axis(self.index[list_name].get_indexer(df.columns), axis="columns")
-        self.ds.put("/" + list_name + "_t/" + attr, df, format="table", index=False)
+        self.ds.put(
+            "/" + list_name + "_t/" + attr,
+            df,
+            format="table",
+            index=False,
+            track_times=True,
+        )
 
     def save_piecewise(self, list_name: str, attr: str, df: pd.DataFrame) -> None:
         """Save piecewise component data."""
         df_stack = df.stack(df.columns.names, future_stack=True)
         self.ds.put(
-            "/" + list_name + "_p/" + attr, df_stack, format="table", index=False
+            "/" + list_name + "_p/" + attr,
+            df_stack,
+            format="table",
+            index=False,
+            track_times=True,
         )
 
     def finish(self) -> None:
@@ -1284,8 +1298,9 @@ class _ExporterNetCDF(_Exporter):
 
         Runs post-processing, compression and saving to disk.
         """
-        # pandas>=3 infer_string strings aren't netCDF-writable. Cast to object and
-        # write with the option off to keep NaNs. https://github.com/pydata/xarray/issues/10301
+        # pandas>=3 infer_string strings aren't netCDF-writable, cast to object.
+        # xarray>=2025.12 (the pyproject floor) keeps the NaNs of the cast variables.
+        # https://github.com/pydata/xarray/issues/10301
         for name in list(self.ds.variables):
             if isinstance(self.ds[name].dtype, pd.StringDtype):
                 self.ds[name] = self.ds[name].astype(object)
@@ -1295,7 +1310,7 @@ class _ExporterNetCDF(_Exporter):
             self.set_compression_encoding()
         if self.path is not None:
             _path = Path(self.path)
-            with _path.open("w"), pd.option_context("future.infer_string", False):
+            with _path.open("w"):
                 self.ds.to_netcdf(_path)
 
 
@@ -1336,6 +1351,19 @@ def _sort_attrs(
         return axis_labels
 
     return target
+
+
+def _fill_defaults(df: pd.DataFrame, defaults: pd.Series) -> pd.DataFrame:
+    """Fill NaN entries of `df` with the per-column values in `defaults`."""
+    for k in df.columns.intersection(defaults.index):
+        default = defaults[k]
+        if pd.isna(default) or not df[k].isna().any():
+            continue
+        if df[k].isna().all():
+            df[k] = pd.Series(default, index=df.index)
+        else:
+            df[k] = df[k].fillna(default)
+    return df
 
 
 class NetworkIOMixin(_NetworkABC):
@@ -2012,7 +2040,7 @@ class NetworkIOMixin(_NetworkABC):
         )
 
         # Fill nan values with default values
-        df = df.fillna(attrs["default"].to_dict())
+        df = _fill_defaults(df, attrs["default"])
 
         defaults = {}
         for k in static_attrs.index:

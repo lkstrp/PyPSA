@@ -587,18 +587,17 @@ class NetworkTransformMixin(_NetworkABC):
             if not snapshots_aligned:
                 msg = "Snapshots do not agree, cannot merge networks."
                 raise ValueError(msg)
-            weightings_aligned = self.snapshot_weightings.equals(
-                other.snapshot_weightings
-            )
+            # Older files hold int64 weightings, so compare as float
+            self_weightings = self.snapshot_weightings.astype(float)
+            other_weightings = other.snapshot_weightings.astype(float)
+            weightings_aligned = self_weightings.equals(other_weightings)
             if not weightings_aligned:
                 # Check if only index order is different
                 # TODO fix with #1128
-                if self.snapshot_weightings.reindex(
-                    sorted(self.snapshot_weightings.columns), axis=1
+                if self_weightings.reindex(
+                    sorted(self_weightings.columns), axis=1
                 ).equals(
-                    other.snapshot_weightings.reindex(
-                        sorted(other.snapshot_weightings.columns), axis=1
-                    )
+                    other_weightings.reindex(sorted(other_weightings.columns), axis=1)
                 ):
                     weightings_aligned = True
                 else:

@@ -265,10 +265,9 @@ class Groupers:
         carrier_series = static.get("carrier", fall_back).rename("carrier")
         if nice_names:
             carrier_nice_name = n.c.carriers.static.nice_name[lambda ds: ds != ""]
-            carrier_series = (
-                self._map_with_multiindex(carrier_series, carrier_nice_name)
-                .fillna(carrier_series)
-                .replace("", "-")
+            mapped = self._map_with_multiindex(carrier_series, carrier_nice_name)
+            carrier_series = mapped.where(mapped.notna(), carrier_series).replace(
+                "", "-"
             )
         return carrier_series
 

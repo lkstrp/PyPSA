@@ -54,6 +54,7 @@ SPDX-License-Identifier: CC-BY-4.0
 - [`optimize_transmission_expansion_iteratively`][pypsa.optimization.OptimizationAccessor.optimize_transmission_expansion_iteratively] now raises a clear `ValueError` on stochastic networks instead of failing with a `KeyError` after all iterations have run.
 - Fix [`n.add()`][pypsa.Network.add] to be about twice as fast for single components on mid-sized networks.
 - [`n.lpf()`][pypsa.Network.lpf], [`n.pf()`][pypsa.Network.pf] and [`n.lpf_contingency()`][pypsa.Network.lpf_contingency] now raise a clear `ValueError` on stochastic networks instead of failing with `negative axis index: -1`. Power flow does not support stochastic networks yet. See [#1979](https://github.com/PyPSA/PyPSA/issues/1979).
+- PyPSA now runs warning-free on `pandas>=3.1` and `pytest>=9.2`, and the lockfile moved to them. The netCDF export now requires `xarray>=2025.12`. (<!-- md:pr XXXX -->)
 
 ## [**v1.4.0**](https://github.com/PyPSA/PyPSA/releases/tag/v1.4.0) <small>9th October 2026</small> { id="v1.4.0" }
 
