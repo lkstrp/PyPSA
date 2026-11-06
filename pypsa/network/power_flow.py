@@ -1004,6 +1004,8 @@ class NetworkPowerFlowMixin(_NetworkABC):
 
         for sub_network in self.c.sub_networks.static.obj:
             sub_network._branches = sub_network.branches()
+            if sub_network._branches.empty:
+                continue
             sub_network.calculate_BODF()
 
         for branch in branch_outages:
