@@ -40,6 +40,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 ### Bug Fixes
 
+- Fix [`n.optimize.optimize_security_constrained()`][pypsa.optimization.OptimizationAccessor.optimize_security_constrained] building `NaN` and infinite coefficients for the outage of a branch whose removal splits a sub-network. Such outages are now skipped with a warning naming the branches, [`sn.calculate_BODF()`][pypsa.SubNetwork.calculate_BODF] sets their factors to zero and lists them in `sn.bridges_i`, and [`n.lpf_contingency()`][pypsa.Network.lpf_contingency] warns about them. See [#2085](https://github.com/PyPSA/PyPSA/issues/2085).
 - Fix compatibility with linopy 1.0, keeping linopy 0.10 supported. Both the dense and the sparse linopy backend (`model_kwargs={"sparse": True}`) are now tested. (<!-- md:pr 2129 -->)
 - [`n.optimize.create_model()`][pypsa.optimization.OptimizationAccessor.create_model] now applies `pypsa.options.params.optimize.model_kwargs`, like [`n.optimize()`][pypsa.optimization.OptimizationAccessor.__call__]. (<!-- md:pr 2129 -->)
 - Setting `committable` on a component without unit commitment support, such as a StorageUnit or Store, now raises a clear error in the consistency check before the model is built, instead of failing with 'Variable StorageUnit-status already assigned'. (<!-- md:pr 2127 -->)

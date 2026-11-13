@@ -4,6 +4,7 @@
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 from numpy.testing import assert_array_almost_equal as equal
@@ -106,3 +107,32 @@ def test_lpf_contingency_unaffected_subnetwork():
     p0 = n.lpf_contingency(n.snapshots[0], branch_outages=[("Line", "al0")])
     assert not p0[("Line", "al0")].isna().any()
     equal(p0[("Line", "al0")].to_numpy(), [0.0, 100.0, 30.0, 30.0])
+
+
+def test_lpf_contingency_bridge_outage(caplog):
+    n = pypsa.Network()
+    n.set_snapshots(pd.date_range("2026-01-01", periods=1, freq="h"))
+    n.add("Bus", ["a", "b", "c", "d"])
+    n.add("Line", "ab", bus0="a", bus1="b", x=1.0, r=0.01, s_nom=100)
+    n.add("Line", "bc", bus0="b", bus1="c", x=1.0, r=0.01, s_nom=100)
+    n.add("Line", "ca", bus0="c", bus1="a", x=1.0, r=0.01, s_nom=100)
+    n.add("Line", "cd", bus0="c", bus1="d", x=1.0, r=0.01, s_nom=100)
+    n.add("Generator", "g_a", bus="a", p_nom=200, p_set=80, control="Slack")
+    n.add("Load", "l_b", bus="b", p_set=50)
+    n.add("Load", "l_d", bus="d", p_set=30)
+
+    with caplog.at_level("WARNING", logger="pypsa.network.power_flow"):
+        p0 = n.lpf_contingency(
+            n.snapshots[0], branch_outages=[("Line", "cd"), ("Line", "ab")]
+        )
+
+    sub_network = n.c.sub_networks.static.obj.iloc[0]
+    assert np.isfinite(sub_network.BODF).all()
+    assert list(sub_network.bridges_i) == [("Line", "cd")]
+    assert "[('Line', 'cd')] splits its sub-network" in caplog.text
+
+    assert np.isfinite(p0.to_numpy()).all()
+    expected = p0["base"].copy()
+    expected[("Line", "cd")] = 0.0
+    equal(p0[("Line", "cd")].to_numpy(), expected.to_numpy())
+    assert not np.allclose(p0[("Line", "ab")].to_numpy(), p0["base"].to_numpy())

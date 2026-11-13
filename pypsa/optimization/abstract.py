@@ -157,6 +157,17 @@ def _add_security_constraints(
         return
 
     sub_network.calculate_BODF()
+    bridges = outages.intersection(sub_network.bridges_i)
+    if not bridges.empty:
+        logger.warning(
+            "The outage of %s would split sub-network %s. Such outages cannot be "
+            "modelled by the security constraints and are skipped.",
+            list(bridges),
+            sub_network.name,
+        )
+        outages = outages.difference(bridges, sort=False)
+        if outages.empty:
+            return
     BODF = pd.DataFrame(sub_network.BODF, index=branches_i, columns=branches_i)[outages]
 
     for c_outage, c_affected in product(outages.unique(0), branches_i.unique(0)):

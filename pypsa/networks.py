@@ -1512,6 +1512,7 @@ class SubNetwork(NetworkGraphMixin, SubNetworkPowerFlowMixin):
     C: spmatrix
     PTDF: spmatrix
     BODF: spmatrix
+    bridges_i: pd.MultiIndex
 
     list_name = "sub_networks"
 

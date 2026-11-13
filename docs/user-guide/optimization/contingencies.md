@@ -51,6 +51,8 @@ With `multi_investment_periods=True`, the BODF matrix is computed from the netwo
 
 Explicitly requested outages of branches that are not active in any optimized period raise an error. This includes an outage of a branch that is only active in periods outside the passed `snapshots`, which matters when you write your own rolling-horizon loop. With the default `branch_outages=None`, inactive branches are skipped.
 
+The outage of a bridge, a branch whose removal splits a sub-network, is skipped with a warning that names the branch. The flow on such a branch has no other path, so the formulation above cannot capture the outage: one part of the sub-network loses its balance and would need its own slack. The optimisation is therefore not secured against these outages. To cover them, model the islanded part explicitly, for example with local reserves or with [`n.optimize.add_load_shedding()`][pypsa.optimization.optimize.OptimizationAccessor.add_load_shedding] on a copy of the network with the branch removed.
+
 !!! tip "Tip: Avoiding the computational burden of $N-1$ security constraints"
 
     Running security-constrained optimisation problems can be computationally expensive due to the product of lines, outages and snapshots.
@@ -97,13 +99,17 @@ The diagonal entries of the $BODF$ are simply:
 
 $$BODF_{bb} = -1$$
 
-!!! warning "Warning: Singular $BODF$ matrix"
+!!! warning "Warning: Bridges"
 
     If $c$ is the only branch connecting two regions, so that the
     regions become disconnected after the outage of $c$, then
-    $BPTDF_{cc} = 1$ and $BODF_{bc}$ becomes singular; this
+    $BPTDF_{cc} = 1$ and $BODF_{bc}$ is undefined; this
     case must be treated separately since, for example, each region will
-    need its own slack bus.
+    need its own slack bus. [`sn.calculate_BODF()`][pypsa.SubNetwork.calculate_BODF]
+    sets $BODF_{bc} = 0$ for $b \neq c$ for such branches and lists them in
+    `sn.bridges_i`. The security-constrained optimisation skips their outages
+    with a warning, and [`n.lpf_contingency()`][pypsa.Network.lpf_contingency]
+    leaves the other flows at their base case values.
 
 !!! note "Note: BODF versus LODF matrix"
 
