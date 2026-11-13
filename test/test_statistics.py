@@ -1100,3 +1100,12 @@ def test_installed_capex_honours_cost_attribute():
     fom = n.statistics.installed_capex(cost_attribute="fom_cost", drop_zero=False)
     assert default.sum() == 1000.0
     assert fom.sum() == 300.0
+
+
+def test_is_multi_indexed_deprecated(ac_dc_network):
+    n = ac_dc_network.copy()
+    with pytest.warns(DeprecationWarning, match="has_investment_periods"):
+        assert n.statistics.is_multi_indexed is False
+    n.periods = [2020, 2030]
+    with pytest.warns(DeprecationWarning, match="has_investment_periods"):
+        assert n.statistics.is_multi_indexed is True

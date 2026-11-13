@@ -12,6 +12,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import pandas as pd
+from deprecation import deprecated
 from pandas.api.types import is_list_like
 
 from pypsa._options import options
@@ -92,17 +93,21 @@ class AbstractStatisticsAccessor(ABC):
         return {"by": by, "level": level}
 
     @property
+    @deprecated(
+        deprecated_in="1.5.0",
+        removed_in="2.0.0",
+        details="Use `n.has_investment_periods` instead.",
+    )
     def is_multi_indexed(self) -> bool:
         """Check if the snapshots are multi-indexed.
 
-        Returns
-        -------
-        bool
-            True if the snapshots are multi-indexed, False otherwise.
+        !!! warning "Deprecated in <!-- md:badge-version v1.5.0 -->"
+
+            Use [`n.has_investment_periods`][pypsa.Network.has_investment_periods]
+            instead.
 
         """
-        # TODO could be moved to Network
-        return isinstance(self._n.snapshots, pd.MultiIndex)
+        return self._n.has_investment_periods
 
     def _aggregate_timeseries(
         self, obj: Any, weights: pd.Series, agg: str | Callable | bool = "sum"
@@ -266,7 +271,7 @@ class AbstractStatisticsAccessor(ABC):
             return obj
         idx = self._get_component_index(obj, c)
 
-        if not self.is_multi_indexed:
+        if not n.has_investment_periods:
             mask = self._align_static(n.c[c].get_active_assets())
             return self._select(obj, mask.index[mask].intersection(idx))
 

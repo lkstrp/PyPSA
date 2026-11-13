@@ -284,7 +284,7 @@ def define_nominal_constraints_per_bus_carrier(n: Network, sns: pd.Index) -> Non
         msg = "Nominal constraints per bus carrier are not implemented for stochastic networks."
         raise NotImplementedError(msg)
 
-    multi_invest = isinstance(n.snapshots, pd.MultiIndex)
+    multi_invest = n.has_investment_periods
     periods = n.optimize._window.subset(sns).periods if multi_invest else pd.Index([])
 
     for col in cols:

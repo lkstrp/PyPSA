@@ -30,6 +30,7 @@ class _NetworkABC(ABC):
     snapshot_weightings: pd.DataFrame
     _snapshots_data: pd.DataFrame
     investment_periods: pd.Index
+    periods: pd.Index
     investment_period_weightings: pd.DataFrame
     _investment_periods_data: pd.DataFrame
     scenarios: pd.Series
@@ -88,6 +89,12 @@ class _NetworkABC(ABC):
     @property
     @abstractmethod
     def has_periods(self) -> bool:
+        """Read only placeholder."""
+        ...
+
+    @property
+    @abstractmethod
+    def has_investment_periods(self) -> bool:
         """Read only placeholder."""
         ...
 

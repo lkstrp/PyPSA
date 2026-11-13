@@ -519,10 +519,9 @@ def check_dispatch_delays(
     if component.name not in ("Link", "Process") or component.static.empty:
         return
 
-    if isinstance(n.snapshots, pd.MultiIndex):
+    if n.has_investment_periods:
         total_horizon = min(
-            float(n.snapshot_weightings.generators.loc[p].sum())
-            for p in n.snapshots.unique(level=0)
+            float(n.snapshot_weightings.generators.loc[p].sum()) for p in n.periods
         )
     else:
         total_horizon = float(n.snapshot_weightings.generators.sum())
@@ -823,8 +822,8 @@ def check_investment_periods(n: NetworkType, strict: bool = False) -> None:
     constraint_periods = set(
         n.c.global_constraints.static.investment_period.dropna().unique()
     )
-    if isinstance(n.snapshots, pd.MultiIndex):
-        if not constraint_periods.issubset(n.snapshots.unique("period")):
+    if n.has_investment_periods:
+        if not constraint_periods.issubset(n.periods):
             msg = (
                 "The global constraints contain investment periods which "
                 "are not in the set of optimized snapshots."

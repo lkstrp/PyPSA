@@ -73,6 +73,10 @@ SPDX-License-Identifier: CC-BY-4.0
 - [`n.lpf()`][pypsa.Network.lpf], [`n.pf()`][pypsa.Network.pf] and [`n.lpf_contingency()`][pypsa.Network.lpf_contingency] now raise a clear `ValueError` on stochastic networks instead of failing with `negative axis index: -1`. Power flow does not support stochastic networks yet. See [#1979](https://github.com/PyPSA/PyPSA/issues/1979).
 - Speed up [`n.optimize()`][pypsa.optimization.OptimizationAccessor.__call__] on networks without lines and transformers, e.g. market models with only links. The network topology is no longer rebuilt with one sub-network per bus after every solve, which dominated the runtime of rolling horizon optimizations. The voltage angles `v_ang` remain zero and `n.sub_networks` stays empty. (<!-- md:pr 2110 -->)
 
+### Deprecations
+
+- The `n.statistics.is_multi_indexed` property is deprecated and will be removed in PyPSA 2.0. Use [`n.has_investment_periods`][pypsa.Network.has_investment_periods] instead. (<!-- md:pr XXXX -->)
+
 ## [**v1.4.0**](https://github.com/PyPSA/PyPSA/releases/tag/v1.4.0) <small>9th October 2026</small> { id="v1.4.0" }
 
 ### Changes from bug fixes
