@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 from deprecation import deprecated
 
-from pypsa.common import normalize_carrier_nice_names
+from pypsa.common import match_carriers, normalize_carrier_nice_names
 from pypsa.components.common import as_components
 from pypsa.network.abstract import _NetworkABC
 
@@ -241,19 +241,21 @@ class NetworkDescriptorsMixin(_NetworkABC):
         Parameters
         ----------
         bus_carrier : str | Sequence[str] | None
-            The carrier type of the bus to query.
+            The carrier type of the bus to query, selected like the `bus_carrier`
+            filter of the statistics module: a string that is not a bus carrier of
+            the network is matched as a regular expression.
 
         Returns
         -------
         str:
             The unit associated with the specified bus carrier. If no bus carrier is
-            provided, returns `"carrier dependent"`.
+            provided or the matched carriers have different units, returns
+            `"carrier dependent"`.
 
         Raises
         ------
         ValueError
-            If the specified bus carrier is not found in the network or if multiple
-            units are found for the specified bus carrier.
+            If the specified bus carrier is not found in the network.
 
         """
         bus_carrier = normalize_carrier_nice_names(
@@ -263,13 +265,17 @@ class NetworkDescriptorsMixin(_NetworkABC):
         if bus_carrier is None:
             return "carrier dependent"
 
+        matched = match_carriers(self.c.buses.static.carrier, bus_carrier)
         if isinstance(bus_carrier, str):
-            bus_carrier = [bus_carrier]
-
-        not_included = set(bus_carrier) - set(self.c.buses.static.carrier.unique())
-        if not_included:
-            msg = f"Bus carriers {not_included} not in network"
-            raise ValueError(msg)
+            if matched.empty:
+                msg = f"Bus carriers {{{bus_carrier!r}}} not in network"
+                raise ValueError(msg)
+        else:
+            not_included = set(bus_carrier) - set(matched)
+            if not_included:
+                msg = f"Bus carriers {not_included} not in network"
+                raise ValueError(msg)
+        bus_carrier = list(matched)
         unit = self.c.buses.static[
             self.c.buses.static.carrier.isin(bus_carrier)
         ].unit.unique()

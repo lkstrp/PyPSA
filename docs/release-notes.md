@@ -40,6 +40,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 ### Bug Fixes
 
+- Fix [`n.statistics.energy_balance()`][pypsa.statistics.StatisticsAccessor.energy_balance], [`supply()`][pypsa.statistics.StatisticsAccessor.supply] and [`withdrawal()`][pypsa.statistics.StatisticsAccessor.withdrawal] raising on a regular expression for `bus_carrier`, which the other statistics methods already accept. (<!-- md:pr XXXX -->)
 - Fix compatibility with linopy 1.0, keeping linopy 0.10 supported. Both the dense and the sparse linopy backend (`model_kwargs={"sparse": True}`) are now tested. (<!-- md:pr 2129 -->)
 - [`n.optimize.create_model()`][pypsa.optimization.OptimizationAccessor.create_model] now applies `pypsa.options.params.optimize.model_kwargs`, like [`n.optimize()`][pypsa.optimization.OptimizationAccessor.__call__]. (<!-- md:pr 2129 -->)
 - Setting `committable` on a component without unit commitment support, such as a StorageUnit or Store, now raises a clear error in the consistency check before the model is built, instead of failing with 'Variable StorageUnit-status already assigned'. (<!-- md:pr 2127 -->)
