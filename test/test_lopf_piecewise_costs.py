@@ -351,7 +351,6 @@ class TestPiecewiseCostsResults:
         assert n_pw.objective == pytest.approx(n_lin.objective)
 
 
-# TODO: update to a non-zero starting x point on the piecewise curve once we handle non-zero intercepts on cumulative curves
 class TestPiecewiseCostsStatus:
     @pytest.fixture
     def base_network(self):
@@ -423,6 +422,72 @@ class TestPiecewiseCostsStatus:
         )
         n.optimize()
         assert (n.c.generators.dynamic.p["gen-committable"] == 0).all()
+
+
+class TestPiecewiseCostsBelowZero:
+    """A cumulative curve starting below zero costs nothing at zero output."""
+
+    @staticmethod
+    def build(curve, *, committable=False, local_cost=5.0, p_max_pu=1.0):
+        n = pypsa.Network(snapshots=range(3))
+        n.add("Bus", ["b0", "b1"])
+        n.add("Generator", "cheap", bus="b0", p_nom=100, marginal_cost=0)
+        n.add("Generator", "local", bus="b1", p_nom=100, marginal_cost=local_cost)
+        n.add("Load", "l", bus="b1", p_set=10)
+        n.add(
+            "Link",
+            "k",
+            bus0="b0",
+            bus1="b1",
+            p_nom=60,
+            p_min_pu=-1,
+            p_max_pu=p_max_pu,
+            committable=committable,
+            marginal_cost=curve,
+        )
+        n.optimize()
+        return n
+
+    @pytest.mark.parametrize("committable", [False, True])
+    def test_matches_curve_starting_at_zero(self, committable):
+        n_below = self.build({-1.0: 0.0, 0.0: 1.0, 1.0: 4.0}, committable=committable)
+        n_zero = self.build({0.0: 0.0, 1.0: 4.0}, committable=committable)
+        assert n_below.objective == pytest.approx(n_zero.objective)
+        assert n_below.objective == pytest.approx(120)
+        assert n_below.c.links.dynamic.p0["k"].tolist() == pytest.approx([10] * 3)
+
+    def test_idle_link_has_no_cost(self):
+        n = self.build({-1.0: 0.0, 0.0: 1.0, 1.0: 4.0}, local_cost=0.0, p_max_pu=0.0)
+        assert n.objective == pytest.approx(0)
+        opt = n.c.links.dynamic.marginal_cost_piecewise_opt["k"]
+        assert not opt.isin([float("inf"), -float("inf")]).any()
+
+    def test_ragged_curves(self):
+        """NaN padding of a shorter curve stays out of the anchoring offset."""
+        n = pypsa.Network(snapshots=range(2))
+        n.add("Bus", ["b0", "b1"])
+        n.add("Generator", "cheap", bus="b0", p_nom=100, marginal_cost=0)
+        n.add("Load", "l", bus="b1", p_set=10)
+        n.add(
+            "Link",
+            "long",
+            bus0="b0",
+            bus1="b1",
+            p_nom=60,
+            p_min_pu=-1,
+            marginal_cost={-1.0: 0.0, -0.5: 1.0, 0.0: 2.0, 1.0: 4.0},
+        )
+        n.add(
+            "Link",
+            "short",
+            bus0="b0",
+            bus1="b1",
+            p_nom=60,
+            p_max_pu=0,
+            marginal_cost={0.0: 0.0, 1.0: 4.0},
+        )
+        n.optimize()
+        assert n.objective == pytest.approx(2 * 10 * 4)
 
 
 class TestPiecewiseCostsErrors:

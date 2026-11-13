@@ -103,7 +103,9 @@ We assume that piecewise marginal operating and capital cost curves are cumulati
 
 !!! warning
 
-    Curves must start at $x = 0$, and the y-value there prices a zero-width increment and is ignored.
+    Curves must not start above $x = 0$, and the y-value at the first breakpoint prices a zero-width increment and is ignored.
+    A curve may start below $x = 0$, for example to price reverse flow on a [Link](../components/links.md) with negative `p_min_pu`.
+    The cost is anchored at zero at $x = 0$, so the part below 0 makes the cost negative, as a constant `marginal_cost` does.
 
 !!! example
 

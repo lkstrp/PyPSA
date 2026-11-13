@@ -2326,7 +2326,7 @@ class NetworkIOMixin(_NetworkABC):
         if (bad := df.loc[0].loc[pd.IndexSlice[:, x_attr]] > 0).any():
             equivalents = {"p_pu": "p_min_pu", "p_nom": "p_nom_min"}
             msg = (
-                f"Piecewise '{attr}' curves must start at {x_attr}=0. "
+                f"Piecewise '{attr}' curves must not start above {x_attr}=0. "
                 f"Otherwise, you implicitly bound {x_attr} from below (equivalent to setting {equivalents.get(x_attr)}). "
                 f"Even if you are explicitly bounding from below, you should still set a breakpoint at (0, 0)."
                 f"Affected components: {bad[bad].index.tolist()}."
