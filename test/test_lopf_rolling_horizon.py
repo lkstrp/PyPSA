@@ -644,3 +644,26 @@ def test_rolling_horizon_storage_standing_loss(component, level, kwargs):
     pd.testing.assert_frame_equal(
         rolling.c[component].dynamic[level], full.c[component].dynamic[level]
     )
+
+
+def test_rolling_horizon_min_up_time_in_hours_across_seam():
+    n = pypsa.Network(snapshots=range(8))
+    n.snapshot_weightings.loc[:, :] = 2.0
+    n.add("Bus", "bus")
+    n.add(
+        "Generator",
+        "gen",
+        bus="bus",
+        p_nom=10,
+        committable=True,
+        stand_by_cost=1,
+        min_up_time=5,
+        up_time_before=0,
+    )
+    n.add("Generator", "backup", bus="bus", p_nom=10, marginal_cost=100)
+    n.add("Load", "load", bus="bus", p_set=[0, 0, 5, 0, 0, 0, 0, 0])
+    with pypsa.option_context("params.optimize.durations_in_hours", True):
+        n.optimize.optimize_with_rolling_horizon(horizon=3, overlap=0)
+    status = n.c.generators.dynamic.status["gen"].round().astype(int).tolist()
+    # 5 h on 2 h snapshots hold 3 snapshots, the third lies beyond the seam
+    assert status == [0, 0, 1, 1, 1, 0, 0, 0]

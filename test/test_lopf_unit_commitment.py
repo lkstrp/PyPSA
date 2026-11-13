@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+import warnings
 from contextlib import nullcontext
 
 import numpy as np
@@ -1676,3 +1677,365 @@ def test_noncommittable_first_snapshot_ramp(flex_kwargs, with_committable):
 
     assert status == "ok"
     assert n.c.generators.dynamic.p.loc[0, "flex"] == pytest.approx(5)
+
+
+def _ramp_series_network(ramp_attr, series, load, extendable=False):
+    n = pypsa.Network(snapshots=range(len(load)))
+    n.add("Bus", "bus")
+    n.add("Load", "load", bus="bus", p_set=load)
+    n.add("Generator", "backstop", bus="bus", p_nom=1000, marginal_cost=1000)
+    n.add(
+        "Generator",
+        "gen",
+        bus="bus",
+        p_nom=100,
+        p_nom_extendable=extendable,
+        p_nom_max=100,
+        committable=True,
+        p_min_pu=0.1,
+        marginal_cost=1,
+        **{ramp_attr: pd.Series(series, index=n.snapshots)},
+    )
+    return n
+
+
+@pytest.mark.parametrize("extendable", [False, True])
+def test_ramp_limit_start_up_series(extendable):
+    series = [1, 1, 1, 0.4, 1]
+    n = _ramp_series_network(
+        "ramp_limit_start_up", series, [0, 80, 0, 80, 0], extendable
+    )
+    status, _ = n.optimize()
+    assert status == "ok"
+    p = n.c.generators.dynamic.p["gen"]
+    assert p.iloc[1] == pytest.approx(80)
+    assert p.iloc[3] == pytest.approx(40)
+
+
+@pytest.mark.parametrize("extendable", [False, True])
+def test_ramp_limit_shut_down_series(extendable):
+    series = [1, 0.5, 1, 1]
+    n = _ramp_series_network("ramp_limit_shut_down", series, [80, 0, 80, 0], extendable)
+    status, _ = n.optimize()
+    assert status == "ok"
+    p = n.c.generators.dynamic.p["gen"]
+    assert p.iloc[0] == pytest.approx(50)
+    assert p.iloc[2] == pytest.approx(80)
+
+
+def test_ramp_limit_start_up_series_equals_static():
+    load = [0, 80, 0, 80, 0]
+    n_series = _ramp_series_network("ramp_limit_start_up", [0.4] * 5, load)
+    n_static = _ramp_series_network("ramp_limit_start_up", [1] * 5, load)
+    n_static.c.generators.dynamic.ramp_limit_start_up = pd.DataFrame(
+        index=n_static.snapshots
+    )
+    n_static.c.generators.static.loc["gen", "ramp_limit_start_up"] = 0.4
+    n_static.optimize()
+    n_series.optimize()
+    assert n_static.objective == pytest.approx(n_series.objective)
+
+
+def _min_time_network(
+    weights, min_up, load_at, periods=None, kind="min_up_time"
+) -> pypsa.Network:
+    """Committable unit that is only needed at one snapshot, staying on costs."""
+    steps = len(weights)
+    if periods:
+        n = pypsa.Network(snapshots=range(steps // 2))
+        n.investment_periods = periods
+    else:
+        n = pypsa.Network(snapshots=range(steps))
+    for col in n.snapshot_weightings.columns:
+        n.snapshot_weightings[col] = np.array(weights, dtype=float)
+    n.add("Bus", "bus")
+    n.add(
+        "Generator",
+        "gen",
+        bus="bus",
+        p_nom=10,
+        committable=True,
+        stand_by_cost=1,
+        up_time_before=0,
+        **{kind: min_up},
+    )
+    n.add("Generator", "backup", bus="bus", p_nom=10, marginal_cost=100)
+    load = np.zeros(steps)
+    load[load_at] = 5
+    n.add("Load", "load", bus="bus", p_set=load)
+    return n
+
+
+def _status(n: pypsa.Network) -> list[int]:
+    return n.c.generators.dynamic.status["gen"].round().astype(int).tolist()
+
+
+@pytest.mark.parametrize(
+    ("hours", "expected"),
+    [(True, [0, 1, 1, 0, 0, 0]), (False, [0, 1, 1, 1, 0, 0])],
+)
+def test_min_up_time_hours_vs_snapshots(hours, expected):
+    n = _min_time_network([2] * 6, 3, 1)
+    with (
+        pypsa.option_context("params.optimize.durations_in_hours", hours),
+        nullcontext() if hours else pytest.warns(FutureWarning, match="2.0"),
+    ):
+        n.optimize()
+    assert _status(n) == expected
+
+
+def test_min_up_time_uneven_weightings():
+    n = _min_time_network([1, 1, 3, 1, 1, 1], 3, 1)
+    with pypsa.option_context("params.optimize.durations_in_hours", True):
+        n.optimize()
+    assert _status(n) == [0, 1, 1, 0, 0, 0]
+
+
+@pytest.mark.parametrize("hours", [True, False])
+def test_min_up_time_hourly_weightings_identical(hours):
+    n = _min_time_network([1] * 6, 3, 1)
+    with pypsa.option_context("params.optimize.durations_in_hours", hours):
+        n.optimize()
+    assert _status(n) == [0, 1, 1, 1, 0, 0]
+
+
+@pytest.mark.parametrize("hours", [True, False])
+def test_float_min_up_time_accepted(hours):
+    n = _min_time_network([1] * 6, 2.5, 1)
+    with pypsa.option_context("params.optimize.durations_in_hours", hours):
+        n.optimize()
+    assert _status(n) == [0, 1, 1, 1, 0, 0]
+
+
+@pytest.mark.parametrize(
+    ("hours", "expected"),
+    [(True, [0, 0, 1, 0, 0, 0]), (False, [0, 0, 1, 1, 1, 0])],
+)
+def test_min_up_time_hours_stop_at_period_start(hours, expected):
+    n = _min_time_network([1] * 6, 3, 2, periods=[2020, 2030])
+    # starting early costs more, so the start is at the end of the first period
+    n.c.generators.dynamic.stand_by_cost["gen"] = [5, 5, 1, 1, 1, 1]
+    with pypsa.option_context("params.optimize.durations_in_hours", hours):
+        n.optimize(multi_investment_periods=True)
+    assert _status(n) == expected
+
+
+def test_min_up_time_hours_zero_weighted_snapshot():
+    n = _min_time_network([1, 0, 1, 1, 1, 1], 3, 2)
+    with pypsa.option_context("params.optimize.durations_in_hours", True):
+        status, _ = n.optimize()
+    assert status == "ok"
+    assert _status(n)[2] == 1
+
+
+@pytest.mark.parametrize("zeros", [1, 2, 3])
+def test_min_up_time_hours_many_zero_weighted_snapshots(zeros):
+    weights = [1, *[0] * zeros, 1, 1]
+    n = _min_time_network(weights, 2, 0)
+    with pypsa.option_context("params.optimize.durations_in_hours", True):
+        n.optimize()
+    # the zero-weighted snapshots add no hours, so the unit stays on through
+    # the first snapshot after them
+    assert _status(n) == [1] * (zeros + 2) + [0]
+
+
+def _weighted_ramp_network(kind, weight=2, **gen_kwargs):
+    n = pypsa.Network(snapshots=range(4))
+    n.snapshot_weightings = pd.DataFrame(
+        weight, index=n.snapshots, columns=n.snapshot_weightings.columns
+    )
+    n.add("Bus", "bus")
+    n.add("Load", "load", bus="bus", p_set=[0, 100, 100, 100])
+    n.add("Generator", "backstop", bus="bus", p_nom=1000, marginal_cost=1000)
+    kw = {"p_nom": 100, "marginal_cost": 1, "ramp_limit_up": 0.1}
+    if kind in ("committable", "linearized", "com_ext"):
+        kw |= {
+            "committable": True,
+            "up_time_before": 0,
+            "ramp_limit_start_up": 0.1,
+        }
+    if kind == "com_ext":
+        kw |= {"p_nom_extendable": True, "p_nom_max": 100, "capital_cost": 0}
+    n.add("Generator", "gen", bus="bus", **(kw | gen_kwargs))
+    return n
+
+
+def _ramp_run(n, hours, **kwargs):
+    weighted = bool((n.snapshot_weightings.generators != 1).any())
+    with (
+        pypsa.option_context("params.optimize.durations_in_hours", hours),
+        pytest.warns(FutureWarning, match="2.0")
+        if weighted and not hours
+        else nullcontext(),
+    ):
+        status, _ = n.optimize(**kwargs)
+    assert status == "ok"
+    return n.c.generators.dynamic.p["gen"]
+
+
+@pytest.mark.parametrize("kind", ["fixed", "committable", "linearized", "com_ext"])
+@pytest.mark.parametrize(("hours", "step"), [(True, 20), (False, 10)])
+def test_ramp_limit_up_scaled_by_weighting(kind, hours, step):
+    n = _weighted_ramp_network(kind)
+    kwargs = {"linearized_unit_commitment": True} if kind == "linearized" else {}
+    p = _ramp_run(n, hours, **kwargs)
+    # the unit is on from the second snapshot and may ramp up from there
+    start = p.iloc[1]
+    assert p.iloc[2] - start == pytest.approx(step, abs=1e-4)
+
+
+@pytest.mark.parametrize("kind", ["fixed", "committable", "com_ext"])
+def test_ramp_limit_hourly_weightings_same_objective(kind):
+    objs = []
+    for hours in (True, False):
+        n = _weighted_ramp_network(kind, weight=1)
+        _ramp_run(n, hours)
+        objs.append(n.objective)
+    assert objs[0] == pytest.approx(objs[1])
+
+
+@pytest.mark.parametrize(("hours", "start"), [(True, 40), (False, 20)])
+def test_ramp_limit_start_up_scaled_by_weighting(hours, start):
+    n = _weighted_ramp_network(
+        "committable", ramp_limit_start_up=0.2, ramp_limit_up=1, p_min_pu=0.1
+    )
+    p = _ramp_run(n, hours)
+    assert p.iloc[1] == pytest.approx(start, abs=1e-4)
+
+
+@pytest.mark.parametrize("kind", ["fixed", "committable", "linearized", "com_ext"])
+@pytest.mark.parametrize(("hours", "step"), [(True, 20), (False, 10)])
+def test_ramp_limit_down_scaled_by_weighting(kind, hours, step):
+    kw = {"ramp_limit_down": 0.1, "ramp_limit_up": 1}
+    if kind != "fixed":
+        # a tight shut-down limit makes shutting down no way around ramp_limit_down
+        kw |= {
+            "up_time_before": 1,
+            "ramp_limit_start_up": 1,
+            "ramp_limit_shut_down": 0.1,
+            "p_min_pu": 0.05,
+        }
+    n = _weighted_ramp_network(kind, **kw)
+    n.loads_t.p_set["load"] = [100, 100, 100, 50]
+    kwargs = {"linearized_unit_commitment": True} if kind == "linearized" else {}
+    p = _ramp_run(n, hours, **kwargs)
+    # the load drops in the last snapshot, so the one before is one step above
+    assert p.iloc[2] == pytest.approx(50 + step, abs=1e-4)
+
+
+@pytest.mark.parametrize("kind", ["committable", "com_ext"])
+@pytest.mark.parametrize(("hours", "step"), [(True, 20), (False, 10)])
+def test_ramp_limit_shut_down_scaled_by_weighting(kind, hours, step):
+    n = _weighted_ramp_network(
+        kind,
+        ramp_limit_down=1,
+        ramp_limit_up=1,
+        ramp_limit_shut_down=0.1,
+        ramp_limit_start_up=1,
+        p_min_pu=0.1,
+        up_time_before=1,
+    )
+    n.loads_t.p_set["load"] = [100, 100, 100, 0]
+    p = _ramp_run(n, hours)
+    assert p.iloc[2] == pytest.approx(step, abs=1e-4)
+
+
+def _warn_network(weight=2, **gen_kwargs) -> pypsa.Network:
+    n = pypsa.Network(snapshots=range(3))
+    n.snapshot_weightings = pd.DataFrame(
+        weight, index=n.snapshots, columns=n.snapshot_weightings.columns
+    )
+    n.add("Bus", "bus")
+    n.add("Load", "load", bus="bus", p_set=10)
+    n.add("Generator", "gen", bus="bus", p_nom=100, marginal_cost=1, **gen_kwargs)
+    return n
+
+
+def _optimize_collecting_warnings(n, hours=False):
+    with (
+        pypsa.option_context("params.optimize.durations_in_hours", hours),
+        warnings.catch_warnings(record=True) as caught,
+    ):
+        warnings.simplefilter("always")
+        n.optimize()
+    return [w for w in caught if "durations_in_hours" in str(w.message)]
+
+
+def test_warn_legacy_durations_all_conditions():
+    n = _warn_network(ramp_limit_up=0.5)
+    with pytest.warns(FutureWarning, match="2.0.*durations_in_hours") as record:
+        with pypsa.option_context("params.optimize.durations_in_hours", False):
+            n.optimize()
+    assert len([w for w in record if "durations_in_hours" in str(w.message)]) == 1
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"ramp_limit_down": 0.5},
+        {"ramp_limit_start_up": 0.5, "committable": True},
+        {"ramp_limit_shut_down": 0.5, "committable": True},
+        {"committable": True, "min_up_time": 2},
+        {"committable": True, "min_down_time": 2},
+    ],
+)
+def test_warn_legacy_durations_each_attribute(kwargs):
+    n = _warn_network(**kwargs)
+    assert len(_optimize_collecting_warnings(n)) == 1
+
+
+def test_warn_legacy_durations_dynamic_ramp_limit():
+    n = _warn_network()
+    n.c.generators.dynamic.ramp_limit_up["gen"] = [1, 0.5, 1]
+    assert len(_optimize_collecting_warnings(n)) == 1
+
+
+def test_warn_no_warning_with_option_on():
+    n = _warn_network(ramp_limit_up=0.5)
+    assert _optimize_collecting_warnings(n, hours=True) == []
+
+
+def test_warn_no_warning_with_unit_weightings():
+    n = _warn_network(weight=1, ramp_limit_up=0.5)
+    assert _optimize_collecting_warnings(n) == []
+
+
+def test_warn_no_warning_without_ramp_limits_or_min_times():
+    n = _warn_network(committable=True)
+    assert _optimize_collecting_warnings(n) == []
+
+
+def test_warn_no_warning_for_inactive_component():
+    n = _warn_network(ramp_limit_up=0.5, active=False)
+    n.add("Generator", "backup", bus="bus", p_nom=100, marginal_cost=5)
+    assert _optimize_collecting_warnings(n) == []
+
+
+def test_warn_no_warning_for_min_time_without_committable():
+    n = _warn_network(min_up_time=2)
+    assert _optimize_collecting_warnings(n) == []
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"ramp_limit_up": 0.5}, {"committable": True, "min_up_time": 2}],
+)
+def test_warn_legacy_durations_stochastic(kwargs):
+    n = _warn_network(**kwargs)
+    n.add("Generator", "gen2", bus="bus", p_nom=100, marginal_cost=2)
+    n.set_scenarios({"low": 0.5, "high": 0.5})
+    with pypsa.option_context("params.optimize.durations_in_hours", False):
+        with pytest.warns(FutureWarning, match="durations_in_hours"):
+            n.optimize.create_model()
+
+
+def test_warn_no_warning_stochastic_attributes_in_different_scenarios():
+    n = _warn_network(committable=True)
+    n.add("Generator", "gen2", bus="bus", p_nom=100, marginal_cost=2)
+    n.set_scenarios({"low": 0.5, "high": 0.5})
+    n.c.generators.static.loc[("high", "gen2"), "min_up_time"] = 2
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pypsa.option_context("params.optimize.durations_in_hours", False):
+            n.optimize.create_model()
+    assert [w for w in caught if "durations_in_hours" in str(w.message)] == []

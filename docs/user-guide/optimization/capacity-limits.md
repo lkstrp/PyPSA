@@ -89,28 +89,30 @@ For components that are both committable and extendable with ramp limits, a big-
 
     | Constraint | Name |
     |-------------------|------------------|
-    | $(g_{n,s,t} - g_{n,s,t-1}) \leq ru_{n,s} \cdot G_{n,s} + M \cdot (1 - u_{n,s,t-1})$ | `Generator-p-ramp_limit_up-run-bigM` |
-    | $(g_{n,s,t} - g_{n,s,t-1}) \leq rs_{n,s} \cdot G_{n,s} + M \cdot (1 - su_{n,s,t})$ | `Generator-p-ramp_limit_up-start-bigM` |
-    | $(g_{n,s,t} - g_{n,s,t-1}) \geq -rd_{n,s} \cdot G_{n,s} - M \cdot (1 - u_{n,s,t})$ | `Generator-p-ramp_limit_down-run-bigM` |
-    | $(g_{n,s,t} - g_{n,s,t-1}) \geq -rsd_{n,s} \cdot G_{n,s} - M \cdot (1 - sd_{n,s,t})$ | `Generator-p-ramp_limit_down-shut-bigM` |
+    | $(g_{n,s,t} - g_{n,s,t-1}) \leq w_t^g \cdot ru_{n,s,t} \cdot G_{n,s} + M \cdot (1 - u_{n,s,t-1})$ | `Generator-p-ramp_limit_up-run-bigM` |
+    | $(g_{n,s,t} - g_{n,s,t-1}) \leq w_t^g \cdot rs_{n,s,t} \cdot G_{n,s} + M \cdot (1 - su_{n,s,t})$ | `Generator-p-ramp_limit_up-start-bigM` |
+    | $(g_{n,s,t} - g_{n,s,t-1}) \geq -w_t^g \cdot rd_{n,s,t} \cdot G_{n,s} - M \cdot (1 - u_{n,s,t})$ | `Generator-p-ramp_limit_down-run-bigM` |
+    | $(g_{n,s,t} - g_{n,s,t-1}) \geq -w_t^g \cdot rsd_{n,s,t} \cdot G_{n,s} - M \cdot (1 - sd_{n,s,t})$ | `Generator-p-ramp_limit_down-shut-bigM` |
 
 === "Link"
 
     | Constraint | Name |
     |-------------------|------------------|
-    | $(f_{l,t} - f_{l,t-1}) \leq ru_{l} \cdot F_{l} + M \cdot (1 - u_{l,t-1})$ | `Link-p-ramp_limit_up-run-bigM` |
-    | $(f_{l,t} - f_{l,t-1}) \leq rs_{l} \cdot F_{l} + M \cdot (1 - su_{l,t})$ | `Link-p-ramp_limit_up-start-bigM` |
-    | $(f_{l,t} - f_{l,t-1}) \geq -rd_{l} \cdot F_{l} - M \cdot (1 - u_{l,t})$ | `Link-p-ramp_limit_down-run-bigM` |
-    | $(f_{l,t} - f_{l,t-1}) \geq -rsd_{l} \cdot F_{l} - M \cdot (1 - sd_{l,t})$ | `Link-p-ramp_limit_down-shut-bigM` |
+    | $(f_{l,t} - f_{l,t-1}) \leq w_t^g \cdot ru_{l,t} \cdot F_{l} + M \cdot (1 - u_{l,t-1})$ | `Link-p-ramp_limit_up-run-bigM` |
+    | $(f_{l,t} - f_{l,t-1}) \leq w_t^g \cdot rs_{l,t} \cdot F_{l} + M \cdot (1 - su_{l,t})$ | `Link-p-ramp_limit_up-start-bigM` |
+    | $(f_{l,t} - f_{l,t-1}) \geq -w_t^g \cdot rd_{l,t} \cdot F_{l} - M \cdot (1 - u_{l,t})$ | `Link-p-ramp_limit_down-run-bigM` |
+    | $(f_{l,t} - f_{l,t-1}) \geq -w_t^g \cdot rsd_{l,t} \cdot F_{l} - M \cdot (1 - sd_{l,t})$ | `Link-p-ramp_limit_down-shut-bigM` |
 
 === "Process"
 
     | Constraint | Name |
     |-------------------|------------------|
-    | $(r_{m,t} - r_{m,t-1}) \leq ru_{m} \cdot R_{m} + M \cdot (1 - u_{m,t-1})$ | `Process-p-ramp_limit_up-run-bigM` |
-    | $(r_{m,t} - r_{m,t-1}) \leq rs_{m} \cdot R_{m} + M \cdot (1 - su_{m,t})$ | `Process-p-ramp_limit_up-start-bigM` |
-    | $(r_{m,t} - r_{m,t-1}) \geq -rd_{m} \cdot R_{m} - M \cdot (1 - u_{m,t})$ | `Process-p-ramp_limit_down-run-bigM` |
-    | $(r_{m,t} - r_{m,t-1}) \geq -rsd_{m} \cdot R_{m} - M \cdot (1 - sd_{m,t})$ | `Process-p-ramp_limit_down-shut-bigM` |
+    | $(r_{m,t} - r_{m,t-1}) \leq w_t^g \cdot ru_{m,t} \cdot R_{m} + M \cdot (1 - u_{m,t-1})$ | `Process-p-ramp_limit_up-run-bigM` |
+    | $(r_{m,t} - r_{m,t-1}) \leq w_t^g \cdot rs_{m,t} \cdot R_{m} + M \cdot (1 - su_{m,t})$ | `Process-p-ramp_limit_up-start-bigM` |
+    | $(r_{m,t} - r_{m,t-1}) \geq -w_t^g \cdot rd_{m,t} \cdot R_{m} - M \cdot (1 - u_{m,t})$ | `Process-p-ramp_limit_down-run-bigM` |
+    | $(r_{m,t} - r_{m,t-1}) \geq -w_t^g \cdot rsd_{m,t} \cdot R_{m} - M \cdot (1 - sd_{m,t})$ | `Process-p-ramp_limit_down-shut-bigM` |
+
+The factor $w_t^g$ is the snapshot weighting of the `generators` column if [`durations_in_hours`](unit-commitment.md#durations-in-hours) is enabled, and one otherwise. The start-up and shut-down ramp limits $rs$ and $rsd$ may be static or time series like $ru$ and $rd$.
 
 When the unit was running in the previous timestep ($u_{t-1} = 1$), the big-M term vanishes and the normal ramp-up limit $ru$ applies. When $u_{t-1} = 0$, the big-M relaxes the constraint, allowing unrestricted ramp-up. The start-up ramp limit $rs$ is enforced only during start-up events ($su_t = 1$). The same logic applies symmetrically to ramp-down and shut-down constraints.
 
@@ -128,10 +130,11 @@ These constraints are defined in the function `define_ramp_limit_constraints()`.
         | $su_{n,s,t}$      | `n.generators_t.start_up` | Decision variable |
         | $sd_{n,s,t}$      | `n.generators_t.shut_down` | Decision variable |
         | $M$               | auto-inferred or `committable_big_m` parameter | Parameter |
-        | $ru_{n,s}$        | `n.generators.ramp_limit_up` | Parameter |
-        | $rd_{n,s}$        | `n.generators.ramp_limit_down` | Parameter |
-        | $rs_{n,s}$        | `n.generators.ramp_limit_start_up` | Parameter |
-        | $rsd_{n,s}$       | `n.generators.ramp_limit_shut_down` | Parameter |
+        | $ru_{n,s,t}$        | `n.generators_t.ramp_limit_up` | Parameter |
+        | $rd_{n,s,t}$        | `n.generators_t.ramp_limit_down` | Parameter |
+        | $rs_{n,s,t}$        | `n.generators_t.ramp_limit_start_up` | Parameter |
+        | $rsd_{n,s,t}$       | `n.generators_t.ramp_limit_shut_down` | Parameter |
+        | $w_t^g$ | `n.snapshot_weightings.generators` | Parameter |
 
     === "Link"
 
@@ -143,10 +146,11 @@ These constraints are defined in the function `define_ramp_limit_constraints()`.
         | $su_{l,t}$        | `n.links_t.start_up` | Decision variable |
         | $sd_{l,t}$        | `n.links_t.shut_down` | Decision variable |
         | $M$               | auto-inferred or `committable_big_m` parameter | Parameter |
-        | $ru_{l}$          | `n.links.ramp_limit_up` | Parameter |
-        | $rd_{l}$          | `n.links.ramp_limit_down` | Parameter |
-        | $rs_{l}$          | `n.links.ramp_limit_start_up` | Parameter |
-        | $rsd_{l}$         | `n.links.ramp_limit_shut_down` | Parameter |
+        | $ru_{l,t}$          | `n.links_t.ramp_limit_up` | Parameter |
+        | $rd_{l,t}$          | `n.links_t.ramp_limit_down` | Parameter |
+        | $rs_{l,t}$          | `n.links_t.ramp_limit_start_up` | Parameter |
+        | $rsd_{l,t}$         | `n.links_t.ramp_limit_shut_down` | Parameter |
+        | $w_t^g$ | `n.snapshot_weightings.generators` | Parameter |
 
 
 ## Modularity Constraints

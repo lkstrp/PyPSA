@@ -477,6 +477,17 @@ options._add_option(
     "Setting False sets n.objective_constant to zero and improves LP numerical "
     "conditioning. None defaults to True with a FutureWarning (changes to False in v2.0).",
 )
+options._add_option(
+    "params.optimize.durations_in_hours",
+    False,
+    "Interpret `ramp_limit_up`, `ramp_limit_down`, `min_up_time` and "
+    "`min_down_time` in hours and per hour, using the 'generators' snapshot "
+    "weightings. If False, they count snapshots and ignore the weightings. "
+    "If True, ramp limits are scaled by the snapshot weighting, including the "
+    "start-up and shut-down ramp terms, and minimum times are lookbacks in "
+    "hours that stop at investment period boundaries. The default changes to "
+    "True in v2.0.",
+)
 
 options._add_option(
     "params.consistency.numerical_tolerance",

@@ -679,19 +679,23 @@ def check_generators(component: Components, strict: bool = False) -> None:
                 bad_uc_gens,
             )
 
-        p_min_pu = (
-            component.dynamic.p_min_pu.max()
-            .reindex(component.static.index)
-            .fillna(component.static.p_min_pu)
+        from pypsa.optimization.durations import (  # noqa: PLC0415
+            flagged_names,
+            ramp_weighting,
         )
+
+        p_min_pu = component.da.p_min_pu
+        committable = component.da.committable
         for ramp_limit, action in (
             ("ramp_limit_start_up", "starting up"),
             ("ramp_limit_shut_down", "shutting down"),
         ):
-            bad_uc_gens = component.static.index[
-                component.static.committable & (component.static[ramp_limit] < p_min_pu)
-            ]
-            if not bad_uc_gens.empty:
+            limit = component.da[ramp_limit]
+            if "snapshot" in limit.dims:
+                limit = limit * ramp_weighting(component.n, component.n.snapshots)
+            below = (limit < p_min_pu) & committable
+            bad_uc_gens = flagged_names(below)
+            if bad_uc_gens:
                 _log_or_raise(
                     strict,
                     "The following committable generators have %s below their"

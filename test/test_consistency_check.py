@@ -815,3 +815,58 @@ def test_nomansland_bus(caplog):
     )
 
     n.optimize()
+
+
+@pytest.mark.parametrize("ramp_limit", ["ramp_limit_start_up", "ramp_limit_shut_down"])
+def test_ramp_limit_series_below_p_min_pu_single_snapshot(
+    consistent_n, caplog, ramp_limit
+):
+    consistent_n.set_snapshots(range(3))
+    consistent_n.add(
+        "Generator",
+        "gen_two",
+        bus="one",
+        p_nom=10,
+        committable=True,
+        p_min_pu=0.5,
+        **{ramp_limit: pd.Series([0.8, 0.3, 0.8], index=consistent_n.snapshots)},
+    )
+    consistent_n.consistency_check()
+    messages = [r.message for r in caplog.records if "ramp_limit" in r.message]
+    assert len(messages) == 1
+    assert ramp_limit in messages[0]
+    assert "gen_two" in messages[0]
+
+
+@pytest.mark.parametrize("ramp_limit", ["ramp_limit_start_up", "ramp_limit_shut_down"])
+@pytest.mark.parametrize(("hours", "flagged"), [(True, False), (False, True)])
+def test_ramp_limit_below_p_min_pu_scaled_by_weighting(
+    consistent_n, caplog, ramp_limit, hours, flagged
+):
+    consistent_n.set_snapshots(range(3))
+    consistent_n.snapshot_weightings.loc[:, :] = 2
+    consistent_n.add(
+        "Generator",
+        "gen_two",
+        bus="one",
+        p_nom=10,
+        committable=True,
+        p_min_pu=0.5,
+        **{ramp_limit: 0.3},
+    )
+    with pypsa.option_context("params.optimize.durations_in_hours", hours):
+        consistent_n.consistency_check()
+    messages = [r.message for r in caplog.records if ramp_limit in r.message]
+    assert bool(messages) is flagged
+
+
+def test_ramp_limit_check_multiindex_snapshots_with_weighting():
+    n = pypsa.Network()
+    n.set_snapshots(range(2))
+    n.set_investment_periods([2030, 2040])
+    n.snapshot_weightings.loc[:, :] = 2
+    n.add("Bus", "bus")
+    n.add("Generator", "gen", bus="bus", p_nom=10)
+    # `.loc` assignment drops the snapshot index name, which the runtime guard rejects
+    with pypsa.option_context("debug.runtime_verification", False):
+        n.consistency_check()

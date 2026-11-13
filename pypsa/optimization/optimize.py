@@ -59,6 +59,7 @@ from pypsa.optimization.constraints import (
     define_total_supply_constraints,
     define_voltage_angle_constraints,
 )
+from pypsa.optimization.durations import warn_legacy_durations
 from pypsa.optimization.expressions import StatisticExpressionsAccessor
 from pypsa.optimization.flow_based import (
     NET_POSITION,
@@ -844,6 +845,8 @@ class OptimizationAccessor(OptimizationAbstractMixin):
 
         if consistency_check:
             n.consistency_check()
+
+        warn_legacy_durations(n, sns)
 
         include_objective_constant = _resolve_include_objective_constant(
             include_objective_constant

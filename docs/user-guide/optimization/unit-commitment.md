@@ -162,40 +162,40 @@ These constraints are defined in the function `define_operational_constraints_fo
 
 ## Ramping
 
-Ramp rate limits can be defined for increasing output $ru_{n,s,t}$ and decreasing output $rd_{n,s,t}$. By default these are null and ignored. They must be provided per unit of the nominal capacity.
+Ramp rate limits can be defined for increasing output $ru_{n,s,t}$ and decreasing output $rd_{n,s,t}$. By default these are null and ignored. They must be provided per unit of the nominal capacity. The ramp limits at start-up $rusu_{n,s,t}$ and shut-down $rdsd_{n,s,t}$ are static or time-varying, like $ru$ and $rd$, and the same holds for links and processes. The factor $w_t^g$ is the snapshot weighting of the `generators` column if [`durations_in_hours`](#durations-in-hours) is enabled, and one otherwise.
 
 !!! note
 
     When provided, ramping limits are also considered if they are not
     committable (`committable=False`), i.e. the component is not subject to start-up and shut-down constraints.
 
-A unified ramp constraint formulation is used for all component types (fixed, extendable, and committable). For committable components, additional ramp limits at start-up $rusu_{n,s}$ and shut-down $rdsd_{n,s}$ can be specified. The general form for $t \in \{1,\dots |T|-1\}$ is:
+A unified ramp constraint formulation is used for all component types (fixed, extendable, and committable). For committable components, additional ramp limits at start-up $rusu_{n,s,t}$ and shut-down $rdsd_{n,s,t}$ can be specified. The general form for $t \in \{1,\dots |T|-1\}$ is:
 
 === "Generator"
 
     | Constraint | Dual Variable | Name |
     |-------------------|------------------|------------------|
-    | $(g_{n,s,t} - g_{n,s,t-1}) \geq \left[ -rd_{n,s,t} \cdot u_{n,s,t} -rdsd_{n,s}(u_{n,s,t-1} - u_{n,s,t})\right] \hat{g}_{n,s}$ | `n.generators_t.mu_ramp_limit_down` | `Generator-p-ramp_limit_down` |
-    | $(g_{n,s,t} - g_{n,s,t-1}) \leq \left[ru_{n,s,t} \cdot u_{n,s,t-1} + rusu_{n,s} (u_{n,s,t} - u_{n,s,t-1})\right] \hat{g}_{n,s}$ | `n.generators_t.mu_ramp_limit_up` | `Generator-p-ramp_limit_up` |
+    | $(g_{n,s,t} - g_{n,s,t-1}) \geq w_t^g \left[ -rd_{n,s,t} \cdot u_{n,s,t} -rdsd_{n,s,t}(u_{n,s,t-1} - u_{n,s,t})\right] \hat{g}_{n,s}$ | `n.generators_t.mu_ramp_limit_down` | `Generator-p-ramp_limit_down` |
+    | $(g_{n,s,t} - g_{n,s,t-1}) \leq w_t^g \left[ru_{n,s,t} \cdot u_{n,s,t-1} + rusu_{n,s,t} (u_{n,s,t} - u_{n,s,t-1})\right] \hat{g}_{n,s}$ | `n.generators_t.mu_ramp_limit_up` | `Generator-p-ramp_limit_up` |
 
 === "Link"
 
     | Constraint | Dual Variable | Name |
     |-------------------|------------------|------------------|
-    | $(f_{l,t} - f_{l,t-1}) \geq \left[ -rd_{l,t} \cdot u_{l,t} -rdsd_{l,t}(u_{l,t-1} - u_{l,t})\right] \hat{f}_{l}$ | `n.links_t.mu_ramp_limit_down` | `Link-p-ramp_limit_down` |
-    | $(f_{l,t} - f_{l,t-1}) \leq \left[ru_{l,t} \cdot u_{l,t-1} + rusu_{l} (u_{l,t} - u_{l,t-1})\right] \hat{f}_{l}$ | `n.links_t.mu_ramp_limit_up` | `Link-p-ramp_limit_up` |
+    | $(f_{l,t} - f_{l,t-1}) \geq w_t^g \left[ -rd_{l,t} \cdot u_{l,t} -rdsd_{l,t}(u_{l,t-1} - u_{l,t})\right] \hat{f}_{l}$ | `n.links_t.mu_ramp_limit_down` | `Link-p-ramp_limit_down` |
+    | $(f_{l,t} - f_{l,t-1}) \leq w_t^g \left[ru_{l,t} \cdot u_{l,t-1} + rusu_{l,t} (u_{l,t} - u_{l,t-1})\right] \hat{f}_{l}$ | `n.links_t.mu_ramp_limit_up` | `Link-p-ramp_limit_up` |
 
 === "Process"
 
     | Constraint | Dual Variable | Name |
     |-------------------|------------------|------------------|
-    | $(r_{m,t} - r_{m,t-1}) \geq \left[ -rd_{m,t} \cdot u_{m,t} -rdsd_{m,t}(u_{m,t-1} - u_{m,t})\right] \hat{r}_{m}$ | `n.processes_t.mu_ramp_limit_down` | `Process-p-ramp_limit_down` |
-    | $(r_{m,t} - r_{m,t-1}) \leq \left[ru_{m,t} \cdot u_{m,t-1} + rusu_{m} (u_{m,t} - u_{m,t-1})\right] \hat{r}_{m}$ | `n.processes_t.mu_ramp_limit_up` | `Process-p-ramp_limit_up` |
+    | $(r_{m,t} - r_{m,t-1}) \geq w_t^g \left[ -rd_{m,t} \cdot u_{m,t} -rdsd_{m,t}(u_{m,t-1} - u_{m,t})\right] \hat{r}_{m}$ | `n.processes_t.mu_ramp_limit_down` | `Process-p-ramp_limit_down` |
+    | $(r_{m,t} - r_{m,t-1}) \leq w_t^g \left[ru_{m,t} \cdot u_{m,t-1} + rusu_{m,t} (u_{m,t} - u_{m,t-1})\right] \hat{r}_{m}$ | `n.processes_t.mu_ramp_limit_up` | `Process-p-ramp_limit_up` |
 
 For non-committable components, $u_{*,t} = 1$ for all $t$, so the constraints simplify to:
 
-- $(g_{n,s,t} - g_{n,s,t-1}) \geq -rd_{n,s,t} \cdot \hat{g}_{n,s}$
-- $(g_{n,s,t} - g_{n,s,t-1}) \leq ru_{n,s,t} \cdot \hat{g}_{n,s}$
+- $(g_{n,s,t} - g_{n,s,t-1}) \geq -w_t^g \cdot rd_{n,s,t} \cdot \hat{g}_{n,s}$
+- $(g_{n,s,t} - g_{n,s,t-1}) \leq w_t^g \cdot ru_{n,s,t} \cdot \hat{g}_{n,s}$
 
 For extendable components, $\hat{g}_{n,s}$ is replaced by the capacity variable $G_{n,s}$.
 
@@ -207,6 +207,16 @@ The ramp constraints require knowledge of the previous snapshot's dispatch. At t
 - **First snapshot of `n.snapshots` or no previous run**: The `p_init` attribute specifies the initial dispatch level. For committable components, the initial status is determined by `up_time_before > 0` (or `down_time_before > 0`, which takes precedence) and the initial dispatch is zero if the component was off. If `p_init` is not set (NaN), no ramp constraint is applied at the first snapshot. Non-committable components are always on; `up_time_before` and `down_time_before` are ignored for them.
 
 These constraints are defined in the function `define_ramp_limit_constraints()`.
+
+### Durations in hours
+
+By default, ramp limits and minimum up and down times are read in snapshots, regardless of the snapshot weightings. If the option `pypsa.options.params.optimize.durations_in_hours` is set to `True`, they are read in hours of the `generators` snapshot weighting instead:
+
+- The ramp limits $ru$, $rd$, $rusu$ and $rdsd$ are per unit of nominal capacity and hour. The ramp rows of snapshot $t$ are scaled by $w_t^g$, so that a snapshot with $w_t^g = 2$ allows twice the change in dispatch.
+- The minimum up time $T_{\textrm{min_up}}$ and down time $T_{\textrm{min_down}}$ are durations in hours. An earlier snapshot $t'$ counts towards the sum of a snapshot $t$ as long as the hours elapsed from the start of $t'$ to the start of $t$ are below the minimum time. Fractional values are accepted. In optimisations with several investment periods, the lookback stops at the start of the investment period.
+- `up_time_before` and `down_time_before` remain in snapshots.
+
+With hourly snapshot weightings both readings give the same results. The default will change to hours in PyPSA 2.0. Until then, a `FutureWarning` is raised if the option is off, a `generators` weighting differs from one, and a component has a ramp limit or minimum time that would be read differently.
 
 ??? note "Mapping of symbols to component attributes"
 
@@ -222,8 +232,9 @@ These constraints are defined in the function `define_ramp_limit_constraints()`.
         | $\bar{g}_{n,s,t}$ | `n.generators_t.p_max_pu` | Parameter |
         | $ru_{n,s,t}$ | `n.generators_t.ramp_limit_up` | Parameter |
         | $rd_{n,s,t}$ | `n.generators_t.ramp_limit_down` | Parameter |
-        | $rusu_{n,s}$     | `n.generators.ramp_limit_start_up` | Parameter |
-        | $rdsd_{n,s}$     | `n.generators.ramp_limit_shut_down` | Parameter |
+        | $rusu_{n,s,t}$     | `n.generators_t.ramp_limit_start_up` | Parameter |
+        | $rdsd_{n,s,t}$     | `n.generators_t.ramp_limit_shut_down` | Parameter |
+        | $w_t^g$ | `n.snapshot_weightings.generators` | Parameter |
         | $g_{n,s,0}$      | `n.generators.p_init` | Parameter (initial dispatch) |
 
     === "Link"
@@ -239,8 +250,9 @@ These constraints are defined in the function `define_ramp_limit_constraints()`.
         | $\bar{f}_{l,t}$   | `n.links_t.p_max_pu` | Parameter |
         | $ru_{l,t}$ | `n.links_t.ramp_limit_up` | Parameter |
         | $rd_{l,t}$ | `n.links_t.ramp_limit_down` | Parameter |
-        | $rusu_{l}$     | `n.links.ramp_limit_start_up` | Parameter |
-        | $rdsd_{l}$     | `n.links.ramp_limit_shut_down` | Parameter |
+        | $rusu_{l,t}$     | `n.links_t.ramp_limit_start_up` | Parameter |
+        | $rdsd_{l,t}$     | `n.links_t.ramp_limit_shut_down` | Parameter |
+        | $w_t^g$ | `n.snapshot_weightings.generators` | Parameter |
         | $f_{l,0}$      | `n.links.p_init` | Parameter (initial dispatch) |
 
     === "Process"
@@ -256,8 +268,9 @@ These constraints are defined in the function `define_ramp_limit_constraints()`.
         | $\bar{r}_{m,t}$   | `n.processes_t.p_max_pu` | Parameter |
         | $ru_{m,t}$ | `n.processes_t.ramp_limit_up` | Parameter |
         | $rd_{m,t}$ | `n.processes_t.ramp_limit_down` | Parameter |
-        | $rusu_{m}$     | `n.processes.ramp_limit_start_up` | Parameter |
-        | $rdsd_{m}$     | `n.processes.ramp_limit_shut_down` | Parameter |
+        | $rusu_{m,t}$     | `n.processes_t.ramp_limit_start_up` | Parameter |
+        | $rdsd_{m,t}$     | `n.processes_t.ramp_limit_shut_down` | Parameter |
+        | $w_t^g$ | `n.snapshot_weightings.generators` | Parameter |
         | $r_{m,0}$      | `n.processes.p_init` | Parameter (initial dispatch) |
 
 ## Linearization
@@ -276,34 +289,34 @@ n.optimize(linearized_unit_commitment=True)
 
     Linearized unit commitment cannot be used with [modular committable components](capacity-limits.md#modular-and-committable-components) and will result in a `ValueError`.
 
-To tighten the relaxation, additional constraints are introduced that improve capturing the relationship between commitment status, ramping, and dispatch. At the first snapshot they use the previous dispatch and status as described in [Initial Conditions](#initial-conditions) and are skipped if the previous dispatch is unknown. The tightening is only applied to units whose start-up and shut-down costs are equal in every snapshot; for the other units the unit commitment variables are purely relaxed and a warning is logged. The added constraints limit the dispatch during partial start-up and shut-down, as well as ramping during partial commitment:
+To tighten the relaxation, additional constraints are introduced that improve capturing the relationship between commitment status, ramping, and dispatch. At the first snapshot they use the previous dispatch and status as described in [Initial Conditions](#initial-conditions) and are skipped if the previous dispatch is unknown. The tightening is only applied to units whose start-up and shut-down costs are equal in every snapshot; for the other units the unit commitment variables are purely relaxed and a warning is logged. The added constraints limit the dispatch during partial start-up and shut-down, as well as ramping during partial commitment. If [`durations_in_hours`](#durations-in-hours) is enabled, the ramp limits in these constraints are scaled by $w_t^g$ as in the ramp constraints above:
 
 === "Generator"
 
     Constraint `Generator-com-p-before`:
 
     $$\begin{gather*}
-    g_{n,s,t-1} \leq rdsd_{n,s} \hat{g}_{n,s} \cdot u_{n,s,t-1} + (\bar{g}_{n,s,t} \hat{g}_{n,s} - rdsd_{n,s}  \hat{g}_{n,s}) \cdot (u_{n,s,t} - su_{n,s,t})
+    g_{n,s,t-1} \leq rdsd_{n,s,t} \hat{g}_{n,s} \cdot u_{n,s,t-1} + (\bar{g}_{n,s,t} \hat{g}_{n,s} - rdsd_{n,s,t}  \hat{g}_{n,s}) \cdot (u_{n,s,t} - su_{n,s,t})
     \end{gather*}$$
 
     Constraint `Generator-com-p-current`:
 
     $$\begin{gather*}
-    g_{n,s,t} \leq \bar{g}_{n,s,t} \hat{g}_{n,s} \cdot u_{n,s,t} - (\bar{g}_{n,s,t} \hat{g}_{n,s} - rusu_{n,s} \hat{g}_{n,s}) \cdot su_{n,s,t}
+    g_{n,s,t} \leq \bar{g}_{n,s,t} \hat{g}_{n,s} \cdot u_{n,s,t} - (\bar{g}_{n,s,t} \hat{g}_{n,s} - rusu_{n,s,t} \hat{g}_{n,s}) \cdot su_{n,s,t}
     \end{gather*}$$
 
     Constraint `Generator-com-partly-start-up`:
 
     $$\begin{gather*}
     g_{n,s,t} - g_{n,s,t-1} \leq (\underline{g}_{n,s,t} \hat{g}_{n,s} + ru_{n,s,t} \hat{g}_{n,s}) \cdot u_{n,s,t} - \underline{g}_{n,s,t} \hat{g}_{n,s} \cdot u_{n,s,t-1} \\
-    - (\underline{g}_{n,s,t} \hat{g}_{n,s} + ru_{n,s,t} \hat{g}_{n,s} - rusu_{n,s} \hat{g}_{n,s}) \cdot su_{n,s,t}
+    - (\underline{g}_{n,s,t} \hat{g}_{n,s} + ru_{n,s,t} \hat{g}_{n,s} - rusu_{n,s,t} \hat{g}_{n,s}) \cdot su_{n,s,t}
     \end{gather*}$$
 
     Constraint `Generator-com-partly-shut-down`:
 
     $$\begin{gather*}
-    g_{n,s,t-1} - g_{n,s,t} \leq rdsd_{n,s} \hat{g}_{n,s} \cdot u_{n,s,t-1} - (rdsd_{n,s} \hat{g}_{n,s} - rd_{n,s,t} \hat{g}_{n,s}) \cdot u_{n,s,t} \\
-    - (\underline{g}_{n,s,t} \hat{g}_{n,s} + rd_{n,s,t} \hat{g}_{n,s} - rdsd_{n,s} \hat{g}_{n,s}) \cdot su_{n,s,t}
+    g_{n,s,t-1} - g_{n,s,t} \leq rdsd_{n,s,t} \hat{g}_{n,s} \cdot u_{n,s,t-1} - (rdsd_{n,s,t} \hat{g}_{n,s} - rd_{n,s,t} \hat{g}_{n,s}) \cdot u_{n,s,t} \\
+    - (\underline{g}_{n,s,t} \hat{g}_{n,s} + rd_{n,s,t} \hat{g}_{n,s} - rdsd_{n,s,t} \hat{g}_{n,s}) \cdot su_{n,s,t}
     \end{gather*}$$
 
 === "Link"
@@ -311,27 +324,27 @@ To tighten the relaxation, additional constraints are introduced that improve ca
     Constraint `Link-com-p-before`:
 
     $$\begin{gather*}
-    f_{l,t-1} \leq rdsd_{l} \hat{f}_{l} \cdot u_{l,t-1} + (\bar{f}_{l,t} \hat{f}_{l} - rdsd_{l}  \hat{f}_{l}) \cdot (u_{l,t} - su_{l,t})
+    f_{l,t-1} \leq rdsd_{l,t} \hat{f}_{l} \cdot u_{l,t-1} + (\bar{f}_{l,t} \hat{f}_{l} - rdsd_{l,t}  \hat{f}_{l}) \cdot (u_{l,t} - su_{l,t})
     \end{gather*}$$
 
     Constraint `Link-com-p-current`:
 
     $$\begin{gather*}
-    f_{l,t} \leq \bar{f}_{l,t} \hat{f}_{l} \cdot u_{l,t} - (\bar{f}_{l,t} \hat{f}_{l} - rusu_{l} \hat{f}_{l}) \cdot su_{l,t}
+    f_{l,t} \leq \bar{f}_{l,t} \hat{f}_{l} \cdot u_{l,t} - (\bar{f}_{l,t} \hat{f}_{l} - rusu_{l,t} \hat{f}_{l}) \cdot su_{l,t}
     \end{gather*}$$
 
     Constraint `Link-com-partly-start-up`:
 
     $$\begin{gather*}
     f_{l,t} - f_{l,t-1} \leq (\underline{f}_{l,t} \hat{f}_{l} + ru_{l,t} \hat{f}_{l}) \cdot u_{l,t} - \underline{f}_{l,t} \hat{f}_{l} \cdot u_{l,t-1} \\
-    - (\underline{f}_{l,t} \hat{f}_{l} + ru_{l,t} \hat{f}_{l} - rusu_{l} \hat{f}_{l}) \cdot su_{l,t}
+    - (\underline{f}_{l,t} \hat{f}_{l} + ru_{l,t} \hat{f}_{l} - rusu_{l,t} \hat{f}_{l}) \cdot su_{l,t}
     \end{gather*}$$
 
     Constraint `Link-com-partly-shut-down`:
 
     $$\begin{gather*}
-    f_{l,t-1} - f_{l,t} \leq rdsd_{l} \hat{f}_{l} \cdot u_{l,t-1} - (rdsd_{l} \hat{f}_{l} - rd_{l,t} \hat{f}_{l}) \cdot u_{l,t} \\
-    - (\underline{f}_{l,t} \hat{f}_{l} + rd_{l,t} \hat{f}_{l} - rdsd_{l} \hat{f}_{l}) \cdot su_{l,t}
+    f_{l,t-1} - f_{l,t} \leq rdsd_{l,t} \hat{f}_{l} \cdot u_{l,t-1} - (rdsd_{l,t} \hat{f}_{l} - rd_{l,t} \hat{f}_{l}) \cdot u_{l,t} \\
+    - (\underline{f}_{l,t} \hat{f}_{l} + rd_{l,t} \hat{f}_{l} - rdsd_{l,t} \hat{f}_{l}) \cdot su_{l,t}
     \end{gather*}$$
 
 
