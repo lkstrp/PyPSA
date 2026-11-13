@@ -431,6 +431,51 @@ def test_prices(ac_dc_network_r):
         n.statistics.prices(groupby="not_an_attribute")
 
 
+def test_prices_investment_periods():
+    """Prices keep the investment period level like other time metrics."""
+    n = pypsa.Network()
+    n.snapshots = pd.MultiIndex.from_product(
+        [[2020, 2030], [0, 1]], names=["period", "timestep"]
+    )
+    n.investment_periods = [2020, 2030]
+    n.add("Bus", ["b1", "b2"], country="DE")
+    n.add("Load", "l1", bus="b1", p_set=10)
+    n.add("Load", "l2", bus="b2", p_set=30)
+    n.add(
+        "Generator",
+        "g1",
+        bus="b1",
+        p_nom=100,
+        marginal_cost=pd.Series([10, 10, 50, 50], index=n.snapshots),
+    )
+    n.add(
+        "Generator",
+        "g2",
+        bus="b2",
+        p_nom=100,
+        marginal_cost=pd.Series([20, 20, 70, 70], index=n.snapshots),
+    )
+    n.optimize(solver_name="highs")
+
+    prices = n.statistics.prices()
+    assert isinstance(prices, pd.DataFrame)
+    assert list(prices.columns) == [2020, 2030]
+    assert prices.loc["b1", 2020] == pytest.approx(10)
+    assert prices.loc["b1", 2030] == pytest.approx(50)
+
+    time_weighted = n.statistics.prices(weighting="time")
+    assert time_weighted.loc["b1", 2020] == pytest.approx(10)
+    assert time_weighted.loc["b1", 2030] == pytest.approx(50)
+
+    by_country = n.statistics.prices(groupby="country")
+    assert by_country.loc["DE", 2020] == pytest.approx(17.5)
+    assert by_country.loc["DE", 2030] == pytest.approx(65.0)
+
+    by_country_time = n.statistics.prices(groupby="country", weighting="time")
+    assert by_country_time.loc["DE", 2020] == pytest.approx(15.0)
+    assert by_country_time.loc["DE", 2030] == pytest.approx(60.0)
+
+
 def test_prices_load_weighting_stochastic(ac_dc_network_r, ac_dc_stochastic_r):
     """Load weights align on (scenario, name), not on the bare bus name."""
     deterministic = ac_dc_network_r.statistics.prices(weighting="load")
