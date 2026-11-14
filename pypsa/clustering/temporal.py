@@ -79,6 +79,47 @@ def _enforce_pu_bounds(n: Network) -> None:
             )
 
 
+def _tsam_segment(
+    df: pd.DataFrame, num_segments: int, solver: str
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """Segment a frame into ``num_segments`` with tsam, counting in steps.
+
+    The frame gets a synthetic hourly index, so one step is one hour for tsam
+    and a period of ``len(df)`` hours covers the whole horizon whatever the
+    real snapshot frequency.
+
+    Returns the segmented frame and the duration of each segment in steps.
+    """
+    import tsam  # noqa: PLC0415
+
+    df = df.copy()
+    df.index = pd.date_range("2000-01-01", periods=len(df), freq="h")
+
+    if hasattr(tsam, "aggregate"):  # tsam >= 3.0
+        result = tsam.aggregate(
+            df,
+            n_clusters=1,
+            period_duration=len(df),
+            segments=tsam.SegmentConfig(n_segments=num_segments),
+        )
+        segmented = result.cluster_representatives
+    else:  # tsam < 3.0
+        import tsam.timeseriesaggregation  # noqa: PLC0415
+
+        agg = tsam.timeseriesaggregation.TimeSeriesAggregation(
+            df,
+            hoursPerPeriod=len(df),
+            noTypicalPeriods=1,
+            noSegments=num_segments,
+            segmentation=True,
+            solver=solver,
+        )
+        segmented = agg.createTypicalPeriods()
+
+    durations = segmented.index.get_level_values("Segment Duration")
+    return segmented, np.asarray(durations, dtype=int)
+
+
 @dataclass
 class TemporalClustering:
     """Result of temporal clustering.
@@ -654,8 +695,6 @@ class TemporalClusteringMixin:
             )
             raise ModuleNotFoundError(msg)
 
-        import tsam  # noqa: PLC0415
-
         if exclude_attrs is None:
             exclude_attrs = ["e_min_pu"]
 
@@ -685,29 +724,8 @@ class TemporalClusteringMixin:
         df_normalized = combined.div(normalization_factors)
         df_normalized = df_normalized.fillna(0)
 
-        if hasattr(tsam, "aggregate"):  # tsam >= 3.0
-            result = tsam.aggregate(
-                df_normalized,
-                n_clusters=1,
-                period_duration=len(df_normalized),
-                segments=tsam.SegmentConfig(n_segments=num_segments),
-            )
-            segmented = result.cluster_representatives
-        else:  # tsam < 3.0
-            import tsam.timeseriesaggregation  # noqa: PLC0415
-
-            agg = tsam.timeseriesaggregation.TimeSeriesAggregation(
-                df_normalized,
-                hoursPerPeriod=len(df_normalized),
-                noTypicalPeriods=1,
-                noSegments=num_segments,
-                segmentation=True,
-                solver=solver,
-            )
-            segmented = agg.createTypicalPeriods()
-
-        weightings_raw = segmented.index.get_level_values("Segment Duration")
-        offsets = np.insert(np.cumsum(weightings_raw.values[:-1]), 0, 0).astype(int)
+        segmented, durations = _tsam_segment(df_normalized, num_segments, solver)
+        offsets = np.insert(np.cumsum(durations[:-1]), 0, 0)
         original_snapshots = n.snapshots
 
         if isinstance(original_snapshots, pd.DatetimeIndex):
@@ -718,11 +736,16 @@ class TemporalClusteringMixin:
         m = n.copy()
         m.set_snapshots(new_snapshots)
 
-        new_weightings = pd.DataFrame(
-            dict.fromkeys(n.snapshot_weightings.columns, weightings_raw.values),
-            index=new_snapshots,
+        segment_indices = (
+            np.searchsorted(offsets, np.arange(len(original_snapshots)), side="right")
+            - 1
         )
-        m.snapshot_weightings = new_weightings
+        snapshot_map = pd.Series(
+            np.asarray(new_snapshots)[segment_indices], index=original_snapshots
+        )
+        m.snapshot_weightings = (
+            n.snapshot_weightings.groupby(snapshot_map).sum().reindex(new_snapshots)
+        )
 
         segmented_values = segmented.values * normalization_factors.values
         segmented_df = pd.DataFrame(
@@ -738,14 +761,6 @@ class TemporalClusteringMixin:
                 m.c[comp].dynamic[attr][col_name] = data_col[col_name]
             else:
                 m._import_series_from_df(data_col, comp, attr, overwrite=True)
-
-        segment_indices = (
-            np.searchsorted(offsets, np.arange(len(original_snapshots)), side="right")
-            - 1
-        )
-        snapshot_map = pd.Series(
-            np.asarray(new_snapshots)[segment_indices], index=original_snapshots
-        )
 
         return TemporalClustering(m, snapshot_map)
 

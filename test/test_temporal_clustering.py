@@ -570,6 +570,88 @@ class TestSegmentFunctionality:
         assert isinstance(result.n, pypsa.Network)
         assert isinstance(result.snapshot_map, pd.Series)
 
+    def test_segment_unit_weightings_equal_durations(self, simple_network):
+        pytest.importorskip("tsam")
+        n = simple_network
+
+        result = n.cluster.temporal.get_segment_result(10)
+        weightings = result.n.snapshot_weightings
+
+        for col in n.snapshot_weightings.columns:
+            assert (weightings[col] > 0).all()
+            assert np.allclose(weightings[col], weightings[col].round())
+            assert weightings[col].sum() == 168
+        for col in weightings.columns[1:]:
+            pd.testing.assert_series_equal(
+                weightings[col], weightings.iloc[:, 0], check_names=False
+            )
+
+    def test_segment_snapshot_map_covers_all_snapshots(self, simple_network):
+        pytest.importorskip("tsam")
+        n = simple_network
+
+        result = n.cluster.temporal.get_segment_result(10)
+        snapshot_map = result.snapshot_map
+
+        assert snapshot_map.index.equals(n.snapshots)
+        assert snapshot_map.is_monotonic_increasing
+        assert set(snapshot_map.values) == set(result.n.snapshots)
+
+    def test_segment_starts_match_snapshot_map(self, simple_network):
+        pytest.importorskip("tsam")
+        n = simple_network
+
+        result = n.cluster.temporal.get_segment_result(10)
+        snapshot_map = result.snapshot_map
+        counts = snapshot_map.value_counts()
+
+        for start in result.n.snapshots:
+            assert start in n.snapshots
+            assert start in snapshot_map.values
+            assert result.n.snapshot_weightings.loc[start, "objective"] == counts[start]
+
+    def test_segment_non_hourly_full_horizon(self):
+        pytest.importorskip("tsam")
+        n = pypsa.Network()
+        n.set_snapshots(pd.date_range("2021-01-01", periods=48, freq="3h"))
+        n.snapshot_weightings.loc[:, :] = 3.0
+        n.add("Bus", "bus0")
+        n.add("Load", "load0", bus="bus0", p_set=50)
+        n.add(
+            "Generator",
+            "gen0",
+            bus="bus0",
+            p_nom=100,
+            p_max_pu=np.random.default_rng(1).uniform(0.0, 1.0, 48),
+        )
+
+        result = n.cluster.temporal.get_segment_result(8)
+        snapshot_map = result.snapshot_map
+        weightings = result.n.snapshot_weightings
+
+        for col in weightings.columns:
+            assert np.isclose(weightings[col].sum(), 144)
+        assert set(snapshot_map.values) == set(result.n.snapshots)
+        assert snapshot_map.iloc[-1] >= n.snapshots[16]
+        expected = n.snapshot_weightings.groupby(snapshot_map).sum()
+        pd.testing.assert_frame_equal(
+            weightings, expected.reindex(result.n.snapshots), check_names=False
+        )
+
+    def test_segment_keeps_mixed_weightings(self, simple_network):
+        pytest.importorskip("tsam")
+        n = simple_network
+        n.snapshot_weightings["objective"] = 2.0
+        n.snapshot_weightings["stores"] = 1.0
+        n.snapshot_weightings["generators"] = 0.5
+
+        weightings = n.cluster.temporal.segment(10).snapshot_weightings
+
+        assert np.isclose(weightings["objective"].sum(), 336)
+        assert np.isclose(weightings["stores"].sum(), 168)
+        assert np.isclose(weightings["generators"].sum(), 84)
+        assert not np.allclose(weightings["objective"], weightings["generators"])
+
 
 class TestStochasticNotSupported:
     """Temporal clustering should raise error for stochastic networks."""
