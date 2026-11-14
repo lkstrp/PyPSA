@@ -40,6 +40,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 ### Bug Fixes
 
+- **Behavior change**: Fix [`n.optimize.optimize_with_rolling_horizon()`][pypsa.optimization.OptimizationAccessor.optimize_with_rolling_horizon] leaving `e_initial` of stores and `state_of_charge_initial` of storage units at the level seeded for the last window. They now keep the values set before the run, so a second run starts from the same state. Also fix [`optimize_transmission_expansion_iteratively`][pypsa.optimization.OptimizationAccessor.optimize_transmission_expansion_iteratively] leaving extendable lines and DC links fixed, with `s_nom_extendable` / `p_nom_extendable` off, when the final solve raises. (<!-- md:pr XXXX -->)
 - Fix compatibility with linopy 1.0, keeping linopy 0.10 supported. Both the dense and the sparse linopy backend (`model_kwargs={"sparse": True}`) are now tested. (<!-- md:pr 2129 -->)
 - [`n.optimize.create_model()`][pypsa.optimization.OptimizationAccessor.create_model] now applies `pypsa.options.params.optimize.model_kwargs`, like [`n.optimize()`][pypsa.optimization.OptimizationAccessor.__call__]. (<!-- md:pr 2129 -->)
 - Setting `committable` on a component without unit commitment support, such as a StorageUnit or Store, now raises a clear error in the consistency check before the model is built, instead of failing with 'Variable StorageUnit-status already assigned'. (<!-- md:pr 2127 -->)

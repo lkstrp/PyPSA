@@ -525,10 +525,28 @@ def test_rolling_horizon_failed_window(caplog):
     assert "Optimization failed" in caplog.text
 
     n.c.generators.static.loc["gen", "e_sum_max"] = 1000
+    n.add("Store", "store", bus="bus", e_nom=10, cycles_max=2)
     with pytest.raises(RuntimeError, match=r"\[0:2\] failed"):
         n.optimize.optimize_with_rolling_horizon(horizon=3)
 
     assert n.c.generators.static.loc["gen", "e_sum_max"] == 1000
+    assert n.c.stores.static.loc["store", "cycles_max"] == 2
+
+
+def test_rolling_horizon_restores_tracked_limits():
+    n = pypsa.Network(snapshots=range(6))
+    n.add("Bus", "bus")
+    n.add("Generator", "gen", bus="bus", p_nom=100, marginal_cost=[1, 9] * 3)
+    n.add("Generator", "backup", bus="bus", p_nom=100, marginal_cost=50)
+    n.add("Generator", "capped", bus="bus", p_nom=50, e_sum_max=120, e_sum_min=60)
+    n.add("Load", "load", bus="bus", p_set=50)
+    n.add("Store", "store", bus="bus", e_nom=50, cycles_max=2)
+
+    n.optimize.optimize_with_rolling_horizon(horizon=2)
+
+    assert n.c.stores.static.loc["store", "cycles_max"] == 2
+    limits = n.c.generators.static.loc["capped", ["e_sum_min", "e_sum_max"]]
+    assert limits.to_list() == [60, 120]
 
 
 @pytest.mark.parametrize("consistency_check", [True, False])
@@ -644,3 +662,38 @@ def test_rolling_horizon_storage_standing_loss(component, level, kwargs):
     pd.testing.assert_frame_equal(
         rolling.c[component].dynamic[level], full.c[component].dynamic[level]
     )
+
+
+@pytest.mark.parametrize("stochastic", [False, True])
+def test_rolling_horizon_restores_storage_inputs(stochastic):
+    def build():
+        n = pypsa.Network(snapshots=range(4))
+        n.add("Bus", "bus")
+        n.add("Generator", "gen", bus="bus", p_nom=100, marginal_cost=[1, 9, 1, 9])
+        n.add("Load", "load", bus="bus", p_set=10)
+        n.add("Store", "store", bus="bus", e_nom=100, e_initial=10, standing_loss=0.1)
+        n.add(
+            "StorageUnit",
+            "su",
+            bus="bus",
+            p_nom=10,
+            max_hours=10,
+            state_of_charge_initial=20,
+        )
+        if stochastic:
+            n.set_scenarios({"a": 0.5, "b": 0.5})
+        return n
+
+    def inputs(n, c):
+        static = n.c[c].static
+        return static.drop(columns=static.filter(like="_opt").columns)
+
+    full, rolling = build(), build()
+    full.optimize()
+    rolling.optimize.optimize_with_rolling_horizon(horizon=2)
+
+    assert (rolling.c.stores.static.e_initial == 10).all()
+    assert (rolling.c.storage_units.static.state_of_charge_initial == 20).all()
+    # A plain solve only fills defaults and writes results, any other diff leaked.
+    for c in ("stores", "storage_units"):
+        pd.testing.assert_frame_equal(inputs(rolling, c), inputs(full, c))
