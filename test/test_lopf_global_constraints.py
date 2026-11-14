@@ -286,3 +286,116 @@ def test_transmission_cost_limit_overnight_cost():
     m = n.optimize.create_model()
     con = m.constraints["GlobalConstraint-cost_limit"]
     assert (con.coeffs == 100.0).all()
+
+
+def _constraint_rows(m, name):
+    """Terms, sign and rhs of each row of a constraint, keyed by scenario."""
+    data = m.constraints[name].data
+    scenarios = data.indexes["scenario"] if "scenario" in data.dims else [None]
+    rows = {}
+    for scenario in scenarios:
+        row = data if scenario is None else data.sel(scenario=scenario)
+        terms = {}
+        for label, coeff in zip(
+            row.vars.values.ravel(), row.coeffs.values.ravel(), strict=True
+        ):
+            if label < 0:
+                continue
+            var, pos = m.variables.get_label_position(int(label))
+            assert pos.get("scenario") == scenario
+            key = (var, pos["name"], pos["snapshot"])
+            terms[key] = terms.get(key, 0.0) + float(coeff)
+        rows[scenario] = (terms, str(row.sign.item()), float(row.rhs.item()))
+    return rows
+
+
+@pytest.mark.parametrize(
+    "mode", ["single", "continuous", "per_period", "stochastic_per_period"]
+)
+@pytest.mark.parametrize("component", ["StorageUnit", "Store"])
+@pytest.mark.parametrize("kind", ["primary_energy", "operational_limit"])
+def test_storage_carry_over_terms(kind, component, mode):
+    """Non-cyclic storage enters the global constraint as its window carry-over."""
+    emission = 0.5
+    constant = 3.0
+    initial = {"low": 6.0, "high": 4.0}
+    multi_invest = mode != "single"
+    per_period = mode in ("per_period", "stochastic_per_period")
+    years = {2030: 10.0, 2040: 20.0} if per_period else {2030: 1.0, 2040: 1.0}
+
+    n = pypsa.Network()
+    if multi_invest:
+        n.snapshots = pd.MultiIndex.from_product([[2030, 2040], [0, 1]])
+        n.investment_periods = [2030, 2040]
+        n.investment_period_weightings["years"] = pd.Series(years)
+    else:
+        n.snapshots = range(3)
+    n.add("Carrier", "gas", co2_emissions=emission)
+    n.add("Carrier", "wind")
+    n.add("Bus", "bus")
+    n.add("Load", "load", bus="bus", p_set=1)
+    n.add("Generator", "gen", bus="bus", carrier="wind", p_nom=2, marginal_cost=10)
+    if component == "StorageUnit":
+        var, initial_attr = "StorageUnit-state_of_charge", "state_of_charge_initial"
+        n.add(
+            "StorageUnit",
+            "storage",
+            bus="bus",
+            carrier="gas",
+            p_nom=10,
+            max_hours=1,
+            state_of_charge_initial=initial["low"],
+            state_of_charge_initial_per_period=per_period,
+        )
+    else:
+        var, initial_attr = "Store-e", "e_initial"
+        n.add(
+            "Store",
+            "storage",
+            bus="bus",
+            carrier="gas",
+            e_nom=10,
+            e_initial=initial["low"],
+            e_initial_per_period=per_period,
+        )
+    n.add(
+        "GlobalConstraint",
+        "limit",
+        type=kind,
+        carrier_attribute="co2_emissions" if kind == "primary_energy" else "gas",
+        sense="<=",
+        constant=constant,
+    )
+    if mode == "stochastic_per_period":
+        n.set_scenarios({"low": 0.5, "high": 0.5})
+        static = n.c[component].static
+        static.loc[("high", "storage"), initial_attr] = initial["high"]
+        scenarios = ["low", "high"]
+    else:
+        scenarios = [None]
+
+    m = n.optimize.create_model(multi_investment_periods=multi_invest)
+
+    factor = emission if kind == "primary_energy" else 1.0
+    if per_period:
+        weights = {(period, 1): w for period, w in years.items()}
+    elif multi_invest:
+        weights = {(2040, 1): 1.0}
+    else:
+        weights = {2: 1.0}
+    expected = {}
+    for scenario in scenarios:
+        level = initial[scenario or "low"]
+        terms = {(var, "storage", sn): -factor * w for sn, w in weights.items()}
+        rhs = constant - factor * level * sum(weights.values())
+        expected[scenario] = (terms, "<=", rhs)
+
+    rows = _constraint_rows(m, "GlobalConstraint-limit")
+    assert rows.keys() == expected.keys()
+    for scenario, (terms, sign, rhs) in expected.items():
+        got_terms, got_sign, got_rhs = rows[scenario]
+        assert got_terms.keys() == terms.keys()
+        for key, coeff in terms.items():
+            assert got_terms[key] == pytest.approx(coeff)
+        assert got_sign == sign
+        assert got_rhs == pytest.approx(rhs)
