@@ -674,6 +674,103 @@ def test_max_growth_constraint_excludes_retired_asset():
     assert int(labels["new"]) in vars_in(2030)
 
 
+def _growth_limit_network(cheap_on):
+    n = pypsa.Network()
+    n.snapshots = pd.MultiIndex.from_product([[2030, 2040], [0]])
+    n.investment_periods = [2030, 2040]
+    n.add("Bus", ["bus", "abroad"])
+    n.add("Carrier", "gas")
+    n.add("Carrier", "solar", max_growth=100)
+    n.add("Carrier", "cheap", max_growth=7)
+    n.add("Load", "load", bus="bus", p_set=50)
+    n.add("Generator", "gas", bus="bus", carrier="gas", p_nom=50, marginal_cost=100)
+    asset = {"capital_cost": 1, "build_year": 2030, "lifetime": 50}
+    n.add(
+        "Generator",
+        "pv",
+        bus="bus",
+        carrier="solar",
+        p_nom_extendable=True,
+        capital_cost=10,
+        build_year=2030,
+        lifetime=50,
+    )
+    if cheap_on in ("Link", "both"):
+        n.add("Generator", "supply", bus="abroad", carrier="gas", p_nom=50)
+        n.add(
+            "Link",
+            "cheap",
+            bus0="abroad",
+            bus1="bus",
+            carrier="cheap",
+            p_nom_extendable=True,
+            **asset,
+        )
+    if cheap_on in ("Generator", "both"):
+        n.add(
+            "Generator",
+            "cheap-gen" if cheap_on == "both" else "cheap",
+            bus="bus",
+            carrier="cheap",
+            p_nom_extendable=True,
+            **asset,
+        )
+    return n
+
+
+@pytest.mark.parametrize("cheap_on", ["Generator", "Link"])
+def test_max_growth_constraint_per_carrier_across_components(cheap_on):
+    n = _growth_limit_network(cheap_on)
+    n.optimize.create_model(multi_investment_periods=True)
+    con = n.model.constraints["Carrier-growth_limit"]
+
+    assert set(con.labels.dims) == {"Carrier", "periods"}
+    assert set(con.indexes["Carrier"]) == {"solar", "cheap"}
+    rhs = con.rhs.sel(periods=2030)
+    assert rhs.sel(Carrier="cheap").item() == 7
+    assert rhs.sel(Carrier="solar").item() == 100
+
+    pv = int(n.model.variables["Generator-p_nom"].labels.sel(name="pv"))
+    cheap = int(n.model.variables[f"{cheap_on}-p_nom"].labels.sel(name="cheap"))
+
+    def vars_in(carrier):
+        v = con.vars.sel(Carrier=carrier, periods=2030).values.ravel()
+        return set(v[v != -1])
+
+    assert vars_in("solar") == {pv}
+    assert vars_in("cheap") == {cheap}
+
+    n.optimize.solve_model()
+    p_nom_opt = n.c[cheap_on].static.p_nom_opt
+    almost_equal(n.c.generators.static.p_nom_opt["pv"], 43)
+    almost_equal(p_nom_opt["cheap"], 7)
+
+
+def test_max_relative_growth_constraint_sums_carrier_across_components():
+    n = _growth_limit_network("both")
+    n.c.carriers.static.at["cheap", "max_relative_growth"] = 0.5
+    n.optimize.create_model(multi_investment_periods=True)
+    con = n.model.constraints["Carrier-growth_limit"]
+
+    assert set(con.labels.dims) == {"Carrier", "periods"}
+    gen = int(n.model.variables["Generator-p_nom"].labels.sel(name="cheap-gen"))
+    link = int(n.model.variables["Link-p_nom"].labels.sel(name="cheap"))
+    for period in n.investment_periods:
+        assert con.labels.sel(Carrier="cheap", periods=period).size == 1
+    v = con.vars.sel(Carrier="cheap", periods=2030).values.ravel()
+    assert set(v[v != -1]) == {gen, link}
+
+    def coeffs_in(carrier, period):
+        row = con.sel(Carrier=carrier, periods=period)
+        v, c = row.vars.values.ravel(), row.coeffs.values.ravel()
+        return {int(var): coeff for var, coeff in zip(v, c) if var != -1 and coeff}
+
+    pv = int(n.model.variables["Generator-p_nom"].labels.sel(name="pv"))
+    assert coeffs_in("cheap", 2040) == {gen: -0.5, link: -0.5}
+    assert coeffs_in("solar", 2040) == {}
+    assert coeffs_in("solar", 2030) == {pv: 1}
+
+
 def test_store_primary_energy_and_operational_limit_constraint_without_per_period():
     """Test that Store with primary energy constraint raises NotImplementedError without e_initial_per_period."""
 

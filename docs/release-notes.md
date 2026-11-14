@@ -40,6 +40,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 ### Bug Fixes
 
+- Fix the carrier growth limits `max_growth` and `max_relative_growth` in multi-period optimisation. Limited carriers on different component types, such as a Generator and a Link, now each get their own constraint row instead of being added to one carrier's row, and with pandas 3.1 each carrier is no longer bounded by the limits of all other limited carriers. (<!-- md:pr XXXX -->)
 - Fix compatibility with linopy 1.0, keeping linopy 0.10 supported. Both the dense and the sparse linopy backend (`model_kwargs={"sparse": True}`) are now tested. (<!-- md:pr 2129 -->)
 - [`n.optimize.create_model()`][pypsa.optimization.OptimizationAccessor.create_model] now applies `pypsa.options.params.optimize.model_kwargs`, like [`n.optimize()`][pypsa.optimization.OptimizationAccessor.__call__]. (<!-- md:pr 2129 -->)
 - Setting `committable` on a component without unit commitment support, such as a StorageUnit or Store, now raises a clear error in the consistency check before the model is built, instead of failing with 'Variable StorageUnit-status already assigned'. (<!-- md:pr 2127 -->)
