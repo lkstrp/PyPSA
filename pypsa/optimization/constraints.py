@@ -306,7 +306,8 @@ def _status_history(
 
     Snapshots solved in previous runs are read from `status`. The time before
     `n.snapshots` is reconstructed from `up_time_before` and `down_time_before`.
-    Non-committable components are always on.
+    Non-committable components are always on. For fixed modular components the
+    status counts installed modules.
     """
     start_i = _window_start(n, sns)
     solved = min(start_i, length) if not c.dynamic.status.empty else 0
@@ -314,6 +315,12 @@ def _status_history(
     up = c.da.up_time_before.sel(name=idx)
     down = c.da.down_time_before.sel(name=idx)
     before = where(down > 0, rel > down, rel <= up).astype(float)
+    # A fixed modular unit that was on had all its installed modules on
+    fix_mod_i = idx.intersection(c.modulars).difference(c.extendables)
+    if not fix_mod_i.empty:
+        nom = c.da[c._operational_attrs["nom"]].sel(name=fix_mod_i)
+        nom_mod = c.da[c._operational_attrs["nom_mod"]].sel(name=fix_mod_i)
+        before = before * (nom / nom_mod).reindex(name=idx, fill_value=1.0)
     before = before.assign_coords(lag=rel + solved)
     parts = [before]
     if solved:
@@ -1149,12 +1156,6 @@ def define_ramp_limit_constraints(
     s_init = _status_history(n, c, idx, sns, 1).squeeze("lag", drop=True)
     p_init = _dispatch_before(n, c, idx, sns, s_init)
     mask.loc[{"snapshot": sns[0]}] = p_init.notnull()
-    is_com_fix_mod = is_com_mod & ~is_ext
-    if is_com_fix_mod.any() and (not _window_start(n, sns) or c.dynamic.status.empty):
-        # Before n.snapshots the status is a 0/1 flag, so a unit that was on
-        # counts all its installed modules as on
-        modules = c.da[nom_attr].sel(name=idx) / c.da[nom_mod_attr].sel(name=idx)
-        s_init = s_init.where(~is_com_fix_mod, s_init * modules)
 
     # skip starts of periods except the first where p_init is used
     boundary = window.period_start_mask()

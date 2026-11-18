@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 from contextlib import nullcontext
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -1507,6 +1508,53 @@ def test_modular_min_down_time_holds_back_shut_down_module(extendable):
         n_mod_label = int(n.model.variables["Generator-n_mod"].labels.sel(name="gen"))
         con = n.model.constraints["Generator-com-down-time"]
         assert (con.lhs.vars == n_mod_label).any()
+
+
+def _modular_unit_network(rolling: bool = False, **unit: Any) -> pypsa.Network:
+    n = pypsa.Network(snapshots=range(3))
+    n.add("Bus", "b")
+    n.add("Load", "load", bus="b", p_set=40)
+    n.add("Generator", "backup", bus="b", p_nom=100, marginal_cost=100)
+    n.add(
+        "Generator",
+        "unit",
+        bus="b",
+        p_nom=40,
+        p_nom_mod=10,
+        committable=True,
+        marginal_cost=1,
+        **unit,
+    )
+    if rolling:
+        n.optimize.optimize_with_rolling_horizon(
+            horizon=1, overlap=0, solver_name="highs"
+        )
+    else:
+        status, _ = n.optimize(solver_name="highs")
+        assert status == "ok"
+    return n
+
+
+def test_modular_up_time_before_counts_all_modules():
+    """A unit on before the horizon has all its modules on (issue #2114)."""
+    n = _modular_unit_network(start_up_cost=100, up_time_before=1)
+    assert n.c.generators.dynamic.start_up["unit"].tolist() == [0, 0, 0]
+    assert n.objective == pytest.approx(120)
+
+
+def test_modular_down_time_before_holds_back_all_modules():
+    """A unit shut down before the horizon keeps all modules off (issue #2114)."""
+    n = _modular_unit_network(min_down_time=3, up_time_before=0, down_time_before=1)
+    assert n.c.generators.dynamic.status["unit"].tolist() == [0, 0, 4]
+    assert n.objective == pytest.approx(8040)
+
+
+def test_modular_down_time_before_rolling_horizon():
+    """Windows mix solved status with the status before the horizon (issue #2114)."""
+    n = _modular_unit_network(
+        rolling=True, min_down_time=3, up_time_before=0, down_time_before=1
+    )
+    assert n.c.generators.dynamic.status["unit"].tolist() == [0, 0, 4]
 
 
 @pytest.mark.parametrize("linearized", [False, True])
