@@ -63,6 +63,7 @@ from pypsa.version import __version_base__
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterator, Sequence
 
+    from datarecord.protocols import RecordLike
     from scipy.sparse import spmatrix
 
     from pypsa.components.legacy import Component
@@ -87,6 +88,11 @@ class Network(
 
     <!-- md:badge-version v0.1.0 --> | <!-- md:guide design.md -->
     """
+
+    deduplicated_names: dict[str, dict[str, str]]
+    """Renames `{Type: {old: new}}` made by the last import to keep names unique
+    across entity types, see [pypsa.network.names.deduplicate_names][]. Empty on a
+    fresh network or when no name clashed."""
 
     # Optimization
     _multi_invest: int
@@ -139,6 +145,9 @@ class Network(
         # Set attributes
         self._name = name
         self._meta: dict = {}
+        self.deduplicated_names = {}
+        self._record: RecordLike | None = None
+        self._names_unchecked = False
         self._crs: CRS = CRS.from_epsg(DEFAULT_EPSG)
 
         # Dimensions
@@ -201,13 +210,57 @@ class Network(
             elif str(import_name).endswith((".xls", ".xlsx", ".xlsm", ".xlsb")):
                 self.import_from_excel(import_name)
             elif isinstance(import_name, Path) and import_name.is_dir():
-                self.import_from_csv_folder(import_name)
+                if (import_name / "manifest.json").is_file():
+                    self.import_from_datarecord(import_name)
+                else:
+                    self.import_from_csv_folder(import_name)
             else:
-                msg = f"import_name '{import_name}' is not a valid .h5 file, .nc file or directory."
+                msg = (
+                    f"import_name '{import_name}' is not a valid .h5 file, .nc file, "
+                    "Excel file, csv folder or datarecord folder."
+                )
                 raise ValueError(msg)
 
         for key, value in kwargs.items():
             setattr(self, key, value)
+
+    @classmethod
+    def from_datarecord(cls, record: RecordLike) -> Network:
+        """Open a datarecord `Record`, or a selection of one, as a network, reading its frames lazily.
+
+        Requires the optional `datarecord` package
+        (`pip install 'pypsa[datarecord]'`). A selection (`record.select(...)`)
+        opens the smaller network of its labels: a squeezed `period` is a
+        single-period network, a squeezed `scenario` a deterministic one.
+
+        Parameters
+        ----------
+        record : RecordLike
+            The record to build from, e.g. `Workspace.process().at(path)`, or
+            a `Selection` of it.
+
+        Returns
+        -------
+        pypsa.Network
+            The network the record describes.
+
+        Raises
+        ------
+        UnsupportedRecordError
+            If the record lacks something a network needs.
+        ValueError
+            If a selection squeezes a dim but `period`, `scenario` or a dim of
+            the record's own, holds no snapshot, or keeps scenarios weighing
+            nothing in all, or if an attribute's rows name several labels of a
+            dim PyPSA holds it without.
+
+        """
+        from pypsa.network.io._common import require_datarecord  # noqa: PLC0415
+
+        require_datarecord()
+        from pypsa.network.io.datarecord import PyPSA  # noqa: PLC0415
+
+        return PyPSA.open(record)
 
     def __str__(self) -> str:
         """Get a string representation of the network.
@@ -320,8 +373,17 @@ class Network(
 
     def __setstate__(self, state: dict) -> None:
         """Restore state and the references lost on pickling."""
-        self.__dict__.update(state)
+        self.__dict__.update({"_record": None, **state})
         self._restore_references()
+
+    def __getstate__(self) -> dict:
+        """Pickle without the record the network was opened from."""
+        return {**self.__dict__, "_record": None}
+
+    @property
+    def record(self) -> RecordLike | None:
+        """Record the network was opened from, `None` if it was not opened from one."""
+        return self._record
 
     def __copy__(self) -> Network:
         """Return a shallow copy, sharing data and SubNetwork objects with the original."""
@@ -333,6 +395,8 @@ class Network(
         """Return a deep copy, including SubNetwork objects linked to the copy."""
         n = self.__class__.__new__(self.__class__)
         memo[id(self)] = n
+        if self._record is not None:
+            memo[id(self._record)] = None
         n.__dict__.update(copy.deepcopy(self.__dict__, memo))
         n._copy_sub_networks(memo)
         n._restore_references()

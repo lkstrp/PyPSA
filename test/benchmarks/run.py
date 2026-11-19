@@ -1,0 +1,386 @@
+# SPDX-FileCopyrightText: PyPSA Contributors
+#
+# SPDX-License-Identifier: MIT
+
+"""Benchmark CLI: `python test/benchmarks/run.py`. See README.md."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import platform
+import statistics
+import subprocess
+import sys
+import time
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+
+GATED_PREFIXES = ("w3_", "w4_")
+TOLERANCE = 1.05
+BASE = "w0_import_pypsa"
+# (record workload, `.nc` workload, spec bound on their wall-time ratio)
+SPEC_PAIRS = (
+    ("w1_record_one_attribute", "w1_nc_one_attribute", 0.2),
+    ("w1_record_eight", "w1_nc_eight", 0.2),
+    ("w2_record_open_touch_export_nc", "w2_nc_import_export", 1.5),
+)
+MEMORY_BOUND = 3.0
+
+
+def _version(name: str) -> str | None:
+    try:
+        return version(name)
+    except PackageNotFoundError:
+        return None
+
+
+def host() -> dict:
+    """Describe the machine and package versions."""
+    return {
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "cpu_count": os.cpu_count(),
+        "pypsa": _version("pypsa"),
+        "datarecord": _version("datarecord"),
+        "duckdb": _version("duckdb"),
+    }
+
+
+def compare(
+    current: dict, baseline: dict, tolerance: float = TOLERANCE
+) -> tuple[dict[str, float], list[str], dict[str, tuple[float, float]]]:
+    """Compare two result files by wall time.
+
+    Returns
+    -------
+    ratios : dict[str, float]
+        Current over baseline wall time per workload present in both.
+    failed : list[str]
+        Gated workloads (W3, W4) whose ratio exceeds `tolerance`.
+    spec : dict[str, tuple[float, float]]
+        Informational W1 and W2 rows of `current` alone: the measured ratio
+        and its spec bound. Never gates. The memory ratio subtracts the peak
+        RSS of the `pypsa` import (`import_peak_rss_mb`, else W0's row).
+
+    """
+    ratios = {
+        name: res["wall_s"] / baseline["results"][name]["wall_s"]
+        for name, res in current["results"].items()
+        if name in baseline["results"]
+    }
+    failed = [
+        name
+        for name, ratio in ratios.items()
+        if name.startswith(GATED_PREFIXES) and ratio > tolerance
+    ]
+    return ratios, failed, spec_rows(current)
+
+
+def spec_rows(current: dict) -> dict[str, tuple[float, float]]:
+    """Return the informational W1 and W2 rows of one result dict, never gated."""
+    results = current["results"]
+    spec: dict[str, tuple[float, float]] = {}
+    for record, nc, bound in SPEC_PAIRS:
+        if record in results and nc in results:
+            spec[record] = (results[record]["wall_s"] / results[nc]["wall_s"], bound)
+    one = results.get("w1_record_one_attribute", {})
+    base_rss = current.get(
+        "import_peak_rss_mb", results.get(BASE, {}).get("peak_rss_mb")
+    )
+    if "attribute_mb" in one and base_rss is not None:
+        spec["w1_record_one_attribute peak_rss/attribute (net of import)"] = (
+            (one["peak_rss_mb"] - base_rss) / one["attribute_mb"],
+            MEMORY_BOUND,
+        )
+    return spec
+
+
+def _run_child(
+    name: str, paths: dict, python: str = sys.executable, cwd: Path | None = None
+) -> tuple[float, float, float | None]:
+    """Run one workload in a fresh interpreter; return wall s, peak RSS MB, attribute MB.
+
+    `python` picks the interpreter, and with it the installed `pypsa`; the
+    harness and workloads are always this checkout's.
+    """
+    cmd = [python, str(Path(__file__).resolve()), "--one", name]
+    cmd += ["--paths", json.dumps(paths)]
+    start = time.perf_counter()
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, cwd=cwd) as proc:  # noqa: S603
+        out = proc.stdout.read() if proc.stdout else ""
+        # wait4 reports this child's own usage; RUSAGE_CHILDREN is a running maximum
+        _, status, usage = os.wait4(proc.pid, 0)
+        wall = time.perf_counter() - start
+        proc.returncode = os.waitstatus_to_exitcode(status)
+    if proc.returncode:
+        msg = f"workload {name} failed with exit code {proc.returncode}"
+        raise RuntimeError(msg)
+    scale = 1 if sys.platform == "darwin" else 1024
+    peak = usage.ru_maxrss * scale / 2**20
+    attribute = json.loads(out.strip().splitlines()[-1]).get("attribute_mb")
+    return wall, peak, attribute
+
+
+def run_all(names: list[str], snapshots: int, repeat: int, root: Path) -> dict:
+    """Run the workloads and return the result dict."""
+    from fixtures import build_paths  # noqa: PLC0415
+
+    paths = build_paths(root, snapshots).to_dict()
+    results: dict[str, dict] = {}
+    for name in [BASE, *[n for n in names if n != BASE]]:
+        runs = [_run_child(name, paths) for _ in range(repeat)]
+        entry: dict = {
+            "wall_s": statistics.median(r[0] for r in runs),
+            "peak_rss_mb": max(r[1] for r in runs),
+        }
+        if runs[0][2] is not None:
+            entry["attribute_mb"] = runs[0][2]
+        results[name] = entry
+        print(f"{name}: {entry}", file=sys.stderr, flush=True)
+    import_rss = results[BASE]["peak_rss_mb"]
+    base = results[BASE]["wall_s"]
+    for name, entry in results.items():
+        if name != BASE:
+            entry["wall_s"] = max(entry["wall_s"] - base, 1e-3)
+    if BASE not in names:
+        del results[BASE]
+    return {
+        "host": host(),
+        "snapshots": snapshots,
+        "import_peak_rss_mb": import_rss,
+        "results": results,
+    }
+
+
+def table(data: dict) -> str:
+    """Render the results as a Markdown table."""
+    lines = [
+        f"Snapshots: {data['snapshots']}. Wall time minus `import pypsa` where the workload imports it.",
+        "",
+        "| workload | wall_s | peak_rss_mb | attribute_mb |",
+        "|---|---:|---:|---:|",
+    ]
+    for name, res in data["results"].items():
+        attr = f"{res['attribute_mb']:.1f}" if "attribute_mb" in res else ""
+        lines.append(
+            f"| {name} | {res['wall_s']:.2f} | {res['peak_rss_mb']:.0f} | {attr} |"
+        )
+    return "\n".join(lines)
+
+
+def _one(name: str, paths: dict) -> None:
+    from fixtures import Paths  # noqa: PLC0415
+    from workloads import WORKLOADS  # noqa: PLC0415
+
+    value = WORKLOADS[name].fn(Paths(**paths))
+    attribute = None if value is None else value / 2**20
+    print(json.dumps({"attribute_mb": attribute}))
+
+
+def resolve_base(rev: str | None) -> str:
+    """Return `rev`, else the PR's base branch on `origin`, else `origin/master`."""
+    if rev:
+        return rev
+    ref = os.environ.get("GITHUB_BASE_REF")
+    return f"origin/{ref}" if ref else "origin/master"
+
+
+def run_relative(
+    names: list[str],
+    snapshots: int,
+    repeat: int,
+    root: Path,
+    base_rev: str,
+    head_rev: str | None,
+) -> dict:
+    """Measure `names` alternately on `base_rev` and the head, and return the result dict.
+
+    The head is this working tree unless `head_rev` is given, in which case it
+    is checked out like the base.
+    """
+    from contextlib import ExitStack  # noqa: PLC0415
+
+    from fixtures import build_paths  # noqa: PLC0415
+    from relative import (  # noqa: PLC0415
+        checkout,
+        current_side,
+        interleave,
+        is_dirty,
+        relative_results,
+        rev_sha,
+    )
+
+    revs = {"base": rev_sha(base_rev), "head": rev_sha(head_rev or "HEAD")}
+    if head_rev is None and is_dirty():
+        revs["head"] += "-dirty"
+    load_start = os.getloadavg()
+    print(f"load_avg at start: {_load(load_start)}", file=sys.stderr, flush=True)
+    # absolute, since the base side's children run inside its worktree
+    paths = build_paths(root.resolve(), snapshots).to_dict()
+    with ExitStack() as stack:
+        base = stack.enter_context(checkout(revs["base"]))
+        head = (
+            stack.enter_context(checkout(revs["head"], label="head"))
+            if head_rev
+            else current_side()
+        )
+        runs = interleave(names, paths, base, head, repeat)
+    load_end = os.getloadavg()
+    print(f"load_avg at end: {_load(load_end)}", file=sys.stderr, flush=True)
+    result = relative_results(runs)
+    import_rss = result["head"][BASE]["peak_rss_mb"]
+    if BASE not in names:
+        for key in ("base", "head", "ratios"):
+            result[key].pop(BASE, None)
+    return {
+        "host": host(),
+        "snapshots": snapshots,
+        "repeat": repeat,
+        "revs": revs,
+        "load_avg": {"start": list(load_start), "end": list(load_end)},
+        "import_peak_rss_mb": import_rss,
+        **result,
+    }
+
+
+def _load(avg: tuple[float, ...] | list[float]) -> str:
+    return " ".join(f"{x:.2f}" for x in avg)
+
+
+def _print_absolute(data: dict, baseline: dict) -> int:
+    ratios, failed, spec = compare(data, baseline)
+    print("\n| workload | ratio to baseline |\n|---|---:|")
+    for name, ratio in ratios.items():
+        gate = " (gated)" if name.startswith(GATED_PREFIXES) else ""
+        print(f"| {name}{gate} | {ratio:.2f} |")
+    _print_spec(spec)
+    if failed:
+        print(f"\nFAILED (above {TOLERANCE}x): {', '.join(failed)}")
+        return 1
+    return 0
+
+
+def _print_spec(spec: dict[str, tuple[float, float]]) -> None:
+    if spec:
+        print("\n| workload (informational) | ratio | spec bound |\n|---|---:|---:|")
+        for name, (ratio, bound) in spec.items():
+            print(f"| {name} | {ratio:.2f} | {bound:g} |")
+
+
+def _print_relative(data: dict) -> int:
+    revs, ratios = data["revs"], data["ratios"]
+    print(
+        f"Base {revs['base'][:10]}, head {revs['head'][:10]}"
+        f"{'-dirty' if revs['head'].endswith('-dirty') else ''}, "
+        f"{data['repeat']} rounds, {data['snapshots']} snapshots. "
+        f"load_avg {_load(data['load_avg']['start'])} -> {_load(data['load_avg']['end'])}."
+    )
+
+    def rows(names: list[str]) -> None:
+        print(
+            "| workload | base wall_s | head wall_s | head/base |\n|---|---:|---:|---:|"
+        )
+        for name in names:
+            base = data["base"].get(name, {}).get("wall_s")
+            head = data["head"].get(name, {}).get("wall_s")
+            cells = [
+                "n/a" if v is None else f"{v:.2f}" for v in (base, head, ratios[name])
+            ]
+            print(f"| {name} | {' | '.join(cells)} |")
+
+    gated = [n for n in ratios if n.startswith(GATED_PREFIXES)]
+    other = [n for n in ratios if n not in gated]
+    if gated:
+        print(f"\nGated (fails above {TOLERANCE}):\n")
+        rows(gated)
+    if other:
+        print("\nInformational:\n")
+        rows(other)
+    _print_spec(
+        spec_rows(
+            {"results": data["head"], "import_peak_rss_mb": data["import_peak_rss_mb"]}
+        )
+    )
+    if data["failed"]:
+        print(f"\nFAILED (above {TOLERANCE}x): {', '.join(data['failed'])}")
+        return 1
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the CLI."""
+    parser = argparse.ArgumentParser(prog="python test/benchmarks/run.py")
+    parser.add_argument("--snapshots", type=int, default=8760)
+    parser.add_argument("--workloads", help="comma-separated names, default all")
+    parser.add_argument(
+        "--repeat", type=int, default=3, help="runs, or rounds with --check"
+    )
+    parser.add_argument("--out", type=Path)
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="gate head against --base, both measured alternately in this run",
+    )
+    parser.add_argument(
+        "--base",
+        help="base rev for --check, default origin/$GITHUB_BASE_REF or origin/master",
+    )
+    parser.add_argument("--head", help="head rev for --check, default the working tree")
+    parser.add_argument(
+        "--baseline", type=Path, help="result JSON to compare absolute wall times with"
+    )
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=Path.home() / ".cache" / "pypsa" / "benchmarks",
+    )
+    parser.add_argument("--one", help="internal: run one workload in this process")
+    parser.add_argument("--paths", help="internal: fixture paths as JSON")
+    parser.add_argument("--compare", type=Path, help="compare this JSON, run nothing")
+    args = parser.parse_args(argv)
+
+    if args.one:
+        _one(args.one, json.loads(args.paths))
+        return 0
+    if args.check and args.compare:
+        parser.error("--check measures a run; use --compare with --baseline")
+    if (args.base or args.head) and not args.check:
+        parser.error("--base and --head need --check")
+    if args.check and args.baseline:
+        parser.error("--check compares against --base, not --baseline")
+
+    if args.compare:
+        data = json.loads(args.compare.read_text())
+    else:
+        from workloads import WORKLOADS  # noqa: PLC0415
+
+        names = args.workloads.split(",") if args.workloads else list(WORKLOADS)
+        unknown = set(names) - set(WORKLOADS)
+        if unknown:
+            parser.error(f"unknown workloads: {sorted(unknown)}")
+        if args.check:
+            data = run_relative(
+                names,
+                args.snapshots,
+                args.repeat,
+                args.root,
+                resolve_base(args.base),
+                args.head,
+            )
+        else:
+            data = run_all(names, args.snapshots, args.repeat, args.root)
+            print(table(data))
+        if args.out:
+            args.out.write_text(json.dumps(data, indent=2) + "\n")
+
+    if args.check:
+        return _print_relative(data)
+    if args.baseline:
+        return _print_absolute(data, json.loads(args.baseline.read_text()))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

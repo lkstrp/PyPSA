@@ -64,6 +64,7 @@ gurobipy = ["gurobipy"]
 cloudpath = ["cloudpathlib"]
 dotenv = ["python-dotenv"]
 tsam = ["tsam"]
+datarecord = ["datarecord; python_version >= '3.12'"]
 test = [
     "pytest",
     "pytest-cov",
@@ -86,6 +87,7 @@ dev = [
     "jupyter>=1.1.1",
     "typing-extensions>=4.14.0",
     "reuse>=5.1.1",
+    "datarecord; python_version >= '3.12'",
 ]
 docs = [
     "mkdocs-material",
@@ -108,10 +110,16 @@ docs = [
     "cartopy>=0.16",
 ]
 
+[tool.uv.sources]
+datarecord = { git = "https://github.com/energy-models/datarecord", rev = "8889d623865e3cab80d7a18681e48a6c2536741d" }
+
 # setuptools_scm settings
 
 [tool.setuptools_scm]
 version_scheme = "no-guess-dev"
+
+# Only release tags (v*) count, so other tags on a commit cannot become its version.
+git_describe_command = "git describe --dirty --tags --long --match 'v*'"
 
 [tool.setuptools.packages.find]
 include = ["pypsa"]
@@ -156,6 +164,7 @@ filterwarnings = [
 ]
 markers = [
     "mpl_image_compare",
+    "slow: long-running tests such as the benchmark harness smoke test",
 ]
 
 # Coverage settings
@@ -174,6 +183,7 @@ exclude_also = [
 [tool.mypy]
 exclude = ['dev/*', 'examples/*', 'docs/*']
 ignore_missing_imports = true
+explicit_package_bases = true
 no_implicit_optional = true
 warn_unused_ignores = true
 show_error_code_links = true
@@ -272,6 +282,19 @@ ignore = [
     'ARG',   # flake8-unused-arguments
     'PL',    # pylint
     'TRY'    # tryceratops
+]
+
+# The datarecord tool is moved verbatim from the datarecord package
+"pypsa/network/io/datarecord/**" = [
+    'D102',   # Missing docstring in public method
+    'D401',   # First line of docstring should be in imperative mood
+    'D404',   # First word of the docstring should not be "This"
+    'D417',   # Missing argument descriptions in the docstring
+    'PLC0415', # import outside top-level (breaks import cycles)
+    'PLR0917', # Too many positional arguments
+    'S608',   # SQL built from strings (DuckDB relation expressions)
+    'TC002',  # Move third-party import into a type-checking block
+    'TC003',  # Move standard library import into a type-checking block
 ]
 
 # Ignore for test files

@@ -15,16 +15,24 @@ logger = logging.getLogger(__name__)
 def test_ac_dc_meshed():
     n = pypsa.examples.ac_dc_meshed()
     assert not n.c.buses.static.empty
+    assert "marginal_cost" not in n.c.carriers.static.columns
 
 
 def test_storage_hvdc():
     n = pypsa.examples.storage_hvdc()
     assert not n.c.buses.static.empty
+    assert list(n.c.loads.static.index) == [f"load {i}" for i in range(6)]
+    assert list(n.c.lines.static.index) == [str(i) for i in range(6)]
 
 
 def test_scigrid_de():
     n = pypsa.examples.scigrid_de()
     assert not n.c.buses.static.empty
+    lines = set(n.c.lines.static.index)
+    assert not lines & set(n.c.loads.static.index)
+    assert not lines & set(n.c.transformers.static.index)
+    clashing = {"frequency", "operator", "osm_name", "ref", "voltage", "wkt_srid_4326"}
+    assert not clashing & set(n.c.buses.static.columns)
 
 
 def test_model_energy():
