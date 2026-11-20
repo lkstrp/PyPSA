@@ -72,7 +72,7 @@ from pypsa.network.io.datarecord.schema import (
     _input_names,
     _is_output,
     _output_attributes,
-    _port_attribute,
+    _port_column,
     _port_names,
     _port_role,
     _port_stems,
@@ -576,7 +576,7 @@ def _connection_rows(c: pypsa.Components) -> pd.DataFrame:
     static = c.static
     frames = []
     for port in c.ports:
-        column = _port_attribute("bus", port, c.defaults.index)
+        column = _port_column(c.port_table, BUS, port)
         if column not in static.columns:
             continue
         attached = static[static[column].astype(str) != ""]
@@ -1672,7 +1672,7 @@ class _NetworkSource:
         """
         con = self.con
         static = c.static
-        bus_column = _port_attribute(BUS, port, c.defaults.index)
+        bus_column = _port_column(c.port_table, BUS, port)
         if bus_column not in static.columns:
             return None
         # `static` is `(scenario, name)`-indexed on a stochastic network; a

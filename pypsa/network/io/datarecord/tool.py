@@ -24,6 +24,7 @@ from duckdb import (
 
 if TYPE_CHECKING:
     import pypsa
+from pypsa.components.ports import port_table
 from pypsa.descriptors import _update_ports_component_attrs
 from pypsa.network.io._common import (
     _broadcast_standard_types,
@@ -51,8 +52,7 @@ from pypsa.network.io.datarecord.schema import (
     REQUIRED_DIMS,
     SCENARIO,
     SNAPSHOT,
-    _port_attribute,
-    _registered,
+    _port_column,
     _shape_properties,
     _taken,
 )
@@ -391,10 +391,9 @@ class PyPSATool(Tool):
             connections = read[ctype].connections if ctype in read else None
             if connections is None:
                 continue
-            registered = _registered(ctype)
+            table = port_table(ctype)
             ports = {
-                _port_attribute(BUS, port, registered)
-                for port in connections["port"].unique()
+                _port_column(table, BUS, port) for port in connections["port"].unique()
             }
             _update_ports_component_attrs(
                 n, where=pd.DataFrame(columns=sorted(ports)), c_name=ctype

@@ -40,14 +40,10 @@ class Processes(_Multiport):
     """
 
     _operational_variables = ["p"]
-    _unsuffixed_attrs: set[str] = set()
 
     @property
     def _output_ports(self) -> list[str]:
         return self.ports
-
-    def _port_suffix(self, port: str | int) -> str:
-        return str(port)
 
     @property
     def _coefficient_attr(self) -> str:

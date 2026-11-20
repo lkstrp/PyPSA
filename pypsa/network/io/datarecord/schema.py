@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import math
-import re
 from collections.abc import Container, Iterable, Mapping
 from dataclasses import dataclass
 from functools import cache
@@ -22,6 +21,10 @@ from datarecord.schema.specs import (
     PropertySpec,
 )
 from duckdb import Expression
+
+from pypsa.components.ports import PortTable, port_table
+from pypsa.components.types import all_components
+from pypsa.components.types import get as get_component_type
 
 if TYPE_CHECKING:
     import pypsa
@@ -320,38 +323,20 @@ _INPUT_PORT, _OUTPUT_PORT, _SINGLE_PORT = "input", "output", "attached"
 _ROLES = (_INPUT_PORT, _OUTPUT_PORT, _SINGLE_PORT)
 
 
-_PORT_SUFFIX = re.compile(r"(.+?)(\d+)")
-
-
 @cache
-def _per_port_stems() -> frozenset[str]:
+def _record_stems() -> frozenset[str]:
     """Every attribute stem some PyPSA type carries once per port, inputs and results alike.
 
     A record stores each as one bus-keyed attribute, so these are the names
-    whose port suffix is undone on write. Read off the registry: a name ending
-    in one of its type's port indices (`bus0`, `p1`, `rate0`, `delay1`), and
-    the stems a multi-port type leaves unsuffixed at port `1` (a Link's
-    `efficiency`, `delay`, `cyclic_delay`), which no suffix gives away.
+    whose port suffix is undone on write. Multiport types fill the union, which
+    also bus-keys a one-port type's `p`.
 
     Notes
     -----
     - [ports](https://energy-models.github.io/datarecord/design/tools/pypsa/#ports)
 
     """
-    import pypsa
-
-    n = pypsa.Network()
-    stems: set[str] = set()
-    for ctype in n.all_components:
-        c = n.components[ctype]
-        ports = set(c.ports) - {""}
-        stems |= set(getattr(c, "_unsuffixed_attrs", ()))
-        stems |= {
-            match.group(1)
-            for attr in c.defaults.index
-            if (match := _PORT_SUFFIX.fullmatch(attr)) and match.group(2) in ports
-        }
-    return frozenset(stems)
+    return frozenset().union(*(port_table(t).stems for t in all_components))
 
 
 def _port_role(port: str) -> str:
@@ -371,49 +356,20 @@ def _port_role(port: str) -> str:
     return _INPUT_PORT if port == "0" else _OUTPUT_PORT
 
 
-def _port_attribute(stem: str, port: str, registered: Container[str]) -> str:
-    """PyPSA's name for `stem` at `port`: `bus0`, `p1`, `efficiency`, `efficiency2`, ...
+def _port_column(table: PortTable, stem: str, port: str) -> str:
+    """PyPSA's column for `stem` at the record's string `port`.
 
-    A stem PyPSA registers at port `0` (`bus0`, `p0`, `q0`, `rate0`) is suffixed from
-    `0`; one it does not (`efficiency`) leaves port `1` unsuffixed and is
-    suffixed from `2`. A one-port type's port `""` is the bare stem. That quirk
-    is why a record keys connections by bus instead.
-
-    Parameters
-    ----------
-    registered
-        The type's attribute names, `c.defaults.index`, which say whether
-        `stem` starts at port `0`.
-
-    Notes
-    -----
-    - [ports](https://energy-models.github.io/datarecord/design/tools/pypsa/#ports)
-
+    `""` is a bare `bus` attachment, a one-port type's or a GlobalConstraint's,
+    which the record keeps as a connection though the table counts no port.
     """
-    if port == "1" and f"{stem}0" not in registered:
-        return stem
-    return f"{stem}{port}"
+    return stem if port == "" else table.column(stem, int(port))
 
 
-def _carries(stem: str, port: str, registered: Container[str]) -> bool:
-    """Whether PyPSA has a `stem` column at `port`.
-
-    A port the bare registry declares carries only the stems it registers
-    there (a Link's bus0 has no `efficiency0`); one beyond it is an
-    additional port, which PyPSA gives every per-port stem (`efficiency2`).
-    """
-    return (
-        _port_attribute(stem, port, registered) in registered
-        or _port_attribute(BUS, port, registered) not in registered
-    )
-
-
-@cache
-def _registered(ctype: str) -> frozenset[str]:
-    """`ctype`'s attribute names in PyPSA's bare registry, for `_port_attribute`."""
-    from pypsa.components.types import get as get_component_type
-
-    return frozenset(get_component_type(ctype).defaults.index)
+def _port_carries(table: PortTable, stem: str, port: str) -> bool:
+    """Whether PyPSA has a `stem` column at the record's string `port`."""
+    if port == "":
+        return stem in get_component_type(table.name).defaults.index
+    return table.carries(stem, int(port))
 
 
 def _is_output(defaults: pd.DataFrame, attr: str) -> bool:
@@ -433,12 +389,13 @@ def _is_output(defaults: pd.DataFrame, attr: str) -> bool:
 
 def _port_names(c: pypsa.Components) -> dict[str, tuple[str, str]]:
     """Per-port attribute name -> `(stem, port)`, for this type's actual ports."""
+    table = c.port_table
     registered = c.defaults.index
     return {
         name: (stem, port)
-        for stem in sorted(_per_port_stems())
+        for stem in sorted(_record_stems())
         for port in c.ports
-        if (name := _port_attribute(stem, port, registered)) in registered
+        if (name := _port_column(table, stem, port)) in registered
     }
 
 

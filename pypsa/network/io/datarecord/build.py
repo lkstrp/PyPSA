@@ -33,6 +33,7 @@ from duckdb import StarExpression as star
 
 if TYPE_CHECKING:
     import pypsa
+from pypsa.components.ports import port_table
 from pypsa.network.io._common import (
     _apply_network_attributes,
     _apply_snapshots_import,
@@ -49,10 +50,9 @@ from pypsa.network.io.datarecord.schema import (
     SCENARIO,
     SNAPSHOT,
     TIMESTEP,
-    _carries,
-    _per_port_stems,
-    _port_attribute,
-    _registered,
+    _port_carries,
+    _port_column,
+    _record_stems,
     _registry_schema,
     _shape_properties,
     _taken,
@@ -344,7 +344,7 @@ def _ordered_connections(
             [*within, "_role_rank"], kind="stable"
         )
     # A single-attachment component keeps PyPSA's unsuffixed `bus`, so its port
-    # is the empty index rather than `0` (`_port_attribute`).
+    # is the empty index rather than `0` (`_port_column`).
     # `dropna=False`: a dim left NULL means "every value of it" (https://energy-models.github.io/datarecord/design/model/attributes/#the-broadcast-rule), which
     # is an ordinary group here, not a row to drop.
     grouped = df.groupby(within, dropna=False)
@@ -406,9 +406,9 @@ class _TypeMembers:
         if self.connections is None or self.members is None:
             return frozenset()
         members = {entity for (entity,) in self.members.project(col(ENTITY)).fetchall()}
-        registered = _registered(ctype)
+        table = port_table(ctype)
         return frozenset(
-            _port_attribute(BUS, port, registered)
+            _port_column(table, BUS, port)
             for port, rows in self.connections.groupby("port")
             if members <= set(rows[ENTITY])
         )
@@ -446,15 +446,15 @@ def _collapse_connections(
     # instead: every row shares its value, and the join below matches on the
     # dims that actually distinguish rows.
     varying = [d for d in index[1:] if connections[d].notna().any()]
-    registered = _registered(ctype)
-    stems = [BUS, *(s for s in sorted(_per_port_stems() - {BUS}) if s in connections)]
+    table = port_table(ctype)
+    stems = [BUS, *(s for s in sorted(_record_stems() - {BUS}) if s in connections)]
     pieces = []
     for stem in stems:
         piece = connections.pivot(
             index=["entity", *varying], columns="port", values=stem
         )
-        piece = piece[[p for p in piece if _carries(stem, p, registered)]]
-        piece.columns = [_port_attribute(stem, port, registered) for port in piece]
+        piece = piece[[p for p in piece if _port_carries(table, stem, p)]]
+        piece.columns = [_port_column(table, stem, port) for port in piece]
         pieces.append(piece if stem == BUS else piece.dropna(axis=1, how="all"))
     wide = pd.concat(pieces, axis=1).reset_index()  # noqa: F841 - queried by name below
     ports = con.sql("FROM wide").set_alias("ports")
@@ -507,7 +507,7 @@ def _port_columns(
     row naming no connection of the entity is dropped, as a value for no
     member is.
 
-    Only the ports that carry `stem` (`_carries`).
+    Only the ports that carry `stem` (`_port_carries`).
 
     Parameters
     ----------
@@ -530,11 +530,11 @@ def _port_columns(
         .join(ports, ex_all(col("v", c) == col("ports", c) for c in (ENTITY, BUS)))
         .project(*(col("v", c) for c in long.columns if c != BUS), col("ports", "port"))
     )
-    registered = _registered(ctype)
+    table = port_table(ctype)
     columns = {
-        _port_attribute(stem, port, registered): port
+        _port_column(table, stem, port): port
         for port in connections["port"].unique()
-        if _carries(stem, port, registered)
+        if _port_carries(table, stem, port)
     }
     return {
         column: placed.filter(col("port") == lit(port))

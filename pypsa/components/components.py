@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Collection
 
     from pypsa import Network
+    from pypsa.components.ports import PortTable
     from pypsa.definitions.components import ComponentType
 
     PortsLike = Literal["all"] | str | int | Collection[str] | Collection[int]  # noqa: PYI051
@@ -911,6 +912,26 @@ class Components(
         return [
             match.group(1) for col in self.static if (match := RE_PORTS.search(col))
         ]
+
+    @property
+    def port_table(self) -> PortTable:
+        """Port table of this component type.
+
+        Returns
+        -------
+        pypsa.components.PortTable
+            The cached table of `pypsa.components.port_table(self.name)`.
+
+        Examples
+        --------
+        >>> c = n.components.links
+        >>> c.port_table.column("efficiency", 2)
+        'efficiency2'
+
+        """
+        from pypsa.components.ports import port_table  # noqa: PLC0415
+
+        return port_table(self.name)
 
     def _as_port(self, port: int | str) -> int:
         """Convert a single port specification to an integer index.

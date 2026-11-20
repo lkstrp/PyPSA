@@ -26,6 +26,7 @@ from pypsa.components._types import (
 )
 from pypsa.components.components import Components
 from pypsa.components.legacy import Component
+from pypsa.components.ports import PortTable, port_table
 
 
 def __getattr__(name: str) -> Any:
@@ -57,4 +58,6 @@ __all__ = [
     "Processes",
     "TransformerTypes",
     "Transformers",
+    "PortTable",
+    "port_table",
 ]

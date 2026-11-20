@@ -185,6 +185,7 @@ nav:
       - Process: api/components/types/processes.md
       - Shapes: api/components/types/shapes.md
     - Utilities: api/components/common.md
+    - Port Table: api/components/ports.md
   - Other:
     - Consistency Checks: api/other/consistency.md
     - Examples: api/other/api-examples.md
