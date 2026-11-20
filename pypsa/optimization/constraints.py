@@ -331,7 +331,7 @@ def _dispatch_before(
     Within `n.snapshots` the solved dispatch is read; at its start `p_init` is
     used, which is 0 for units that were off and NaN if unknown.
     """
-    attr = "p0" if c.name in n.branch_components else "p"
+    attr = "p0" if c.name in n.passive_branch_components else "p"
     start_i = _window_start(n, sns)
     if start_i and not c.dynamic[attr].empty:
         return c.da[attr].isel(snapshot=start_i - 1, drop=True).sel(name=idx)
@@ -1574,6 +1574,32 @@ def define_nodal_balance_constraints(
                     if multiply:
                         expr = expr * coeff.sel(name=group_names)
                     exprs.append(_groupby_bus(expr, group_cbuses))
+
+    w_gen = n.optimize._window.subset(sns).snapshot_weightings("generators")
+    for component in ("Process", "Link"):
+        c = n.c[component]
+        com_i = c.committables.intersection(c.active_assets)
+        if com_i.empty:
+            continue
+
+        cbuses = c._as_xarray("bus0").sel(name=com_i)
+        if n.has_scenarios:
+            cbuses = cbuses.isel(scenario=0, drop=True)
+        cbuses = cbuses[pd.Index(cbuses.data).isin(buses)].rename("Bus")
+
+        for attr, var_name, scale in (
+            ("stand_by_fuel", "status", 1),
+            ("start_up_fuel", "start_up", 1 / w_gen),
+        ):
+            fuel = c.da[attr].sel(name=cbuses.coords["name"].values, snapshot=sns)
+            nonzero = (fuel != 0).any([d for d in fuel.dims if d != "name"])
+            fuel_names = fuel.indexes["name"][nonzero.values]
+            if fuel_names.empty:
+                continue
+            expr = -(fuel.sel(name=fuel_names) * scale) * m[f"{c.name}-{var_name}"].sel(
+                name=fuel_names
+            )
+            exprs.append(_groupby_bus(expr, cbuses.sel(name=fuel_names)))
 
     exprs.extend(flow_based_balance_terms(n, buses))
     lhs = merge(exprs, join="outer").reindex(name=buses)

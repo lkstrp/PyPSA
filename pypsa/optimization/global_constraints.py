@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 from linopy import LinearExpression, merge
-from xarray import DataArray
+from xarray import DataArray, ones_like
 
 from pypsa.components.common import invariant
 from pypsa.descriptors import nominal_attrs
@@ -463,7 +463,10 @@ def define_primary_energy_limit(
         period_of = window.period_of
         periods = window.periods
         period_weighting = n.investment_period_weightings.years[periods]
+        event_weight = apply_period_weighting(ones_like(weight), period_weighting)
         weight = apply_period_weighting(weight, period_weighting)
+    else:
+        event_weight = ones_like(weight)
 
     unique_names = glcs.index.unique("name")
 
@@ -579,6 +582,28 @@ def define_primary_energy_limit(
                     dispatch * weight.sel(snapshot=period_sns) * emission_rate
                 ).sum()
                 lhs.append(expr)
+
+                com_i = gens.index.intersection(gen_c.committables)
+                sel = {"scenario": scenario} if n.has_scenarios else {}
+                for attr, var, w in (
+                    ("stand_by_fuel", "status", weight),
+                    ("start_up_fuel", "start_up", event_weight),
+                ):
+                    fuel = gen_c.da[attr].sel(
+                        name=com_i, snapshot=period_sns, **sel, drop=True
+                    )
+                    names = com_i[(fuel != 0).any("snapshot").values]
+                    if names.empty:
+                        continue
+                    v = m[f"Generator-{var}"].sel(
+                        name=names, snapshot=period_sns, **sel, drop=True
+                    )
+                    rate = emission_rate.loc[names].to_xarray()
+                    lhs.append(
+                        (
+                            v * fuel.sel(name=names) * w.sel(snapshot=period_sns) * rate
+                        ).sum()
+                    )
 
             storage_lhs, constant = _storage_withdrawal(
                 n, sns, counted, emissions, scenario=scenario
