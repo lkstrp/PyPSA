@@ -42,6 +42,7 @@ from duckdb import StarExpression as star
 
 if TYPE_CHECKING:
     import pypsa
+from pypsa.components.components import _UNREAD
 from pypsa.definitions.structures import LazyDict
 from pypsa.network.io._common import (
     _collect_network_attributes,
@@ -805,6 +806,43 @@ class _NetworkSource:
                         "a custom text column named like a dim refers to it"
                     )
                     raise ValueError(msg)
+
+    def _series_checked(self, c: pypsa.Components) -> list[str]:
+        """The series of `c` this export reads, which `_stray_series` compares against its members."""
+        return [attr for attr in c.dynamic if not self._pending(c, attr)]
+
+    def _stray_series(self) -> tuple[str, str, list[Any]] | None:
+        """The first `(type, attribute, columns)` whose series has columns naming no member of its type, else `None`.
+
+        Compared by `get_indexer`, by `(scenario, name)` on a stochastic network.
+        A type whose static frame is unread is compared against its names, so it
+        stays unread.
+        """
+        for c in self.n.components.values():
+            if c.name == _SHAPE:
+                continue
+            keys: pd.Index | None = None
+            for attr in self._series_checked(c):
+                frame = c.dynamic[attr]
+                if not len(frame.columns):
+                    continue
+                if keys is None:
+                    keys = self._member_keys(c)
+                stray = frame.columns[keys.get_indexer(frame.columns) == -1]
+                if len(stray):
+                    return c.name, attr, list(stray)
+        return None
+
+    def _member_keys(self, c: pypsa.Components) -> pd.Index:
+        """The labels a series of `c` may name: its static index, or its names crossed with the scenarios while static is unread."""
+        if c._static is not _UNREAD:
+            return c.static.index
+        names = c._static_names()
+        if not self.n.has_scenarios:
+            return names
+        return pd.MultiIndex.from_product(
+            [self.n.scenarios, names], names=["scenario", names.name]
+        )
 
     @cached_property
     def _snapshots(self) -> pd.DataFrame:
@@ -1998,6 +2036,10 @@ class _ResultsSource(_NetworkSource):
     def schema(self) -> RecordSchema:
         """The schema of the record `base` selects from, as a results layer declares nothing the record does not."""
         return _root(self.base).schema
+
+    def _series_checked(self, c: pypsa.Components) -> list[str]:
+        """The result series of `c`, as a results layer writes no input series."""
+        return [attr for attr in self._results.get(c.name, ()) if attr in c.dynamic]
 
     @cached_property
     def _shapes(self) -> dict[str, pd.DataFrame]:

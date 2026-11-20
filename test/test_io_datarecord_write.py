@@ -17,6 +17,7 @@ pytest.importorskip("datarecord", reason="needs the datarecord extra")
 
 from datarecord_helpers import assert_networks_equal, export_network  # noqa: E402
 from test_io_datarecord import (  # noqa: E402, F401
+    _north,
     _shaped,
     ac_dc,
     single_revision,
@@ -26,6 +27,7 @@ from test_io_datarecord import (  # noqa: E402, F401
 from test_io_datarecord_lazy import _count, stochastic_revision  # noqa: E402, F401
 
 from pypsa.network.io.datarecord import PyPSA  # noqa: E402
+from pypsa.network.io.datarecord.source import _NetworkSource  # noqa: E402
 
 
 def _rows(layer, attr) -> int:
@@ -239,6 +241,30 @@ def test_a_stochastic_network_leaves_untouched_types_unread(stochastic_revision)
     assert read <= {"Generator"}
     assert _rows(layer, "marginal_cost") > 0
     assert_networks_equal(child, n)
+
+
+def test_a_stray_series_never_read_is_not_compared(store, monkeypatch):
+    """A series left to `base=n.record` is never read, so its stray column goes unseen.
+
+    The base holds a Generator `p_max_pu` column named after the Load, written
+    with the check off. Editing only a Load leaves the Generator type unread.
+    The reader keys a series on its own type's members and drops that column
+    on load, so this shows the cost property: the check reads nothing.
+    """
+    n = _north()
+    n.add("Load", "demand", bus="north", p_set=1.0)
+    n.c.Generator.dynamic.p_max_pu["demand"] = [0.5, 0.6]
+    with monkeypatch.context() as patch:
+        patch.setattr(_NetworkSource, "_stray_series", lambda self: None)
+        root = export_network(n, store)
+    opened = pypsa.Network.from_datarecord(root.record)
+    counters = _count(opened)
+    opened.c.Load.static.loc["demand", "p_set"] = 2.0
+    layer = opened.to_datarecord(base=opened.record)
+    assert _rows(layer, "p_set") > 0
+    static, dynamic = _read_types(counters)
+    assert "Generator" not in static
+    assert "Generator" not in dynamic
 
 
 def test_an_untouched_shape_type_is_not_read_at_export(store):

@@ -2803,6 +2803,63 @@ def test_default_snapshots_are_refused(workspace):
         PyPSA.to_datarecord(n, workspace.con)
 
 
+def test_a_series_naming_no_component_of_its_type_is_refused(workspace):
+    n = _north()
+    n.c.Generator.dynamic.p_max_pu["ghost"] = [0.5, 0.6]
+    with pytest.raises(UnsupportedRecordError) as refused:
+        PyPSA.to_datarecord(n, workspace.con)
+    message = str(refused.value)
+    for word in ("Generator", "p_max_pu", "ghost", "check_time_series"):
+        assert word in message
+
+
+def test_a_series_of_a_type_without_members_is_refused(workspace):
+    n = _north()
+    n.c.Load.dynamic.p_set["ghost"] = [1.0, 2.0]
+    with pytest.raises(UnsupportedRecordError, match=r"Load\.p_set`.*ghost"):
+        PyPSA.to_datarecord(n, workspace.con)
+
+
+def test_a_clean_series_is_not_refused(workspace):
+    n = _north()
+    n.c.Generator.dynamic.p_max_pu["gen"] = [0.5, 0.6]
+    PyPSA.to_datarecord(n, workspace.con)
+
+
+def test_a_stray_result_column_is_refused_on_a_results_only_export(store):
+    revision = store.commit(
+        PyPSA.to_datarecord(_north(), store.workspace.con), parent=None
+    )
+    n = PyPSA.build(revision.record)
+    n.c.Generator.dynamic["p"] = pd.DataFrame(
+        {"gen": [1.0, 2.0], "ghost": [3.0, 4.0]}, index=n.snapshots
+    )
+    with pytest.raises(UnsupportedRecordError, match=r"Generator\.p`.*ghost"):
+        PyPSA.to_datarecord(
+            n, revision.record.con, results_only=True, base=revision.record
+        )
+
+
+def test_a_stochastic_series_under_another_scenario_is_refused(workspace):
+    n = _north()
+    n.set_scenarios({"low": 0.5, "high": 0.5})
+    n.c.Generator.dynamic.p_max_pu[("other", "gen")] = [0.5, 0.6]
+    with pytest.raises(UnsupportedRecordError, match="other"):
+        PyPSA.to_datarecord(n, workspace.con)
+
+
+def test_the_stray_columns_listed_are_capped_at_ten(workspace):
+    n = _north()
+    for i in range(12):
+        n.c.Generator.dynamic.p_max_pu[f"ghost{i:02}"] = [0.5, 0.6]
+    with pytest.raises(UnsupportedRecordError) as refused:
+        PyPSA.to_datarecord(n, workspace.con)
+    message = str(refused.value)
+    assert "ghost09" in message
+    assert "ghost10" not in message
+    assert "and 2 more" in message
+
+
 def test_from_datarecord_without_the_package_names_the_extra(
     single_revision, monkeypatch
 ):

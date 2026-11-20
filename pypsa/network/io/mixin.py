@@ -695,8 +695,9 @@ class NetworkIOMixin(_NetworkABC):
             carry.
         UnsupportedRecordError
             If the network cannot be stated as a record: default snapshots, a
-            component with one bus on two ports, or names shared by several
-            component types.
+            component with one bus on two ports, names shared by several
+            component types, or a series whose columns name no component of
+            its type.
 
         """
         from pypsa.network.io._common import require_datarecord  # noqa: PLC0415

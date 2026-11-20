@@ -470,7 +470,9 @@ class PyPSATool(Tool):
             record record-wide, and this reports rather than renames. Likewise
             for a static column PyPSA's registry has no entry for on its type
             whose attribute is declared over another dim (`Carrier.efficiency`,
-            `Bus.country` beside `Generator.country`).
+            `Bus.country` beside `Generator.country`). Or if a series the
+            export reads has columns naming no component of its type, by
+            `(scenario, name)` on a stochastic network.
 
         Notes
         -----
@@ -565,6 +567,19 @@ class PyPSATool(Tool):
             source = _OpenedSource(model, con, base, loaded=loaded)
         else:
             source = _NetworkSource(model, con, base)
+        stray = source._stray_series()
+        if stray is not None:
+            ctype, attr, columns = stray
+            shown = sorted(columns)[:10]
+            more = f" and {len(columns) - 10} more" if len(columns) > 10 else ""
+            msg = (
+                f"the series `{ctype}.{attr}` has columns naming no {ctype} of the "
+                f"network: {', '.join(map(str, shown))}{more}. Its values would key "
+                "on another entity or none; PyPSA's `n.consistency_check()` "
+                "(`check_time_series`) reports the same for attributes that also "
+                "have a static value"
+            )
+            raise _refusal(self.name, msg)
         source.check()
         if own and isinstance(base, Selection):
             (dim,) = own
