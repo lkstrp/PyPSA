@@ -2640,6 +2640,9 @@ class NetworkIOMixin(_NetworkABC):
         Importing from pandapower is still in beta;
         not all pandapower components are supported.
 
+        Buses without a name are named after their pandapower index, as a
+        string.
+
         Unsupported features include:
         - three-winding transformers
         - switches
@@ -2672,18 +2675,22 @@ class NetworkIOMixin(_NetworkABC):
             "Warning: Importing from pandapower is still in beta; not all pandapower data is supported.\nUnsupported features include: three-winding transformers, switches, in_service status, shunt impedances and tap positions of transformers."
         )
 
+        bus_names = net.bus.name.fillna(
+            pd.Series(net.bus.index.astype(str), index=net.bus.index)
+        )
+
         d = {
             "Bus": pd.DataFrame(
                 {"v_nom": net.bus.vn_kv.values, "v_mag_pu_set": 1.0},
-                index=net.bus.name,
+                index=bus_names,
             )
         }
 
-        d["Bus"].loc[net.bus.name.loc[net.gen.bus].values, "v_mag_pu_set"] = (
+        d["Bus"].loc[bus_names.loc[net.gen.bus].values, "v_mag_pu_set"] = (
             net.gen.vm_pu.values  # fmt: skip
         )
 
-        d["Bus"].loc[net.bus.name.loc[net.ext_grid.bus].values, "v_mag_pu_set"] = (
+        d["Bus"].loc[bus_names.loc[net.ext_grid.bus].values, "v_mag_pu_set"] = (
             net.ext_grid.vm_pu.values  # fmt: skip
         )
 
@@ -2691,7 +2698,7 @@ class NetworkIOMixin(_NetworkABC):
             {
                 "p_set": (net.load.scaling * net.load.p_mw).values,
                 "q_set": (net.load.scaling * net.load.q_mvar).values,
-                "bus": net.bus.name.loc[net.load.bus].values,
+                "bus": bus_names.loc[net.load.bus].values,
             },
             index=net.load.name,
         )
@@ -2701,7 +2708,7 @@ class NetworkIOMixin(_NetworkABC):
             {
                 "p_set": (net.gen.scaling * net.gen.p_mw).values,
                 "q_set": 0.0,
-                "bus": net.bus.name.loc[net.gen.bus].values,
+                "bus": bus_names.loc[net.gen.bus].values,
                 "control": "PV",
             },
             index=net.gen.name,
@@ -2712,7 +2719,7 @@ class NetworkIOMixin(_NetworkABC):
             {
                 "p_set": (net.sgen.scaling * net.sgen.p_mw).values,
                 "q_set": (net.sgen.scaling * net.sgen.q_mvar).values,
-                "bus": net.bus.name.loc[net.sgen.bus].values,
+                "bus": bus_names.loc[net.sgen.bus].values,
                 "control": "PQ",
             },
             index=net.sgen.name,
@@ -2723,7 +2730,7 @@ class NetworkIOMixin(_NetworkABC):
                 "control": "Slack",
                 "p_set": 0.0,
                 "q_set": 0.0,
-                "bus": net.bus.name.loc[net.ext_grid.bus].values,
+                "bus": bus_names.loc[net.ext_grid.bus].values,
             },
             index=net.ext_grid.name.fillna("External Grid"),
         )
@@ -2737,8 +2744,8 @@ class NetworkIOMixin(_NetworkABC):
             d["Line"] = pd.DataFrame(
                 {
                     "type": net.line.std_type.values,
-                    "bus0": net.bus.name.loc[net.line.from_bus].values,
-                    "bus1": net.bus.name.loc[net.line.to_bus].values,
+                    "bus0": bus_names.loc[net.line.from_bus].values,
+                    "bus1": bus_names.loc[net.line.to_bus].values,
                     "length": net.line.length_km.values,
                     "num_parallel": net.line.parallel.values,
                 },
@@ -2761,8 +2768,8 @@ class NetworkIOMixin(_NetworkABC):
                     "x": x,
                     "b": b,
                     "s_nom": s_nom,
-                    "bus0": net.bus.name.loc[net.line.from_bus].values,
-                    "bus1": net.bus.name.loc[net.line.to_bus].values,
+                    "bus0": bus_names.loc[net.line.from_bus].values,
+                    "bus1": bus_names.loc[net.line.to_bus].values,
                     "length": net.line.length_km.values,
                     "num_parallel": net.line.parallel.values,
                 },
@@ -2774,8 +2781,8 @@ class NetworkIOMixin(_NetworkABC):
             d["Transformer"] = pd.DataFrame(
                 {
                     "type": net.trafo.std_type.values,
-                    "bus0": net.bus.name.loc[net.trafo.hv_bus].values,
-                    "bus1": net.bus.name.loc[net.trafo.lv_bus].values,
+                    "bus0": bus_names.loc[net.trafo.hv_bus].values,
+                    "bus1": bus_names.loc[net.trafo.lv_bus].values,
                     "tap_position": net.trafo.tap_pos.values,
                 },
                 index=net.trafo.name,
@@ -2801,8 +2808,8 @@ class NetworkIOMixin(_NetworkABC):
                 {
                     "phase_shift": net.trafo.shift_degree.values,
                     "s_nom": s_nom,
-                    "bus0": net.bus.name.loc[net.trafo.hv_bus].values,
-                    "bus1": net.bus.name.loc[net.trafo.lv_bus].values,
+                    "bus0": bus_names.loc[net.trafo.hv_bus].values,
+                    "bus1": bus_names.loc[net.trafo.lv_bus].values,
                     "r": r,
                     "x": x,
                     "g": g,
@@ -2819,7 +2826,7 @@ class NetworkIOMixin(_NetworkABC):
 
         d["ShuntImpedance"] = pd.DataFrame(
             {
-                "bus": net.bus.name.loc[net.shunt.bus].values,
+                "bus": bus_names.loc[net.shunt.bus].values,
                 "g": g_shunt,
                 "b": b_shunt,
             },
@@ -2841,8 +2848,8 @@ class NetworkIOMixin(_NetworkABC):
 
         bus_switches = net.switch[(net.switch.et == "b") & net.switch.closed]
 
-        bus_switches["stays"] = bus_switches.bus.map(net.bus.name)
-        bus_switches["goes"] = bus_switches.element.map(net.bus.name)
+        bus_switches["stays"] = bus_switches.bus.map(bus_names)
+        bus_switches["goes"] = bus_switches.element.map(bus_names)
 
         to_replace = pd.Series(bus_switches.stays.values, bus_switches.goes.values)
 
