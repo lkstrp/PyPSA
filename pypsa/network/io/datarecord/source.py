@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 from collections.abc import Callable, Collection, Container, Iterable, Mapping, Sequence
@@ -81,6 +82,8 @@ from pypsa.network.io.datarecord.schema import (
     _static_dims,
 )
 from pypsa.network.io.datarecord.shape import _multiperiod
+
+logger = logging.getLogger(__name__)
 
 #: The values in one batch of a melted series, about a parquet row group.
 _MELT_BATCH = 122_880
@@ -1062,11 +1065,22 @@ class _NetworkSource:
 
         parts: list[DuckDBPyRelation | None] = []
         excluded: pd.Index = pd.Index([])
+        curved = self._curved(c, attr)
+        self._warn_shadowed(c, attr, curved)
         if varying and self._pending(c, attr):
             excluded = self._series_held(c, unchanged, buses)
         elif varying:
-            parts.append(self._melt_dynamic(c, attr, unchanged=unchanged, buses=buses))
+            parts.append(
+                self._melt_dynamic(
+                    c, attr, unchanged=unchanged, buses=buses, exclude=curved
+                )
+            )
             excluded = c.dynamic[attr].columns
+        if self._piecewise_pending(c, attr):
+            excluded = excluded.union(
+                self._curves_held(c, unchanged, buses), sort=False
+            )
+        excluded = excluded.union(curved, sort=False)
         static_backed = attr in c.defaults.index and bool(c.defaults.at[attr, "static"])
         if not varying or static_backed:
             parts.append(
@@ -1081,9 +1095,164 @@ class _NetworkSource:
             )
         return _union_all(parts)
 
+    def _curve_frame(self, c: pypsa.Components, attr: str) -> pd.DataFrame | None:
+        """`c`'s breakpoint frame of `attr`, `None` where it holds none."""
+        if self._piecewise_pending(c, attr):
+            return None
+        frame = c.piecewise.get(attr)
+        if frame is None or frame.empty:
+            return None
+        return frame
+
+    def _curved(self, c: pypsa.Components, attr: str) -> pd.Index:
+        """The names of `c` holding a curve on `attr`."""
+        frame = self._curve_frame(c, attr)
+        if frame is None:
+            return pd.Index([])
+        return frame.columns.get_level_values("name").unique()
+
+    def _warn_shadowed(self, c: pypsa.Components, attr: str, curved: pd.Index) -> None:
+        """Warn once where a curved name also holds a non-default scalar or series of `attr`."""
+        if not len(curved) or attr not in c.defaults.index:
+            return
+        default = c.defaults.at[attr, "default"]
+        shadowed: set[str] = set()
+        if attr in c.static.columns:
+            static = c.static[attr]
+            level = static.index.get_level_values(-1)
+            held = static[level.isin(curved)]
+            differing = held[~((held == default) | (held.isna() & pd.isna(default)))]
+            shadowed.update(map(str, differing.index.get_level_values(-1)))
+        if attr in c.dynamic:
+            wide = c.dynamic[attr]
+            wide = wide.loc[:, wide.columns.get_level_values(-1).isin(curved)]
+            if not wide.empty:
+                moved = (wide.notna() & (wide != default)).any()
+                shadowed.update(
+                    map(str, wide.columns[moved.to_numpy()].get_level_values(-1))
+                )
+        if shadowed:
+            logger.warning(
+                "%s %s hold a piecewise curve on '%s' and a scalar or series; "
+                "the export skips the scalar or series because the optimiser "
+                "ignores it under a curve.",
+                c.name,
+                sorted(shadowed),
+                attr,
+            )
+
+    def _null_snapshot(self) -> Expression:
+        """A NULL `snapshot`, typed as the label where it is a struct (a NULL of no type is not one)."""
+        snapshot = lit(None)
+        if SNAPSHOT in self.schema.multi_dims:
+            snapshot = snapshot.cast(
+                self.schema.duck_type(self.schema.dimensions[SNAPSHOT])
+            )
+        return snapshot
+
+    def _curve_rel(
+        self,
+        c: pypsa.Components,
+        source_attr: str,
+        *,
+        unchanged: str | None,
+        buses: pd.Series | None,
+    ) -> DuckDBPyRelation | None:
+        """One row per filled breakpoint of `c`'s curves on `source_attr`, `None` where it has none."""
+        frame = self._curve_frame(c, source_attr)
+        if frame is None:
+            return None
+        x = c._piecewise_schema(source_attr).x
+        names = frame.columns.get_level_values("name").unique()
+        rows = pd.concat(
+            [
+                pd.DataFrame(
+                    {
+                        ENTITY: name,
+                        "value": frame[(name, source_attr)].to_numpy(dtype=float),
+                        "breakpoint": frame[(name, x)].to_numpy(dtype=float),
+                    }
+                )
+                for name in names
+            ],
+            ignore_index=True,
+        ).dropna(subset=["value", "breakpoint"])
+        rows = self._changed_curves(c, rows, unchanged, buses)
+        if rows.empty:
+            return None
+        return self.con.from_df(rows).project(
+            col(ENTITY),
+            self._null_snapshot().alias(SNAPSHOT),
+            lit(None).cast(sqltypes.VARCHAR).alias(SCENARIO),
+            col("value"),
+            col("breakpoint"),
+        )
+
     def _pending(self, c: pypsa.Components, attr: str) -> bool:
         """Whether `c`'s series `attr` is left unread, its static part alone written."""
         return False
+
+    def _piecewise_pending(self, c: pypsa.Components, attr: str) -> bool:
+        """Whether `c`'s curves on `attr` are left unread and unwritten."""
+        return False
+
+    def _base_curves(
+        self, c: pypsa.Components, attribute: str | None, buses: pd.Series | None
+    ) -> pd.DataFrame | None:
+        """`base`'s curve points of `attribute` at no scenario, `None` where it holds none."""
+        rel = None if attribute is None else self._base_attribute(attribute)
+        dim = _dim_of(c.name) if buses is None else CONNECTION
+        if rel is None or dim not in rel.columns or "breakpoint" not in rel.columns:
+            return None
+        held = rel.filter(col(dim).isnotnull() & col("breakpoint").isnotnull())
+        if SCENARIO in rel.columns:
+            held = held.filter(col(SCENARIO).isnull())
+        if buses is None:
+            keys = [col(dim).cast(sqltypes.VARCHAR).alias(ENTITY)]
+        else:
+            keys = [
+                fn.struct_extract(col(dim), lit(k)).cast(sqltypes.VARCHAR).alias(k)
+                for k in (ENTITY, BUS)
+            ]
+        frame = held.project(
+            *keys, col("breakpoint").alias("breakpoint"), col("value")
+        ).df()
+        if buses is not None:
+            frame = frame[frame[BUS] == frame[ENTITY].map(buses)]
+        return frame[[ENTITY, "breakpoint", "value"]]
+
+    def _curves_held(
+        self, c: pypsa.Components, attribute: str | None, buses: pd.Series | None
+    ) -> pd.Index:
+        """The entries of `c`'s static index whose entity `base` holds a curve of `attribute` for."""
+        frame = self._base_curves(c, attribute, buses)
+        static = self._own(c)
+        if frame is None:
+            return static.index[:0]
+        level = static.index.get_level_values(-1)
+        return static.index[level.isin(frame[ENTITY])]
+
+    def _changed_curves(
+        self,
+        c: pypsa.Components,
+        rows: pd.DataFrame,
+        attribute: str | None,
+        buses: pd.Series | None,
+    ) -> pd.DataFrame:
+        """`rows` without the entities whose curve equals the one `base` holds of `attribute`."""
+        held = self._base_curves(c, attribute, buses)
+        if held is None or rows.empty:
+            return rows
+
+        def points(frame: pd.DataFrame) -> dict[str, frozenset]:
+            return {
+                name: frozenset(zip(g["breakpoint"], g["value"], strict=True))
+                for name, g in frame.groupby(ENTITY)
+            }
+
+        base = points(held)
+        same = {k for k, v in points(rows).items() if base.get(k) == v}
+        return rows[~rows[ENTITY].isin(same)]
 
     def _series_held(
         self, c: pypsa.Components, attribute: str | None, buses: pd.Series | None
@@ -1117,6 +1286,7 @@ class _NetworkSource:
         *,
         unchanged: str | None,
         buses: pd.Series | None,
+        exclude: Collection[str] = (),
     ) -> DuckDBPyRelation | None:
         """Melt one varying attribute's wide dynamic frame to long rows, `None` where it has no columns left.
 
@@ -1132,6 +1302,8 @@ class _NetworkSource:
         never becomes an SQL identifier or literal. A NaN cell is a NULL row.
         """
         wide = c.dynamic[attr]
+        if len(exclude):
+            wide = wide.loc[:, ~wide.columns.get_level_values(-1).isin(exclude)]
         if unchanged is not None and not wide.empty:
             keys = self._series_keys(wide.columns, _dim_of(c.name), buses)
             wide = wide.loc[:, self._differing(unchanged, wide.to_numpy(), keys)]
@@ -1245,15 +1417,9 @@ class _NetworkSource:
             )
         if static.empty:
             return None
-        snapshot = lit(None)
-        if SNAPSHOT in self.schema.multi_dims:
-            # A struct, which a NULL of no type is not, so the label's type is the series rows'.
-            snapshot = snapshot.cast(
-                self.schema.duck_type(self.schema.dimensions[SNAPSHOT])
-            )
         return self.con.from_df(static).project(
             col(ENTITY),
-            snapshot.alias(SNAPSHOT),
+            self._null_snapshot().alias(SNAPSHOT),
             col(SCENARIO),
             col("value"),
         )
@@ -1578,13 +1744,18 @@ class _NetworkSource:
         An `_AXIS_TYPES` type's rows are keyed by its dim in place of
         `entity`. `None` where `source_attr` contributes no rows.
         """
+        unchanged = attribute if self._LEAVES_OUT_REPEATS else None
         rel = self._as_long_rel(
             c,
             source_attr,
-            unchanged=attribute if self._LEAVES_OUT_REPEATS else None,
+            unchanged=unchanged,
             buses=buses,
             drop_defaults=drop_defaults,
         )
+        if rel is not None:
+            rel = rel.select(*map(col, rel.columns), lit(None).alias("breakpoint"))
+        curves = self._curve_rel(c, source_attr, unchanged=unchanged, buses=buses)
+        rel = _union_all([rel, curves])
         if rel is None:
             return None
         dim = _dim_of(c.name)
@@ -1592,9 +1763,10 @@ class _NetworkSource:
             *(
                 col(name).alias(dim) if name == ENTITY else col(name)
                 for name in rel.columns
+                if name != "breakpoint"
             ),
             lit(attribute).alias("attribute"),
-            lit(None).alias("breakpoint"),
+            col("breakpoint"),
         )
 
     def _long_frame(self, attribute: str, ctypes: list[str]) -> DuckDBPyRelation:
@@ -1813,6 +1985,10 @@ class _OpenedSource(_NetworkSource):
     def _pending(self, c: pypsa.Components, attr: str) -> bool:
         """Whether `attr` is a series announced but not loaded."""
         return isinstance(c.dynamic, LazyDict) and attr in c.dynamic.pending
+
+    def _piecewise_pending(self, c: pypsa.Components, attr: str) -> bool:
+        """Whether `attr`'s curves are announced but not loaded."""
+        return isinstance(c.piecewise, LazyDict) and attr in c.piecewise.pending
 
     def _touched(self, c: pypsa.Components) -> bool:
         return bool(self.loaded[c.name])

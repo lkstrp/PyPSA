@@ -250,3 +250,94 @@ def test_an_untouched_shape_type_is_not_read_at_export(store):
     child = _child(root, layer)
     assert "Shape" not in _read_types(counters)[0]
     assert_networks_equal(PyPSA.build(child.record), n)
+
+
+CURVE = {0.0: 0.0, 0.5: 20.0, 1.0: 35.0}
+
+
+@pytest.fixture
+def curve_revision(store):
+    """A record with a `marginal_cost` curve on `gas` and an `efficiency` curve on `conv`."""
+    n = pypsa.Network()
+    n.set_snapshots(pd.date_range("2024-01-01", periods=2, freq="h"))
+    n.add("Carrier", "AC")
+    n.add("Bus", ["a", "b"])
+    n.add("Generator", "gas", bus="a", p_nom=10, marginal_cost=CURVE)
+    n.add("Generator", "coal", bus="a", p_nom=10, marginal_cost=20.0)
+    n.add("Link", "conv", bus0="a", bus1="b", p_nom=5, efficiency={0.0: 0.0, 1.0: 0.8})
+    return export_network(n, store)
+
+
+def _curve_rows(layer, attr) -> pd.DataFrame:
+    if attr not in layer.attributes:
+        return pd.DataFrame()
+    rows = layer.attributes[attr].df()
+    return rows[rows["breakpoint"].notna()]
+
+
+def _curve_of(n, name, attr="marginal_cost"):
+    frame = n.c.Generator.piecewise.get(attr)
+    if frame is None or name not in frame.columns.get_level_values("name"):
+        return None
+    return frame[name].dropna()
+
+
+def test_an_untouched_curve_writes_no_rows_and_stays_unread(curve_revision):
+    n = pypsa.Network.from_datarecord(curve_revision.record)
+    counters = _count(n)
+    n.c.Generator.static.at["coal", "p_nom"] += 1.0
+    layer = n.to_datarecord(base=n.record)
+    assert _curve_rows(layer, "marginal_cost").empty
+    assert counters["Generator"].piecewise_calls == []
+    child = pypsa.Network.from_datarecord(_child(curve_revision, layer).record)
+    assert _curve_of(child, "gas")["marginal_cost"].to_list() == [0.0, 20.0, 35.0]
+
+
+def test_a_curve_read_but_unchanged_writes_no_rows(curve_revision):
+    n = pypsa.Network.from_datarecord(curve_revision.record)
+    _ = n.c.Generator.piecewise["marginal_cost"]
+    layer = n.to_datarecord(base=n.record)
+    assert _curve_rows(layer, "marginal_cost").empty
+    child = pypsa.Network.from_datarecord(_child(curve_revision, layer).record)
+    assert _curve_of(child, "gas")["marginal_cost"].to_list() == [0.0, 20.0, 35.0]
+
+
+def test_a_changed_curve_is_written_whole(curve_revision):
+    n = pypsa.Network.from_datarecord(curve_revision.record)
+    n.c.Generator.piecewise["marginal_cost"].loc[1, ("gas", "marginal_cost")] = 25.0
+    layer = n.to_datarecord(base=n.record)
+    assert len(_curve_rows(layer, "marginal_cost")) == 3
+    child = pypsa.Network.from_datarecord(_child(curve_revision, layer).record)
+    assert _curve_of(child, "gas")["marginal_cost"].to_list() == [0.0, 25.0, 35.0]
+
+
+def test_a_removed_curve_writes_the_default_scalar(curve_revision):
+    n = pypsa.Network.from_datarecord(curve_revision.record)
+    frame = n.c.Generator.piecewise["marginal_cost"]
+    n.c.Generator.piecewise["marginal_cost"] = frame.drop(columns="gas", level="name")
+    layer = n.to_datarecord(base=n.record)
+    assert _curve_rows(layer, "marginal_cost").empty
+    child = pypsa.Network.from_datarecord(_child(curve_revision, layer).record)
+    assert _curve_of(child, "gas") is None
+    default = child.c.Generator.defaults.at["marginal_cost", "default"]
+    assert child.c.Generator.static.at["gas", "marginal_cost"] == default
+
+
+def test_an_added_curve_shadows_the_base_scalar(curve_revision):
+    n = pypsa.Network.from_datarecord(curve_revision.record)
+    n.add("Generator", "tmp", bus="a", p_nom=1, marginal_cost={0.0: 0.0, 1.0: 30.0})
+    frame = n.c.Generator.piecewise["marginal_cost"]
+    n.c.Generator.piecewise["marginal_cost"] = frame.rename(columns={"tmp": "coal"})
+    n.remove("Generator", "tmp")
+    layer = n.to_datarecord(base=n.record)
+    child = pypsa.Network.from_datarecord(_child(curve_revision, layer).record)
+    assert _curve_of(child, "coal")["marginal_cost"].to_list() == [0.0, 30.0]
+
+
+def test_an_unread_link_curve_survives_an_edit_of_another_attribute(curve_revision):
+    n = pypsa.Network.from_datarecord(curve_revision.record)
+    n.c.Link.static.at["conv", "p_nom"] += 1.0
+    layer = n.to_datarecord(base=n.record)
+    child = pypsa.Network.from_datarecord(_child(curve_revision, layer).record)
+    frame = child.c.Link.piecewise["efficiency"]
+    assert frame[("conv", "efficiency")].dropna().to_list() == [0.0, 0.8]

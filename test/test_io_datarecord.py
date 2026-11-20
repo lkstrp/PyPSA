@@ -621,43 +621,60 @@ def test_verify_reports_a_missing_required_attribute(exported, ac_dc):
     )
 
 
-def test_verify_reports_a_piecewise_linear_attribute(exported):
-    """A curve is stored correctly; it is the PyPSA translation that cannot express it.
-
-    Notes
-    -----
-    - [wide and long rows](https://energy-models.github.io/datarecord/design/model/attributes/#wide-and-long-rows)
-    """
-    write_attribute(
-        exported,
-        "marginal_cost",
-        [{"entity": "Manchester Wind", "value": 20.0}],
-    )
+def _curve_child(exported, attribute, extra=None, curves=None, scalar=True):
+    """A child layer of `exported` holding curves on `attribute`."""
+    curves = curves or {"Manchester Wind": ((0.0, 20.0), (50.0, 35.0))}
+    if scalar:
+        write_attribute(
+            exported,
+            "marginal_cost",
+            [{"entity": "Manchester Wind", "value": 20.0}],
+        )
     revision = exported.commit()
-    assert not PyPSA.verify(revision.record).unsupported_values, (
-        "the same attribute without breakpoints is not reported"
-    )
-
     child = empty_child(revision)
     write_attribute(
         child,
-        "marginal_cost",
+        attribute,
         [
-            {
-                "entity": "Manchester Wind",
-                "breakpoint": x,
-                "value": v,
-            }
-            for x, v in ((0.0, 20.0), (50.0, 35.0))
+            {"entity": name, "breakpoint": x, "value": v, **(extra or {})}
+            for name, points in curves.items()
+            for x, v in points
         ],
     )
-    revision = child.commit()
+    return child.commit()
 
+
+def test_verify_accepts_a_curve_on_a_piecewise_pair(exported):
+    """A curve on a pair of PyPSA's piecewise table is expressible, so not reported."""
+    revision = _curve_child(exported, "marginal_cost")
+    assert not PyPSA.verify(revision.record).unsupported_values
+
+
+def test_verify_reports_a_curve_off_the_piecewise_table(exported):
+    """`p_nom_max` has no piecewise counterpart, so its curve stays reported."""
+    revision = _curve_child(exported, "p_nom_max")
     missing = PyPSA.verify(revision.record)
-    assert ("Generator", "marginal_cost") in missing.unsupported_values
+    assert ("Generator", "p_nom_max") in missing.unsupported_values
     assert "unsupported values" in missing.describe()
     with pytest.raises(UnsupportedRecordError):
         PyPSA.build(revision.record)
+
+
+def test_verify_reports_a_curve_row_with_a_snapshot(exported):
+    """PyPSA's piecewise frames have no snapshot axis, so a snapshot row stays reported."""
+    revision = _curve_child(
+        exported, "marginal_cost", {"snapshot": pd.Timestamp("2030-01-01")}
+    )
+    missing = PyPSA.verify(revision.record)
+    assert ("Generator", "marginal_cost") in missing.unsupported_values
+
+
+def test_registry_schema_declares_curves_on_piecewise_attributes():
+    """Every y attribute of the piecewise table, per-port stems included, takes breakpoints."""
+    attributes = _registry_schema().attributes
+    for name in ("marginal_cost", "capital_cost", "efficiency", "rate"):
+        assert attributes[name].breakpoints, name
+    assert not attributes["p_nom"].breakpoints
 
 
 def _north():
@@ -3188,6 +3205,21 @@ def stochastic(store, ac_dc):
     return export_network(n, store)
 
 
+def test_verify_reports_a_curve_of_a_stochastic_network(stochastic):
+    """A curve frame has no scenario axis, so a curve over scenarios stays reported."""
+    child = empty_child(stochastic)
+    write_attribute(
+        child,
+        "marginal_cost",
+        [
+            {"entity": "Norway Gas", "breakpoint": x, "value": v}
+            for x, v in ((0.0, 20.0), (50.0, 35.0))
+        ],
+    )
+    missing = PyPSA.verify(child.commit().record)
+    assert ("Generator", "marginal_cost") in missing.unsupported_values
+
+
 def test_one_scenario_is_a_deterministic_network_of_its_values(stochastic):
     built = PyPSA.build(stochastic.record.select(scenario="hi"))
     assert not built.has_scenarios
@@ -3303,3 +3335,168 @@ def test_import_from_datarecord_takes_a_selection(single_revision):
     n = pypsa.Network()
     n.import_from_datarecord(single_revision.record.select(bus=["London", "Norwich"]))
     assert n.c.Bus.static.index.tolist() == ["London", "Norwich"]
+
+
+def test_a_piecewise_attribute_builds(exported):
+    """A curve written by hand builds into `piecewise`, its scalar left at the default."""
+    revision = _curve_child(
+        exported,
+        "marginal_cost",
+        curves={"Manchester Wind": ((0.0, 0.0), (0.5, 20.0), (1.0, 35.0))},
+        scalar=False,
+    )
+    n = PyPSA.build(revision.record)
+    frame = n.c.Generator.piecewise["marginal_cost"]
+    name = "Manchester Wind"
+    assert frame.index.to_list() == [0, 1, 2]
+    assert frame.index.name == "breakpoint"
+    assert frame.columns.to_list() == [(name, "p_pu"), (name, "marginal_cost")]
+    assert frame.columns.names == ["name", "attribute"]
+    assert (frame.dtypes == "float64").all()
+    assert frame[name].to_dict("list") == {
+        "p_pu": [0.0, 0.5, 1.0],
+        "marginal_cost": [0.0, 20.0, 35.0],
+    }
+    default = n.c.Generator.defaults.at["marginal_cost", "default"]
+    assert n.c.Generator.static.at[name, "marginal_cost"] == default
+
+
+def test_a_ragged_pair_of_curves_reads_back_nan_padded(exported):
+    """The shorter curve ends in NaN, as `n.add` lays ragged curves out."""
+    revision = _curve_child(
+        exported,
+        "marginal_cost",
+        curves={
+            "Manchester Wind": ((0.0, 0.0), (0.5, 20.0), (1.0, 35.0)),
+            "Manchester Gas": ((0.0, 0.0), (1.0, 10.0)),
+        },
+        scalar=False,
+    )
+    frame = PyPSA.build(revision.record).c.Generator.piecewise["marginal_cost"]
+    assert frame.index.to_list() == [0, 1, 2]
+    assert frame["Manchester Wind"]["p_pu"].to_list() == [0.0, 0.5, 1.0]
+    assert frame["Manchester Gas"]["p_pu"].to_list()[:2] == [0.0, 1.0]
+    assert frame["Manchester Gas"]["marginal_cost"].to_list()[:2] == [0.0, 10.0]
+    assert frame["Manchester Gas"].iloc[2].isna().all()
+
+
+def test_a_link_curve_on_the_bus2_connection_reads_as_efficiency2(store):
+    """The port key `efficiency2` is announced and read from the bus2 connection."""
+    revision = export_network(_three_port_link(), store)
+    child = empty_child(revision)
+    write_attribute(
+        child,
+        "efficiency",
+        [
+            {"entity": "split", "bus": "c", "breakpoint": x, "value": v}
+            for x, v in ((0.0, 0.0), (1.0, 0.5))
+        ],
+    )
+    n = PyPSA.open(child.commit().record)
+    piecewise = n.c.Link.piecewise
+    assert "efficiency2" in piecewise.pending
+    assert piecewise["efficiency"].empty
+    frame = piecewise["efficiency2"]
+    assert frame[("split", "efficiency2")].to_list() == [0.0, 0.5]
+    assert frame[("split", "p_pu")].to_list() == [0.0, 1.0]
+
+
+def _curve_rows(path, attribute):
+    rows = pd.read_parquet(Path(path) / "attributes" / f"{attribute}.parquet")
+    return rows[rows["breakpoint"].notna()]
+
+
+def test_piecewise_network_round_trips_through_a_record(piecewise_network, tmp_path):
+    # A record's snapshots are datetimes, the fixture's are integers.
+    n = piecewise_network.copy()
+    n.add("Carrier", "AC")  # a record lists the carriers components name
+    n.set_snapshots(pd.date_range("2024-01-01", periods=2, freq="h"))
+    n.c.loads.dynamic.p_set = pd.DataFrame(
+        {"load": [10.0, 20.0]},
+        index=n.snapshots,
+        columns=pd.Index(["load"], name="name"),
+    )
+    n.export_to_datarecord(tmp_path / "record")
+    got = pypsa.Network(tmp_path / "record")
+    assert n.equals(got.copy(), log_mode="strict")
+    n.optimize(solver_name="highs")
+    got.optimize(solver_name="highs")
+    assert got.objective == pytest.approx(n.objective)
+
+
+def test_an_efficiency2_curve_round_trips(tmp_path):
+    n = pypsa.Network()
+    n.set_snapshots(pd.date_range("2024-01-01", periods=2, freq="h"))
+    n.add("Carrier", "AC")
+    n.add("Bus", ["a", "b", "c"])
+    n.add(
+        "Link",
+        "split",
+        bus0="a",
+        bus1="b",
+        bus2="c",
+        p_nom=10,
+        efficiency2={0.0: 0.0, 0.5: 0.4, 1.0: 0.5},
+    )
+    n.export_to_datarecord(tmp_path / "record")
+    got = pypsa.Network(tmp_path / "record")
+    assert n.equals(got.copy(), log_mode="strict")
+    assert len(got.c.links.piecewise["efficiency2"]) == 3
+
+
+def test_ragged_curves_round_trip_without_nan_breakpoints(tmp_path):
+    n = pypsa.Network()
+    n.set_snapshots(pd.date_range("2024-01-01", periods=2, freq="h"))
+    n.add("Carrier", "AC")
+    n.add("Bus", "bus")
+    n.add(
+        "Generator",
+        "long",
+        bus="bus",
+        p_nom=10,
+        marginal_cost={0.0: 1.0, 0.5: 2.0, 1.0: 4.0},
+    )
+    n.add(
+        "Generator",
+        "short",
+        bus="bus",
+        p_nom=10,
+        marginal_cost={0.0: 1.0, 1.0: 3.0},
+    )
+    n.export_to_datarecord(tmp_path / "record")
+    got = pypsa.Network(tmp_path / "record")
+    assert n.equals(got.copy(), log_mode="strict")
+    paths = list((tmp_path / "record").rglob("marginal_cost.parquet"))
+    assert paths
+    curve = pd.concat([_curve_rows(p.parent.parent, "marginal_cost") for p in paths])
+    assert len(curve) == 5
+    assert not curve["breakpoint"].isna().any()
+    assert not curve["value"].isna().any()
+
+
+def test_a_scalar_beside_a_curve_is_skipped_with_one_warning(tmp_path, caplog):
+    n = pypsa.Network()
+    n.set_snapshots(pd.date_range("2024-01-01", periods=2, freq="h"))
+    n.add("Carrier", "AC")
+    n.add("Bus", "bus")
+    n.add(
+        "Generator",
+        "gen",
+        bus="bus",
+        p_nom=10,
+        marginal_cost={0.0: 1.0, 1.0: 3.0},
+    )
+    n.c.generators.static.loc["gen", "marginal_cost"] = 5.0
+    with caplog.at_level("WARNING"):
+        n.export_to_datarecord(tmp_path / "record")
+    warned = [
+        r.getMessage()
+        for r in caplog.records
+        if "skips" in r.getMessage()
+        and "gen" in r.getMessage()
+        and "marginal_cost" in r.getMessage()
+    ]
+    assert len(warned) == 1
+    got = pypsa.Network(tmp_path / "record")
+    assert got.c.generators.static.loc["gen", "marginal_cost"] == 0.0
+    assert len(got.c.generators.piecewise["marginal_cost"]) == 2

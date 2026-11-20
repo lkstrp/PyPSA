@@ -66,6 +66,12 @@ def piecewise_attrs(component: str) -> pd.DataFrame:
 
 
 @lru_cache
+def piecewise_stems() -> frozenset[str]:
+    """Get the y attributes of the piecewise table, over all component types."""
+    return frozenset(pd.read_csv(PYPSA_DATA_DIR / "piecewise.csv")["y"])
+
+
+@lru_cache
 def piecewise_schema(component: str, y: str) -> pd.Series:
     """Get the piecewise schema row for a component type and y attribute (empty if undefined)."""
     df = piecewise_attrs(component)

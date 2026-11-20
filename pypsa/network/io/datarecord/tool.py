@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -24,6 +25,8 @@ from duckdb import (
 
 if TYPE_CHECKING:
     import pypsa
+from pypsa.constants import piecewise_attrs
+from pypsa.definitions.structures import LazyDict
 from pypsa.descriptors import _update_ports_component_attrs
 from pypsa.network.io._common import (
     _broadcast_standard_types,
@@ -239,6 +242,7 @@ class PyPSATool(Tool):
         }
         read: dict[str, _TypeMembers] = {}
         ctypes = _components(record)
+        stochastic = NetworkShape(record.schema, record.dims).stochastic
         connection_frame = _connection_frame(record) if known & set(ctypes) else None
         for ctype in ctypes:
             # A type PyPSA has no registry entry for, though the record's own
@@ -252,14 +256,19 @@ class PyPSATool(Tool):
             resolved = record.flags(**{CTYPE: ctype})
             taken = _taken(declared, ctype, resolved)
             ignored |= {(ctype, attr) for attr in resolved if attr not in taken}
-            # A curve, not a scalar (https://energy-models.github.io/datarecord/design/model/attributes/#wide-and-long-rows). PyPSA takes a scalar for every
-            # attribute this build assigns, so the record is storing something
-            # correct that this translation cannot express - reported here
-            # rather than silently pivoting one arbitrary breakpoint.
+            # A curve outside a static piecewise pair of a deterministic network is reported.
+            expressible = set(piecewise_attrs(ctype)["y"])
             unsupported_values |= {
                 (ctype, attr)
                 for attr in taken
-                if resolved[attr].breakpoints
+                if (
+                    resolved[attr].breakpoints
+                    and (
+                        attr not in expressible
+                        or stochastic
+                        or _curve_coordinates(record, attr)
+                    )
+                )
                 or resolved[attr].varies.intersection(unheld.get(attr, ()))
             }
             read[ctype] = _TypeMembers.of(record, ctype, connection_frame)
@@ -403,6 +412,21 @@ class PyPSATool(Tool):
         source = RecordSource(record, n, shape, con, read, record.flags(), self.schema)
         for ctype in source.types():
             n.c[ctype]._set_source(source)
+        # `Components.piecewise` announces the table's y names only, so a
+        # curve on a further port (`efficiency2`) is announced here.
+        for ctype in ("Link", "Process"):
+            if ctype not in source.types():
+                continue
+            extra = [
+                column
+                for column in source.curve_columns(ctype)
+                if column not in piecewise_attrs(ctype)["y"].to_numpy()
+            ]
+            if extra:
+                n.c[ctype].piecewise = LazyDict(
+                    load=partial(source.piecewise, n.c[ctype].ctype),
+                    keys=[*piecewise_attrs(ctype)["y"].unique(), *extra],
+                )
         _add_shapes(n, record)
         _broadcast_standard_types(n)
         n._record = record
@@ -607,6 +631,20 @@ def _add_shapes(n: pypsa.Network, record: RecordLike) -> None:
     if n.has_scenarios:
         static = pd.concat(dict.fromkeys(n.scenarios, static), names=[SCENARIO])
     n._import_components_from_df(static, "Shape")
+
+
+def _curve_coordinates(record: RecordLike, attr: str) -> bool:
+    """Whether a curve row of `attr` names a `snapshot`, `period` or `scenario`."""
+    rel = record.attributes[attr]
+    named = [dim for dim in (SNAPSHOT, PERIOD, SCENARIO) if dim in rel.columns]
+    if not named:
+        return False
+    anywhere = col(named[0]).isnotnull()
+    for dim in named[1:]:
+        anywhere = anywhere | col(dim).isnotnull()
+    return bool(
+        rel.filter(col("breakpoint").isnotnull() & anywhere).limit(1).fetchall()
+    )
 
 
 # The tool is a module-level singleton, imported rather than looked up by

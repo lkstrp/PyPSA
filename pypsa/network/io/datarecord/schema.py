@@ -23,6 +23,8 @@ from datarecord.schema.specs import (
 )
 from duckdb import Expression
 
+from pypsa.constants import piecewise_stems
+
 if TYPE_CHECKING:
     import pypsa
 
@@ -655,6 +657,9 @@ def _registry() -> tuple[RecordSchema, dict[str, frozenset[str]], frozenset[str]
         if carried:
             carries[c.name] = frozenset(carried)
     attributes = _with_default_by(attributes, by_type)
+    for name in piecewise_stems():
+        if name in attributes:
+            attributes[name] = attributes[name].model_copy(update={"breakpoints": True})
     properties = {
         ENTITY: {
             CTYPE: PropertySpec(

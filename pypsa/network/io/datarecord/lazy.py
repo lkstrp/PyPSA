@@ -17,6 +17,7 @@ from datarecord.protocols import Flags, RecordLike
 from datarecord.schema.categories import with_defaults
 from datarecord.tools.base import Schema
 from duckdb import ColumnExpression as col
+from duckdb import ConstantExpression as lit
 from duckdb import DuckDBPyConnection, DuckDBPyRelation
 from duckdb import StarExpression as star
 
@@ -92,6 +93,8 @@ class RecordSource:
         self._broadcast: dict[str, pd.DataFrame] = {}
         #: The index `static` supplied, by type: the members the record holds.
         self._held: dict[str, pd.Index] = {}
+        #: Curve rows by type and PyPSA column, read only by `piecewise`.
+        self._curves: dict[str, dict[str, DuckDBPyRelation]] = {}
 
     # -- the Source protocol -------------------------------------------------
 
@@ -212,9 +215,57 @@ class RecordSource:
         return _coerce_string_dtypes(frame)
 
     def piecewise(self, ctype: ComponentType, attr: str) -> pd.DataFrame:
-        """Return an empty breakpoint frame: a record carries no piecewise data."""
+        """Return the breakpoint frame of `attr`, read from the record's curve rows."""
         self._check(ctype)
-        return InMemorySource().piecewise(ctype, attr)
+        self._attributes(ctype.name)
+        rows = self._curves.get(ctype.name, {}).get(attr)
+        if rows is None:
+            return InMemorySource().piecewise(ctype, attr)
+        n = self._network()
+        c = n.c[ctype.name]
+        order = c.static.index
+        long = rows.project(f"{ENTITY}, breakpoint, value").df()
+        # Rows of another type's entities.
+        long = long[long[ENTITY].isin(order)]
+        if long.empty:
+            return InMemorySource().piecewise(ctype, attr)
+        schema_row = c._piecewise_schema(attr)
+        curves = {
+            name: group.sort_values("breakpoint", kind="mergesort")
+            for name, group in long.groupby(ENTITY, sort=False)
+        }
+        depth = max(len(g) for g in curves.values())
+
+        def padded(values: pd.Series) -> np.ndarray:
+            out = np.full(depth, np.nan)
+            out[: len(values)] = values.to_numpy(dtype=float)
+            return out
+
+        columns: dict[tuple[str, str], np.ndarray] = {}
+        for name in order[order.isin(list(curves))]:
+            columns[(name, schema_row.x)] = padded(curves[name]["breakpoint"])
+            columns[(name, attr)] = padded(curves[name]["value"])
+        frame = pd.DataFrame(columns, index=pd.RangeIndex(depth), dtype=float)
+        frame.columns = pd.MultiIndex.from_tuples(
+            frame.columns, names=["name", "attribute"]
+        )
+        return n._normalize_breakpoints(frame, schema_row)
+
+    def curve_columns(self, ctype: str) -> list[str]:
+        """The PyPSA columns of `ctype` that hold curve rows, `efficiency2` for a bus2 curve."""
+        self._attributes(ctype)
+        curves = self._curves.get(ctype, {})
+        if not curves:
+            return []
+        probes = [
+            rows.project(ENTITY).limit(1).project(lit(column).alias("column"))
+            for column, rows in curves.items()
+        ]
+        found = probes[0]
+        for probe in probes[1:]:
+            found = found.union(probe)
+        held = {column for (column,) in found.distinct().fetchall()}
+        return [column for column in curves if column in held]
 
     def varying_attrs(self, ctype: ComponentType) -> list[str]:
         """Return the registry's varying attributes, then the record's own that vary over `snapshot`."""
@@ -324,13 +375,24 @@ class RecordSource:
                     record, ctype, attr, labels, self._flagged, filter=False
                 )
             )
+            curves = None
+            if flags.breakpoints:
+                curves = long.filter(col("breakpoint").isnotnull())
+                long = long.filter(col("breakpoint").isnull())
             if CONNECTION in schema.attributes[attr].dims:
                 for column, rows in _port_columns(
                     long, attr, connections, ctype, self._con
                 ).items():
                     attributes[column] = (rows, flags)
+                if curves is not None:
+                    self._curves.setdefault(ctype, {}).update(
+                        _port_columns(curves, attr, connections, ctype, self._con)
+                    )
             else:
-                attributes[pypsa_attribute(ctype, attr)] = (long, flags)
+                column = pypsa_attribute(ctype, attr)
+                attributes[column] = (long, flags)
+                if curves is not None:
+                    self._curves.setdefault(ctype, {})[column] = curves
         return static, attributes
 
     @cached_property

@@ -20,8 +20,10 @@ pytest.importorskip("datarecord", reason="needs the datarecord extra")
 from datarecord import Workspace  # noqa: E402
 from datarecord_helpers import assert_networks_equal, export_network  # noqa: E402
 from test_io_datarecord import (  # noqa: E402, F401
+    _curve_child,
     _three_port_link,
     ac_dc,
+    exported,
     layout,
     multiperiod,
     multiperiod_revision,
@@ -43,6 +45,7 @@ class _Counting:
         self.static_calls = []
         self.dynamic_calls = []
         self.names_calls = []
+        self.piecewise_calls = []
 
     def static(self, ctype):
         self.static_calls.append(ctype.name)
@@ -53,6 +56,7 @@ class _Counting:
         return self.source.dynamic(ctype, attr)
 
     def piecewise(self, ctype, attr):
+        self.piecewise_calls.append((ctype.name, attr))
         return self.source.piecewise(ctype, attr)
 
     def varying_attrs(self, ctype):
@@ -385,3 +389,28 @@ def test_import_into_populated_network_merges_and_deduplicates(ac_dc, tmp_path):
     assert clash in n.c.generators.static.index
     assert clash not in n.c.loads.static.index
     assert not any(c.dynamic.pending for c in n.components)
+
+
+def test_a_curve_is_read_on_first_access_only(exported, monkeypatch):
+    """Opening a record with curves reads none, the first access reads one."""
+    revision = _curve_child(
+        exported,
+        "marginal_cost",
+        curves={"Manchester Wind": ((0.0, 0.0), (0.5, 20.0), (1.0, 35.0))},
+        scalar=False,
+    )
+    calls = []
+    read = RecordSource.piecewise
+
+    def counting(self, ctype, attr):
+        calls.append((ctype.name, attr))
+        return read(self, ctype, attr)
+
+    monkeypatch.setattr(RecordSource, "piecewise", counting)
+    n = PyPSA.open(revision.record)
+    gens = n.c["Generator"]
+    assert calls == []
+    assert "marginal_cost" in gens.piecewise.pending
+    _ = gens.piecewise["marginal_cost"]
+    assert calls == [("Generator", "marginal_cost")]
+    assert "marginal_cost" not in gens.piecewise.pending
