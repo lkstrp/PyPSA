@@ -48,6 +48,9 @@ SCENARIO_WEIGHT = "scenario_weight"
 ENTITY, BUS, CARRIER, CONNECTION = "entity", "bus", "carrier", "connection"
 
 
+GLOBAL_CONSTRAINT = "global_constraint"
+
+
 SUB_NETWORK = "sub_network"
 LINE_TYPE, TRANSFORMER_TYPE = "line_type", "transformer_type"
 
@@ -68,6 +71,7 @@ _AXIS_TYPES = {
     "Bus": BUS,
     "Carrier": CARRIER,
     "SubNetwork": SUB_NETWORK,
+    "GlobalConstraint": GLOBAL_CONSTRAINT,
     **_CATALOG_TYPES,
 }
 
@@ -94,6 +98,7 @@ _PROPERTIES = {
     BUS: ("carrier", "type", "x", "y", "unit", "location"),
     CARRIER: ("color", "nice_name"),
     SUB_NETWORK: (CARRIER,),
+    GLOBAL_CONSTRAINT: ("type", BUS),
 }
 
 
@@ -268,11 +273,24 @@ def _renames(ctype: str) -> dict[str, str]:
     return _RESULT_RENAMES.get(ctype, {"p": "p_internal"})
 
 
+#: Per type, the inputs renamed off the name another type's input shares. `Bus.scaling` and
+#: `GlobalConstraint.scaling` would be one record attribute over two dims.
+_INPUT_RENAMES: dict[str, dict[str, str]] = {
+    "GlobalConstraint": {"scaling": "constraint_scaling"},
+}
+
+
+def record_input(ctype: str, attr: str) -> str:
+    """The record name of `ctype`'s PyPSA input `attr`."""
+    return _INPUT_RENAMES.get(ctype, {}).get(attr, attr)
+
+
 def pypsa_attribute(ctype: str, name: str) -> str:
-    """The PyPSA attribute a record result `name` of `ctype` came from."""
-    for attr, renamed in _renames(ctype).items():
-        if renamed == name:
-            return attr
+    """The PyPSA attribute a record `name` of `ctype`, a result or an input, came from."""
+    for renames in (_renames(ctype), _INPUT_RENAMES.get(ctype, {})):
+        for attr, renamed in renames.items():
+            if renamed == name:
+                return attr
     return name
 
 
@@ -531,9 +549,9 @@ def _with_default_by(
 
 
 def _property(name: str, spec: AttributeSpec) -> PropertySpec:
-    """Return the property spec of registry input `name`; a `carrier` names a label of the `carrier` dim.
+    """Return the property spec of registry input `name`, where a `carrier` or `bus` names a label of that dim.
 
-    PyPSA's `""` carrier names none, so it is no such property's default.
+    PyPSA's `""` names none, so it is no such property's default.
 
     Notes
     -----
@@ -541,10 +559,10 @@ def _property(name: str, spec: AttributeSpec) -> PropertySpec:
 
     """
     fields = spec.model_dump(exclude={"dims", "breakpoints"})
-    if name == CARRIER:
+    if name in (CARRIER, BUS):
         fields |= {
             "dtype": None,
-            "one_of": CARRIER,
+            "one_of": name,
             "default": fields["default"] or None,
         }
     return PropertySpec(**fields)
@@ -673,13 +691,14 @@ def _registry() -> tuple[RecordSchema, dict[str, frozenset[str]], frozenset[str]
             for attr in c.defaults.index
             if attr != "name" and attr not in _output_attributes(c)
         }
+        renames = _INPUT_RENAMES.get(ctype, {})
         held = tuple(specs) if ctype in _CATALOG_TYPES else _PROPERTIES.get(dim, ())
         properties[dim] = (
             {CARRIER: PropertySpec(one_of=CARRIER, description=_SUB_NETWORK_CARRIER)}
             if dim == SUB_NETWORK
             else {name: _property(name, specs.pop(name)) for name in held}
         )
-        attributes |= specs
+        attributes |= {renames.get(name, name): spec for name, spec in specs.items()}
     inputs = frozenset(
         {*attributes, *(name for named in properties.values() for name in named)}
     )
@@ -731,6 +750,10 @@ def _registry() -> tuple[RecordSchema, dict[str, frozenset[str]], frozenset[str]
                 dtype="str",
                 description="A connected part of the network, as PyPSA numbers them.",
             ),
+            GLOBAL_CONSTRAINT: Dimension(
+                dtype="str",
+                description="A constraint over the whole network, as PyPSA names it.",
+            ),
             LINE_TYPE: Dimension(dtype="str", description="A standard type of line."),
             TRANSFORMER_TYPE: Dimension(
                 dtype="str", description="A standard type of transformer."
@@ -746,7 +769,9 @@ def _registry() -> tuple[RecordSchema, dict[str, frozenset[str]], frozenset[str]
         },
         properties=properties,
         attributes=attributes | results,
-        partial=frozenset({ENTITY, BUS, SCENARIO, CONNECTION}),
+        partial=frozenset(
+            {ENTITY, BUS, CARRIER, GLOBAL_CONSTRAINT, SCENARIO, CONNECTION}
+        ),
     )
     return schema, carries, inputs
 

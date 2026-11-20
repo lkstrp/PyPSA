@@ -23,7 +23,6 @@ from duckdb import StarExpression as star
 from pypsa.components.source import InMemorySource
 from pypsa.network.io._common import _coerce_string_dtypes
 from pypsa.network.io.datarecord.build import (
-    _INVESTMENT_PERIOD,
     _assign_static,
     _collapse_connections,
     _one_labelled,
@@ -39,6 +38,7 @@ from pypsa.network.io.datarecord.schema import (
     _CATALOG_TYPES,
     CONNECTION,
     ENTITY,
+    GLOBAL_CONSTRAINT,
     PERIOD,
     SCENARIO,
     SNAPSHOT,
@@ -48,6 +48,7 @@ from pypsa.network.io.datarecord.schema import (
 )
 from pypsa.network.io.datarecord.shape import Index, NetworkShape
 from pypsa.network.io.datarecord.source import (
+    _INVESTMENT_PERIOD,
     _empty_for_none,
     _keyed_as_entity,
     _names,
@@ -77,9 +78,16 @@ class RecordSource:
         members: Mapping[str, _TypeMembers],
         flagged: Mapping[str, Flags],
         schema: Schema,
+        *,
+        constraintless: bool = False,
     ) -> None:
-        """Open `record` over `n`, whose axes are already applied."""
+        """Open `record` over `n`, whose axes are already applied.
+
+        `constraintless` holds none of the record's global constraints, as a
+        selection cannot name no label of the axis (`_narrow`).
+        """
         self.record = record
+        self._constraintless = constraintless
         self._n = weakref.ref(n)
         self._shape = shape
         self._con = con
@@ -269,10 +277,14 @@ class RecordSource:
         outlines = _shape_properties(schema, dim)
         names = [name for name in schema.properties[dim] if name not in outlines]
         labels = with_defaults(schema, dim, record.properties[dim], names, self._con)
-        static = _keyed_as_entity(_empty_for_none(labels), dim).project(
+        if self._constraintless and dim == GLOBAL_CONSTRAINT:
+            labels = labels.limit(0)
+        static = _keyed_as_entity(_empty_for_none(labels, dim), dim).project(
             "*, row_number() OVER () AS _pos"
         )
         over = {**self._settled, dim: labels}
+        # A single-period network has no period for `investment_period` to name.
+        periodless = {_INVESTMENT_PERIOD} if PERIOD in _squeezed(record) else set()
         attributes = {
             pypsa_attribute(ctype, attr): (
                 _keyed_as_entity(
@@ -284,7 +296,9 @@ class RecordSource:
                 flags,
             )
             for attr, flags in self._flagged.items()
-            if attr in schema.attributes and dim in schema.attributes[attr].dims
+            if attr in schema.attributes
+            and dim in schema.attributes[attr].dims
+            and attr not in periodless
         }
         return static, attributes
 
@@ -305,13 +319,7 @@ class RecordSource:
         connections = members.connections
         static = _collapse_connections(static, connections, ctype, self._con)
 
-        # A single-period network has no period for `investment_period` to name.
-        periodless = {_INVESTMENT_PERIOD} if PERIOD in _squeezed(record) else set()
-        over_entity = [
-            a
-            for a in schema.attributes
-            if schema.addresses(a, ENTITY) and a not in periodless
-        ]
+        over_entity = [a for a in schema.attributes if schema.addresses(a, ENTITY)]
         carried = _taken(schema, ctype, over_entity)
         attributes: _Attributes = {}
         for attr, flags in self._flagged.items():

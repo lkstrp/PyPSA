@@ -130,6 +130,32 @@ def test_stochastic_open_equals_build(stochastic_revision):
     )
 
 
+def _with_constraints(n):
+    n = n.copy()
+    n.add("GlobalConstraint", "plain", sense="<=", constant=1.0)
+    n.add("GlobalConstraint", "at_bus", bus="Manchester", sense="<=", constant=2.0)
+    return n
+
+
+def test_global_constraints_open_equals_build(store, ac_dc):
+    n = _with_constraints(ac_dc)
+    record = export_network(n, store).record
+    opened = PyPSA.open(record)
+    _touch_everything(opened)
+    assert_networks_equal(opened, PyPSA.build(record))
+    assert_networks_equal(opened, n)
+
+
+def test_stochastic_global_constraints_open_equals_build(store, ac_dc):
+    n = _with_constraints(ac_dc)
+    n.set_scenarios({"low": 0.5, "high": 0.5})
+    n.c.GlobalConstraint.static.loc[("high", "plain"), "constant"] = 9.0
+    record = export_network(n, store).record
+    opened = PyPSA.open(record)
+    _touch_everything(opened)
+    assert_networks_equal(opened, PyPSA.build(record))
+
+
 def test_multiperiod_open_equals_build(multiperiod, multiperiod_revision):
     n = PyPSA.open(multiperiod_revision.record)
     _touch_everything(n)
@@ -359,6 +385,25 @@ def test_a_selection_opens_lazily_as_a_smaller_network(single_revision, ac_dc):
     assert not counters["Bus"].dynamic_calls, "no series of the buses is read"
     assert not counters["Load"].dynamic_calls
     assert "p_set" in n.c.Load.dynamic.pending, "the loads' series stay unread"
+
+
+@pytest.mark.parametrize("lazy", [False, True], ids=["eager", "lazy"])
+def test_a_bus_selection_drops_the_constraint_at_a_dropped_bus(store, ac_dc, lazy):
+    """A constraint at a bus the selection drops goes, one at a kept bus and one at none stay."""
+    n = ac_dc.copy()
+    n.add("GlobalConstraint", "at_gone", bus="Manchester", sense="<=", constant=1.0)
+    n.add("GlobalConstraint", "at_kept", bus="London", sense="<=", constant=2.0)
+    n.add("GlobalConstraint", "bus_less", sense="<=", constant=3.0)
+    record = export_network(n, store).record
+    view = record.select(bus=["London", "Norwich"])
+
+    built = PyPSA.open(view) if lazy else PyPSA.build(view)
+
+    assert built.c.GlobalConstraint.static.index.tolist() == [
+        "co2_limit",
+        "at_kept",
+        "bus_less",
+    ]
 
 
 def test_import_into_empty_network_opens_lazily(ac_dc, tmp_path):

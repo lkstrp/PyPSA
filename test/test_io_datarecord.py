@@ -595,6 +595,42 @@ def test_a_record_of_the_earlier_layout_is_refused(exported):
         PyPSA.verify(record)
 
 
+def _constraint_record(store):
+    """A record of `_north` with one constraint, `cap`, as a committed revision."""
+    n = _north()
+    n.add("GlobalConstraint", "cap", sense="<=", constant=1.0)
+    return export_network(n, store)
+
+
+def test_a_constraint_label_named_like_an_entity_is_refused(store):
+    """A record cannot hold one name as a `global_constraint` label and as an entity."""
+    child = empty_child(_constraint_record(store))
+    write_component(child, "Generator", [{"entity": "cap"}])
+    record = child.commit().record
+
+    with pytest.raises(UnsupportedRecordError, match="more than one category"):
+        PyPSA.open(record)
+    with pytest.raises(UnsupportedRecordError, match="more than one category"):
+        pypsa.Network.from_datarecord(record)
+    with pytest.raises(UnsupportedRecordError, match="more than one category"):
+        PyPSA.build(record)
+    assert PyPSA.verify(record).names == {"cap"}
+
+
+def test_a_record_with_a_constraint_entity_is_refused_as_an_earlier_layout(store):
+    """`GlobalConstraint` members on the entity axis are the layout before the `global_constraint` dim."""
+    child = empty_child(_constraint_record(store))
+    write_component(child, "GlobalConstraint", [{"entity": "old"}])
+    record = child.commit().record
+
+    with pytest.raises(UnsupportedRecordError, match="earlier layout of this tool"):
+        PyPSA.open(record)
+    with pytest.raises(UnsupportedRecordError, match="earlier layout of this tool"):
+        pypsa.Network.from_datarecord(record)
+    with pytest.raises(UnsupportedRecordError, match="earlier layout of this tool"):
+        PyPSA.verify(record)
+
+
 def test_verify_reports_a_missing_required_attribute(exported, ac_dc):
     """A component type with no `bus` anywhere - no connection row supplies it.
 
@@ -695,6 +731,183 @@ def test_to_datarecord_rejects_a_cross_type_name_collision(workspace):
     assert raised.value.missing.names == {"north"}
     assert "Generator, Load" in str(raised.value)
     assert "deduplicate_names" in str(raised.value)
+
+
+def test_a_constraint_may_not_be_named_like_a_generator(workspace):
+    """A `GlobalConstraint` is a label of `global_constraint`, yet its name still may not be an entity's."""
+    n = _north()
+    with unchecked_names(n):
+        n.add("GlobalConstraint", "gen", sense="<=", constant=1.0)
+
+    with pytest.raises(
+        UnsupportedRecordError, match="more than one component type"
+    ) as raised:
+        PyPSA.to_datarecord(n, workspace.con)
+    assert raised.value.missing.names == {"gen"}
+    assert "GlobalConstraint" in str(raised.value)
+    assert "Generator" in str(raised.value)
+
+
+def test_a_constraint_at_a_missing_bus_is_refused(workspace):
+    n = _north()
+    n.add("GlobalConstraint", "cap", bus="nowhere", sense="<=", constant=1.0)
+
+    with pytest.raises(ValueError, match="cap.*nowhere|nowhere.*cap"):
+        PyPSA.to_datarecord(n, workspace.con)
+
+
+def test_global_constraints_are_labels_of_their_own_dim(store):
+    schema = export_network(_constraints(), store).record.schema
+    assert "global_constraint" in schema.dimensions
+    assert "GlobalConstraint" not in schema.dimensions[CTYPE].one_of
+    assert set(schema.properties["global_constraint"]) == {"type", "bus"}
+
+
+def _constraints(periods=False):
+    """`_north` with constraints, one with no bus or period, one at a bus, and with periods one for a period and one with both."""
+    n = _north()
+    n.add("Bus", "south")
+    if periods:
+        n.set_investment_periods([2030, 2040])
+    n.add("GlobalConstraint", "plain", sense="<=", constant=1.0)
+    n.add("GlobalConstraint", "at_bus", bus="south", sense="<=", constant=2.0)
+    if periods:
+        n.add("GlobalConstraint", "in_period", investment_period=2040, constant=3.0)
+        n.add(
+            "GlobalConstraint",
+            "both",
+            bus="north",
+            investment_period=2030,
+            sense=">=",
+            constant=4.0,
+        )
+    return n
+
+
+@pytest.mark.parametrize("periods", [False, True], ids=["single", "periods"])
+def test_global_constraints_round_trip_with_their_bus_and_period(store, periods):
+    """The empty bus comes back as `""`, a constraint for no period as NaN."""
+    n = _constraints(periods)
+    record = export_network(n, store).record
+    expected = n.c.GlobalConstraint.static
+
+    for built in (PyPSA.build(record), PyPSA.open(record)):
+        static = built.c.GlobalConstraint.static
+        assert list(static.index) == list(expected.index)
+        assert static["bus"].to_dict() == expected["bus"].to_dict()
+        assert static["bus"]["plain"] == ""
+        assert static["bus"]["at_bus"] == "south"
+        assert static["constant"].to_dict() == expected["constant"].to_dict()
+        if periods:
+            got = static["investment_period"]
+            assert got["both"] == 2030
+            assert got["in_period"] == 2040
+            assert np.isnan(got["plain"])
+            assert static["sense"]["both"] == ">="
+
+
+def test_a_constraint_added_to_an_opened_network_keeps_the_others(store):
+    """A new `global_constraint` label is written without resetting the existing ones."""
+    revision = export_network(_constraints(), store)
+    n = pypsa.Network.from_datarecord(revision.record)
+    n.add("GlobalConstraint", "extra", constant=2.0)
+    child = store.commit(n.to_datarecord(base=n.record), parent=revision)
+
+    static = PyPSA.build(child.record).c.GlobalConstraint.static
+    assert list(static.index) == ["plain", "at_bus", "extra"]
+    assert static.at["plain", "constant"] == 1.0
+    assert static.at["plain", "sense"] == "<="
+    assert static.at["at_bus", "bus"] == "south"
+    assert static.at["extra", "constant"] == 2.0
+
+
+def test_a_carrier_added_to_an_opened_network_keeps_the_others(store):
+    n = _north()
+    n.add("Carrier", "gas", co2_emissions=0.2)
+    revision = export_network(n, store)
+    opened = pypsa.Network.from_datarecord(revision.record)
+    opened.add("Carrier", "wind", co2_emissions=0.1)
+    child = store.commit(opened.to_datarecord(base=opened.record), parent=revision)
+    static = PyPSA.build(child.record).c.Carrier.static
+    assert static.at["gas", "co2_emissions"] == 0.2
+    assert static.at["wind", "co2_emissions"] == 0.1
+
+
+def test_a_bus_added_to_an_opened_network_keeps_a_pending_series(store):
+    n = _north()
+    n.add("Bus", "south")
+    n.c.Bus.dynamic.v_mag_pu_set["north"] = [1.05, 1.1]
+    revision = export_network(n, store)
+    opened = pypsa.Network.from_datarecord(revision.record)
+    opened.add("Bus", "east", v_nom=5.0)
+    child = store.commit(opened.to_datarecord(base=opened.record), parent=revision)
+    built = PyPSA.build(child.record).c.Bus
+    assert built.dynamic.v_mag_pu_set["north"].tolist() == [1.05, 1.1]
+    assert built.static.at["east", "v_nom"] == 5.0
+
+
+def test_stochastic_global_constraints_differ_per_scenario(store):
+    n = _north()
+    n.add("GlobalConstraint", ["co2", "gas"], sense="<=", constant=100.0)
+    n.set_scenarios(["a", "b"])
+    static = n.c.GlobalConstraint.static
+    static.loc[("b", "co2"), "carrier_attribute"] = "gas_emissions"
+    static.loc[("b", "co2"), "sense"] = ">="
+    static.loc[("b", "co2"), "constant"] = 7.0
+    static["mu"] = [1.0, 2.0, 3.0, 4.0]
+    record = export_network(n, store).record
+
+    for built in (PyPSA.build(record), PyPSA.open(record)):
+        got = built.c.GlobalConstraint.static
+        for column in ("carrier_attribute", "sense", "constant", "mu"):
+            assert got[column].to_dict() == static[column].to_dict(), column
+
+
+def test_a_re_solve_writes_a_constraint_result_per_scenario(store):
+    """`mu` over `global_constraint`, different per scenario, reaches each scenario."""
+    n = _north()
+    n.add("GlobalConstraint", "co2", sense="<=", constant=100.0)
+    n.set_scenarios(["a", "b"])
+    revision = export_network(n, store)
+    n = PyPSA.build(revision.record)
+    n.c.GlobalConstraint.static["mu"] = [5.0, 6.0]
+    revision = _results_over(revision, n)
+
+    built = PyPSA.build(revision.record)
+    assert built.c.GlobalConstraint.static["mu"].tolist() == [5.0, 6.0]
+
+
+def test_flow_based_global_constraints_round_trip(store):
+    """`ram` as a series, `scaling` beside a bus's own, `domain` and `ptdf_*` columns."""
+    n = _north()
+    n.add("Bus", "south")
+    n.add(
+        "GlobalConstraint",
+        "flow",
+        sense="<=",
+        scaling=5.0,
+        domain="nodal",
+        ptdf_north=0.25,
+        ptdf_south=-0.75,
+    )
+    n.c.GlobalConstraint.dynamic["ram"] = pd.DataFrame(
+        {"flow": [10.0, 20.0]}, index=n.snapshots
+    )
+    n.c.GlobalConstraint.dynamic["mu_ram"] = pd.DataFrame(
+        {"flow": [0.5, 0.0]}, index=n.snapshots
+    )
+    n.c.Bus.static.loc["south", "scaling"] = 2.0
+    record = export_network(n, store).record
+
+    for built in (PyPSA.build(record), PyPSA.open(record)):
+        got = built.c.GlobalConstraint
+        assert got.static.at["flow", "scaling"] == 5.0
+        assert built.c.Bus.static.at["south", "scaling"] == 2.0
+        assert got.static.at["flow", "domain"] == "nodal"
+        assert got.static.at["flow", "ptdf_north"] == 0.25
+        assert got.static.at["flow", "ptdf_south"] == -0.75
+        assert got.dynamic["ram"]["flow"].tolist() == [10.0, 20.0]
+        assert got.dynamic["mu_ram"]["flow"].tolist() == [0.5, 0.0]
 
 
 def test_a_name_clash_message_caps_the_names_at_ten(workspace):
@@ -1471,6 +1684,39 @@ def test_a_re_solve_writes_a_result_shared_across_scenarios_over_each(
         revision = _results_over(revision, n)
     built = PyPSA.build(revision.record)
     assert built.c.GlobalConstraint.static["mu"].tolist() == second
+
+
+def _stored_mu(record):
+    """The `mu` rows of `record` by `global_constraint`, NULL as NaN, as `build` reads it as 0."""
+    rows = record.attributes["mu"].df()
+    return rows.set_index("global_constraint")["value"]
+
+
+def test_a_results_only_export_without_a_constraint_leaves_its_result_null(store):
+    """A re-solve lacking one of `base`'s constraints leaves that constraint's `mu` NULL, and the other's as solved."""
+    n = _north()
+    n.add("GlobalConstraint", ["co2", "gas"], sense="<=", constant=100.0)
+    n.c.GlobalConstraint.static["mu"] = [5.0, 6.0]
+    revision = export_network(n, store)
+    solved = PyPSA.build(revision.record)
+    solved.remove("GlobalConstraint", "gas")
+    solved.c.GlobalConstraint.static["mu"] = [7.0]
+    mu = _stored_mu(_results_over(revision, solved).record)
+    assert mu["co2"] == 7.0
+    assert pd.isna(mu["gas"])
+
+
+def test_a_results_only_export_adding_a_constraint_is_refused(store):
+    """A network holding a constraint `base` lacks is refused at the call."""
+    n = _north()
+    n.add("GlobalConstraint", "co2", sense="<=", constant=100.0)
+    revision = export_network(n, store)
+    grown = PyPSA.build(revision.record)
+    grown.add("GlobalConstraint", "extra", sense="<=", constant=1.0)
+    with pytest.raises(
+        ValueError, match="global_constraint labels `base` lacks: \\['extra'\\]"
+    ):
+        _results_over(revision, grown)
 
 
 @pytest.mark.slow
@@ -3155,6 +3401,95 @@ def test_selected_periods_keep_the_global_constraints_applying_in_them(
         check_index_type=False,
         check_names=False,
     )
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("value", [2040, [2040]], ids=str)
+def test_a_period_selection_dropping_every_constraint_builds_without_any(
+    store, ac_dc, value
+):
+    """A selection whose periods none of the constraints applies in builds a network with no constraint."""
+    n = _over_periods(ac_dc, "repeated")
+    n.remove("GlobalConstraint", "co2_limit")
+    n.add(
+        "GlobalConstraint",
+        "cap_2030",
+        investment_period=2030,
+        carrier_attribute="co2_emissions",
+        sense="<=",
+        constant=1.0,
+    )
+    record = export_network(n, store).record
+
+    view = record.select(period=value)
+    for built in (PyPSA.build(view), PyPSA.open(view)):
+        assert built.c.GlobalConstraint.static.empty
+
+
+@pytest.mark.slow
+def test_results_over_a_period_selection_keep_the_mu_of_the_constraints_it_dropped(
+    store, ac_dc
+):
+    """Results written over a period selection leave the `mu` of a constraint the selection dropped as `base` holds it, and one the network lacks within the selection NULL."""
+    n = _over_periods(ac_dc, "repeated")
+    n.add(
+        "GlobalConstraint",
+        ["cap_2030", "cap_2040"],
+        investment_period=[2030, 2040],
+        carrier_attribute="co2_emissions",
+        sense="<=",
+        constant=1.0,
+    )
+    n.c.GlobalConstraint.static["mu"] = 3.0
+    revision = export_network(n, store)
+    solved = PyPSA.build(revision.record.select(period=2040))
+    assert set(solved.c.GlobalConstraint.static.index) == {"co2_limit", "cap_2040"}
+    solved.remove("GlobalConstraint", "co2_limit")
+    solved.c.GlobalConstraint.static["mu"] = 9.0
+    layer = _results_over(revision, solved, period=2040)
+    mu = _stored_mu(layer.record)
+    assert mu["cap_2040"] == 9.0
+    assert mu["cap_2030"] == 3.0, "dropped by the selection, so left as `base` holds it"
+    assert pd.isna(mu["co2_limit"]), "in the selection yet lacked by the network"
+
+
+@pytest.mark.slow
+def test_an_investment_period_varying_by_scenario_is_refused_in_a_period_selection(
+    store, ac_dc
+):
+    """A network holds one `investment_period` of a constraint, so a selection keeping the scenarios it differs over is refused."""
+    n = _over_periods(ac_dc, "repeated")
+    n.set_scenarios({"lo": 0.5, "hi": 0.5})
+    static = n.c.GlobalConstraint.static
+    static.loc[("lo", "co2_limit"), "investment_period"] = 2030.0
+    static.loc[("hi", "co2_limit"), "investment_period"] = 2040.0
+    record = export_network(n, store).record
+
+    with pytest.raises(ValueError, match="`investment_period` varies over a dim"):
+        PyPSA.build(record.select(period=[2040]))
+
+
+@pytest.mark.slow
+def test_results_of_a_period_over_scenario_varying_constraints_are_refused(
+    store, ac_dc
+):
+    """A network of one period over a `base` whose `investment_period` varies by scenario cannot tell which constraints the period drops, so it is refused rather than written NULL."""
+    n = _over_periods(ac_dc, "repeated")
+    n.set_scenarios({"lo": 0.5, "hi": 0.5})
+    static = n.c.GlobalConstraint.static
+    static.loc[("lo", "co2_limit"), "investment_period"] = 2030.0
+    static.loc[("hi", "co2_limit"), "investment_period"] = 2040.0
+    static["mu"] = 3.0
+    revision = export_network(n, store)
+    member = _over_periods(ac_dc, "repeated")
+    periods = member.snapshots.get_level_values("period")
+    member = member.copy(
+        snapshots=member.snapshots[periods == 2040], investment_periods=[2040]
+    )
+    member.set_scenarios({"lo": 0.5, "hi": 0.5})
+
+    with pytest.raises(ValueError, match="`investment_period` varies over a dim"):
+        _results_over(revision, member)
 
 
 @pytest.mark.parametrize(

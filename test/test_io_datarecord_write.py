@@ -241,6 +241,25 @@ def test_a_stochastic_network_leaves_untouched_types_unread(stochastic_revision)
     assert_networks_equal(child, n)
 
 
+def test_untouched_global_constraints_are_served_from_the_base(store, ac_dc):
+    n = ac_dc.copy()
+    n.add("GlobalConstraint", "plain", sense="<=", constant=1.0)
+    n.add("GlobalConstraint", "at_bus", bus="Manchester", sense="<=", constant=2.0)
+    n.set_scenarios({"low": 0.5, "high": 0.5})
+    revision = export_network(n, store)
+
+    def edit(n):
+        n.c.Generator.static.loc[(slice(None), "Manchester Wind"), "marginal_cost"] += (
+            1.0
+        )
+
+    got, layer, read, child = _edit_and_export(revision, edit)
+    assert read <= {"Generator"}
+    assert _rows(layer, "constant") == 0
+    assert set(child.c.GlobalConstraint.static["bus"]) == {"", "Manchester"}
+    assert_networks_equal(child, got)
+
+
 def test_an_untouched_shape_type_is_not_read_at_export(store):
     root = export_network(_shaped(), store)
     n = pypsa.Network.from_datarecord(root.record)

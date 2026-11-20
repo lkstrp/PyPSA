@@ -62,6 +62,7 @@ from pypsa.network.io.datarecord.schema import (
     CONNECTION,
     CTYPE,
     ENTITY,
+    GLOBAL_CONSTRAINT,
     PERIOD,
     SCENARIO,
     SNAPSHOT,
@@ -79,6 +80,8 @@ from pypsa.network.io.datarecord.schema import (
     _registry_schema,
     _result_attributes,
     _static_dims,
+    pypsa_attribute,
+    record_input,
 )
 from pypsa.network.io.datarecord.shape import _multiperiod
 
@@ -128,6 +131,11 @@ def _as_entities(c: pypsa.Components, untouched: Collection[str] = ()) -> bool:
     return c.name not in {*_AXIS_TYPES, _SHAPE} and _exported(c, untouched)
 
 
+def _named_in_record(c: pypsa.Components, untouched: Collection[str] = ()) -> bool:
+    """Whether `c`'s members are labels of a dim that no other entity's name may repeat, a `GlobalConstraint`'s."""
+    return c.name == "GlobalConstraint" and _exported(c, untouched)
+
+
 def _names(index: pd.Index) -> pd.Index:
     """The `name` level of a static index, `(scenario, name)` on a stochastic network."""
     return index.get_level_values("name") if isinstance(index, pd.MultiIndex) else index
@@ -142,20 +150,26 @@ def _keyed_as_entity(rel: DuckDBPyRelation, dim: str) -> DuckDBPyRelation:
     )
 
 
-def _none_for_empty(frame: pd.DataFrame) -> pd.DataFrame:
-    """`frame` with an empty `carrier`, PyPSA's "none", as NULL: it names no label."""
-    if CARRIER not in frame:
-        return frame
-    return frame.assign(**{CARRIER: frame[CARRIER].where(frame[CARRIER] != "", None)})
+#: The columns that name a label of another dim, PyPSA's `""` meaning none.
+_REFERENCES = (CARRIER, BUS)
 
 
-def _empty_for_none(rel: DuckDBPyRelation) -> DuckDBPyRelation:
-    """`rel` with a NULL `carrier` as PyPSA's `""`, the inverse of `_none_for_empty`."""
-    if CARRIER not in rel.columns:
-        return rel
+def _none_for_empty(frame: pd.DataFrame, dim: str) -> pd.DataFrame:
+    """`frame` with an empty `carrier` or `bus`, PyPSA's none, as NULL, since it names no label.
+
+    `dim` is the frame's own dim, whose column holds labels, not references.
+    """
+    named = [c for c in _REFERENCES if c in frame and c != dim]
+    return frame.assign(**{c: frame[c].where(frame[c] != "", None) for c in named})
+
+
+def _empty_for_none(rel: DuckDBPyRelation, dim: str) -> DuckDBPyRelation:
+    """`rel` with a NULL `carrier` or `bus` as PyPSA's `""`, the inverse of `_none_for_empty`."""
     return rel.project(
         *(
-            coalesce(col(c), lit("")).alias(c) if c == CARRIER else col(c)
+            coalesce(col(c), lit("")).alias(c)
+            if c in _REFERENCES and c != dim
+            else col(c)
             for c in rel.columns
         )
     )
@@ -181,7 +195,7 @@ def _colliding_names(
     seen: dict[str, str] = {}
     clashing: set[str] = set()
     for c in n.components:
-        if not _as_entities(c, untouched):
+        if not (_as_entities(c, untouched) or _named_in_record(c, untouched)):
             continue
         members = _own_names(c) if c.name in untouched else _names(_own_static(c).index)
         for value in members:
@@ -786,6 +800,7 @@ class _NetworkSource:
         """
         _ = self._labelled, self._entity_frame
         schema = self.schema
+        self._refuse_missing_buses()
         for subject, typed in self.custom.properties.items():
             for name in typed:
                 dim = schema.properties[subject][name].one_of
@@ -805,6 +820,29 @@ class _NetworkSource:
                         "a custom text column named like a dim refers to it"
                     )
                     raise ValueError(msg)
+
+    def _refuse_missing_buses(self) -> None:
+        """Refuse a `GlobalConstraint` at a bus `n.buses` lacks.
+
+        Raises
+        ------
+        ValueError
+            If one is found.
+
+        """
+        constraints = self._labelled[GLOBAL_CONSTRAINT]
+        if BUS not in constraints:
+            return
+        at = constraints[[GLOBAL_CONSTRAINT, BUS]].dropna()
+        lost = at[~at[BUS].isin(self._buses[BUS])]
+        if lost.empty:
+            return
+        found = sorted(
+            f"'{name}' at '{bus}'"
+            for name, bus in zip(lost[GLOBAL_CONSTRAINT], lost[BUS], strict=True)
+        )
+        msg = f"GlobalConstraint {', '.join(found)} names a bus `n.buses` lacks"
+        raise ValueError(msg)
 
     @cached_property
     def _snapshots(self) -> pd.DataFrame:
@@ -935,6 +973,7 @@ class _NetworkSource:
             BUS: self._buses,
             CARRIER: self._carriers,
             SUB_NETWORK: self._sub_networks,
+            GLOBAL_CONSTRAINT: self._labels("GlobalConstraint"),
             **{dim: self._labels(ctype) for ctype, dim in _CATALOG_TYPES.items()},
             **{dim: self._shapes[dim] for dim in self._shape_dims},
         }
@@ -946,7 +985,7 @@ class _NetworkSource:
         columns = [p for p in self.schema.properties[dim] if p in static.columns]
         frame = static[columns].rename_axis(index={"name": dim}).reset_index()
         return self._with_shapes(
-            _unscoped(_none_for_empty(frame), [dim], ctype, self.con), dim
+            _unscoped(_none_for_empty(frame, dim), [dim], ctype, self.con), dim
         )
 
     def _with_shapes(self, frame: pd.DataFrame, dim: str) -> pd.DataFrame:
@@ -974,7 +1013,7 @@ class _NetworkSource:
         ]
         if not frames:
             return pd.DataFrame(columns=[ENTITY, CTYPE])
-        merged = _none_for_empty(pd.concat(frames, ignore_index=True))
+        merged = _none_for_empty(pd.concat(frames, ignore_index=True), ENTITY)
         merged = self._with_shapes(merged, ENTITY)
         lead = [ENTITY, CTYPE]
         return merged[[*lead, *(c for c in merged.columns if c not in lead)]]
@@ -1534,7 +1573,7 @@ class _NetworkSource:
                 defaults.at[attr, "varying"] or attr in c.static.columns
             ):
                 continue
-            stem = per_port.get(attr, attr)
+            stem = record_input(c.name, per_port.get(attr, attr))
             if stem != BUS and stem not in stems:
                 stems.append(stem)
         return stems
@@ -1621,8 +1660,10 @@ class _NetworkSource:
             c = self.n.c[ctype]
             if attribute in self._port_stems(c).values():
                 rels.extend(self._per_port_long_rels(c, attribute))
-            elif attribute in c.defaults.index or attribute in c.static.columns:
-                rel = self._tagged_long_rel(c, attribute, attribute, drop_defaults=True)
+            elif (source := pypsa_attribute(c.name, attribute)) in c.defaults.index or (
+                source in c.static.columns
+            ):
+                rel = self._tagged_long_rel(c, attribute, source, drop_defaults=True)
                 if rel is not None:
                     rels.append(rel)
         return self._union_select(rels, columns)
@@ -1770,6 +1811,85 @@ class _NetworkSource:
 _ACTIVE_FALLBACK = {"build_year": 0, "lifetime": math.inf}
 
 
+#: The period a `GlobalConstraint` applies in, NULL applying in every period.
+_INVESTMENT_PERIOD = "investment_period"
+
+
+def _resolved(
+    record: RecordLike, fallbacks: Mapping[str, float], dim: str = ENTITY
+) -> pd.DataFrame:
+    """Each attribute of `fallbacks` of each label of `dim`, a column each, indexed by label, its row, else the declared default, else its fallback.
+
+    Over `entity` the declared default follows the label's `ctype`
+    (`default_by`), over `global_constraint` it is the attribute's plain one.
+
+    Raises
+    ------
+    ValueError
+        If a label holds several values of one because the selection keeps a dim it varies over.
+
+    """
+    schema = record.schema
+    if dim == ENTITY:
+        frame = record.properties[ENTITY].project(col(ENTITY), col(CTYPE)).df()
+    else:
+        frame = record.properties[dim].project(col(dim)).df()
+    labels = {dim: record.dims[dim]}
+    over = Flags(frozenset(labels), frozenset(labels))
+    columns = {}
+    for attr, fallback in fallbacks.items():
+        declared = pd.Series(None, index=frame.index, dtype=object)
+        if attr in schema.attributes and dim == ENTITY:
+            declared = frame[CTYPE].map(
+                lambda c, attr=attr: schema.default_for(attr, **{CTYPE: c})
+            )
+        elif attr in schema.attributes:
+            declared = pd.Series(schema.default_for(attr), index=frame.index)
+        default = declared.where(declared.notna(), fallback).astype(float)
+        rows = record.attributes.get(attr)
+        held = pd.DataFrame(columns=[dim, "value"])
+        if rows is not None:
+            held = settle(rows, labels, over).df()
+        kept = [c for c in held.columns if c in schema.dimensions and c != dim]
+        if held[kept].notna().any(axis=None):
+            msg = f"`{attr}` varies over a dim the selection keeps, of {kept}: select one label of it"
+            raise ValueError(msg)
+        by_label = held.set_index(dim)["value"]
+        columns[attr] = frame[dim].map(by_label).astype(float).fillna(default)
+    return pd.DataFrame(columns).set_axis(frame[dim])
+
+
+def _applying(record: RecordLike, periods: list[Any]) -> set[Any]:
+    """The `global_constraint` labels applying in one of `periods`, those whose `investment_period` is NULL or one of them.
+
+    Raises
+    ------
+    ValueError
+        If a constraint holds several `investment_period` because the selection keeps a dim it varies over.
+
+    """
+    resolved = _resolved(record, {_INVESTMENT_PERIOD: math.nan}, GLOBAL_CONSTRAINT)
+    period = resolved[_INVESTMENT_PERIOD]
+    return set(period.index[period.isna() | period.isin(periods)])
+
+
+def _active(record: RecordLike, periods: list[Any]) -> set[Any]:
+    """The entities PyPSA holds active in one of `periods` (`_active_in`), by `build_year` and `lifetime`.
+
+    An entity with no row takes the declared default, else PyPSA's. A
+    constraint's `investment_period` is not read here (`_applying`).
+
+    Raises
+    ------
+    ValueError
+        If an entity holds several values of one because the selection keeps a dim it varies over.
+
+    """
+    resolved = _resolved(record, _ACTIVE_FALLBACK)
+    kept = _active_in(resolved["build_year"], resolved["lifetime"], periods)
+    return set(kept.index[kept])
+
+
 def _root(record: RecordLike) -> RecordLike:
     """The record `record` selects from, itself where it is no `Selection`."""
     return record.base if isinstance(record, Selection) else record
@@ -1839,7 +1959,9 @@ class _OpenedSource(_NetworkSource):
             if not self._touched(c) or c.name == _SHAPE or not _exported(c):
                 continue
             per_port = self._port_stems(c)
-            loaded = {per_port.get(a, a) for a in self.loaded[c.name]}
+            loaded = {
+                record_input(c.name, per_port.get(a, a)) for a in self.loaded[c.name]
+            }
             for attr in self._record_attributes(c):
                 if attr in loaded:
                     names.setdefault(attr, []).append(c.name)
@@ -1963,7 +2085,7 @@ class _OpenedSource(_NetworkSource):
             for p in self.schema.properties[dim]
             if p in rows.columns and not p.startswith(_SHAPE_PREFIX)
         ]
-        return self._with_shapes(_none_for_empty(rows[[dim, *columns]]), dim)
+        return self._with_shapes(_none_for_empty(rows[[dim, *columns]], dim), dim)
 
 
 @dataclass(frozen=True)
@@ -2058,7 +2180,11 @@ class _ResultsSource(_NetworkSource):
         """
         self._refuse_first_stage()
         snapshots = _lacking(self._snapshot_rel, self.base.dims[SNAPSHOT], SNAPSHOT)
-        held = {BUS: self._buses[BUS], ENTITY: self._entity_frame[ENTITY]}
+        held = {
+            BUS: self._buses[BUS],
+            ENTITY: self._entity_frame[ENTITY],
+            GLOBAL_CONSTRAINT: self._labelled[GLOBAL_CONSTRAINT][GLOBAL_CONSTRAINT],
+        }
         unknown = {
             SNAPSHOT: [label for (label,) in snapshots.fetchall()],
             **{
@@ -2120,7 +2246,12 @@ class _ResultsSource(_NetworkSource):
 
     @cached_property
     def _holds(self) -> dict[str, DuckDBPyRelation]:
-        """The labels the network holds of each dim a result is keyed by, to which it restates `base`'s results."""
+        """The labels the network holds of each dim a result is keyed by, to which it restates `base`'s results.
+
+        The `global_constraint` labels are those `base` holds, over a
+        selection those it keeps: a constraint the network lacks among them
+        is left NULL, one the selection drops stays as `base` holds it.
+        """
         frames = {
             ENTITY: self._entity_frame[[ENTITY]],
             BUS: self._buses[[BUS]],
@@ -2131,7 +2262,33 @@ class _ResultsSource(_NetworkSource):
             d: cast_declared(self.schema, self.con.from_df(f))
             for d, f in frames.items()
         }
-        return {**labels, CONNECTION: self._connection_frame().project(col(CONNECTION))}
+        held = {**labels, CONNECTION: self._connection_frame().project(col(CONNECTION))}
+        kept = self._selected_constraints
+        if kept is not None:
+            frame = pd.DataFrame({GLOBAL_CONSTRAINT: pd.Series(kept, dtype=object)})
+            held[GLOBAL_CONSTRAINT] = cast_declared(
+                self.schema, self.con.from_df(frame)
+            )
+        return held
+
+    @cached_property
+    def _selected_constraints(self) -> list[Any] | None:
+        """The `global_constraint` labels `base` holds that apply in the network's periods, none where `base` holds no axis of them.
+
+        Over a multi-period `base` a constraint whose `investment_period` is
+        none of them is one a period selection drops (`_applying`),
+        which raises where the constraint's `investment_period` varies over a
+        dim `base` keeps.
+        """
+        if GLOBAL_CONSTRAINT not in self.base.dims:
+            return None
+        labels = _axis_labels(self.base, GLOBAL_CONSTRAINT)
+        if not _multiperiod(self.base):
+            return labels
+        if set(self._periods) >= set(_axis_labels(_root(self.base), PERIOD)):
+            return labels
+        applying = _applying(self.base, self._periods)
+        return [g for g in labels if g in applying]
 
     @property
     def dims(self) -> LazyRelations:

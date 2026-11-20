@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Container, Iterable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -45,6 +44,7 @@ from pypsa.network.io.datarecord.schema import (
     CONNECTION,
     CTYPE,
     ENTITY,
+    GLOBAL_CONSTRAINT,
     PERIOD,
     SCENARIO,
     SNAPSHOT,
@@ -63,8 +63,8 @@ from pypsa.network.io.datarecord.shape import (
     _multiperiod,
 )
 from pypsa.network.io.datarecord.source import (
-    _ACTIVE_FALLBACK,
-    _active_in,
+    _active,
+    _applying,
     _axis_labels,
     _empty_for_none,
     _root,
@@ -574,13 +574,11 @@ def _members(record: RecordLike, ctype: str) -> DuckDBPyRelation | None:
     held = [name for name in schema.properties[ENTITY] if name not in outlines]
     names = _taken(schema, ctype, held)
     defaulted = with_defaults(schema, ENTITY, rel, names, record.con)
-    return _empty_for_none(defaulted.project(star(exclude=[CTYPE])))
+    return _empty_for_none(defaulted.project(star(exclude=[CTYPE])), ENTITY)
 
 
 # -- selections --------------------------------------------------------------
 
-#: The period a `GlobalConstraint` applies in, NULL applying in every period.
-_INVESTMENT_PERIOD = "investment_period"
 #: The dims a network is built from a selection squeezing, beside a record's own.
 _SQUEEZABLE = frozenset({PERIOD, SCENARIO})
 #: The keywords selecting snapshots, at all of which a results layer restates a series.
@@ -609,13 +607,15 @@ def _squeezed(record: RecordLike) -> frozenset[str]:
     return frozenset(d for d in _root(record).schema.dimensions if d not in dims)
 
 
-def _narrowed(record: RecordLike) -> RecordLike:
-    """`record`, a selection building a network, selected once more as PyPSA holds it, any other record as it is.
+def _narrow(record: RecordLike) -> tuple[RecordLike, bool]:
+    """`record`, a selection building a network, selected once more as PyPSA holds it, any other record as it is, and whether it keeps no global constraint.
 
     A period holding no kept snapshot goes, and an entity attached to a bus
     the selection drops. Where the selection holds fewer periods than its
-    base, an entity active in none of them goes, and one whose
-    `investment_period` names another (`_active`). A selection keeping a
+    base, an entity active in none of them goes (`_active`), and a global
+    constraint whose `investment_period` names none of them (`_applying`).
+    A selection cannot keep zero labels of `global_constraint`, so the flag
+    says all of the record's constraints are dropped. A selection keeping a
     dim of the record's own is left as it is for `verify` to report.
 
     Raises
@@ -626,7 +626,7 @@ def _narrowed(record: RecordLike) -> RecordLike:
 
     """
     if not isinstance(record, Selection):
-        return record
+        return record, False
     base = record.base
     refused = sorted(_squeezed(record) - _SQUEEZABLE - set(_own_dims(base.schema)))
     if refused:
@@ -643,7 +643,7 @@ def _narrowed(record: RecordLike) -> RecordLike:
         )
         raise ValueError(msg)
     if _own_dims(record.schema):
-        return record
+        return record, False
     labels: dict[str, Any] = {}
     selected: list[Any] | None = None
     if PERIOD in _squeezed(record):
@@ -662,7 +662,15 @@ def _narrowed(record: RecordLike) -> RecordLike:
         kept &= _active(record, selected)
     if len(kept) < len(entities):
         labels[ENTITY] = [e for e in entities if e in kept]
-    return record.select(**labels) if labels else record
+    constraintless = False
+    if selected is not None and GLOBAL_CONSTRAINT in record.dims:
+        axis = _axis_labels(record, GLOBAL_CONSTRAINT)
+        applying = _applying(record, selected)
+        if len(applying) < len(axis):
+            constraintless = not applying
+            if applying:
+                labels[GLOBAL_CONSTRAINT] = [g for g in axis if g in applying]
+    return (record.select(**labels) if labels else record), constraintless
 
 
 def _detached(record: Selection) -> set[Any]:
@@ -708,59 +716,6 @@ def _scenario_weights(record: RecordLike, scenarios: pd.Series) -> pd.Series:
         msg = f"The selection keeps scenarios {list(weights.index)} weighing nothing in all"
         raise ValueError(msg)
     return weights / weights.sum()
-
-
-def _resolved(record: RecordLike, fallbacks: Mapping[str, float]) -> pd.DataFrame:
-    """Each attribute of `fallbacks` of each entity, a column each, indexed by entity, its row, else the declared default, else its fallback.
-
-    Raises
-    ------
-    ValueError
-        If an entity holds several values of one because the selection keeps a dim it varies over.
-
-    """
-    schema = record.schema
-    frame = record.properties[ENTITY].project(col(ENTITY), col(CTYPE)).df()
-    entities = {ENTITY: record.dims[ENTITY]}
-    over = Flags(frozenset(entities), frozenset(entities))
-    columns = {}
-    for attr, fallback in fallbacks.items():
-        declared = pd.Series(None, index=frame.index, dtype=object)
-        if attr in schema.attributes:
-            declared = frame[CTYPE].map(
-                lambda c, attr=attr: schema.default_for(attr, **{CTYPE: c})
-            )
-        default = declared.where(declared.notna(), fallback).astype(float)
-        rows = record.attributes.get(attr)
-        held = pd.DataFrame(columns=[ENTITY, "value"])
-        if rows is not None:
-            held = settle(rows, entities, over).df()
-        kept = [c for c in held.columns if c in schema.dimensions and c != ENTITY]
-        if held[kept].notna().any(axis=None):
-            msg = f"`{attr}` varies over a dim the selection keeps, of {kept}: select one label of it"
-            raise ValueError(msg)
-        by_entity = held.set_index(ENTITY)["value"]
-        columns[attr] = frame[ENTITY].map(by_entity).astype(float).fillna(default)
-    return pd.DataFrame(columns).set_axis(frame[ENTITY])
-
-
-def _active(record: RecordLike, periods: list[Any]) -> set[Any]:
-    """The entities PyPSA holds active in one of `periods` (`_active_in`) whose `investment_period` is NULL or one of them.
-
-    An entity with no row takes the declared default, else PyPSA's.
-
-    Raises
-    ------
-    ValueError
-        If an entity holds several values of one because the selection keeps a dim it varies over.
-
-    """
-    resolved = _resolved(record, {**_ACTIVE_FALLBACK, _INVESTMENT_PERIOD: math.nan})
-    invested = resolved[_INVESTMENT_PERIOD]
-    kept = _active_in(resolved["build_year"], resolved["lifetime"], periods) & (
-        invested.isna() | invested.isin(periods)
-    )
-    return set(kept.index[kept])
 
 
 def _unheld(record: RecordLike, flags: Mapping[str, Flags]) -> dict[str, list[str]]:

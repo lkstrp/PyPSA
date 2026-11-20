@@ -32,7 +32,7 @@ from pypsa.network.io.datarecord.build import (
     _apply_axes,
     _components,
     _connection_frame,
-    _narrowed,
+    _narrow,
     _own_dims,
     _required_attributes,
     _squeezed,
@@ -47,6 +47,7 @@ from pypsa.network.io.datarecord.schema import (
     BUS,
     CTYPE,
     ENTITY,
+    GLOBAL_CONSTRAINT,
     PERIOD,
     REQUIRED_DIMS,
     SCENARIO,
@@ -102,25 +103,35 @@ def _refusal(
     return error
 
 
-def _earlier_pin(record: RecordLike) -> bool:
-    """Whether `record` has the layout of an earlier datarecord pin (`365f7a50`).
+def _earlier_layout(record: RecordLike) -> str | None:
+    """The message refusing `record` where an earlier layout wrote it, else None.
 
-    That layout kept a multi-period network's `snapshot` as a flat dim with
-    properties, and held shapes as `Shape` entities; this one holds neither.
+    An earlier datarecord pin (`365f7a50`) kept a multi-period network's
+    `snapshot` as a flat dim with properties, and held shapes as `Shape`
+    entities, which this layout does not. An earlier layout of this tool
+    held `GlobalConstraint` members as entities, now labels of the
+    `global_constraint` dim.
     """
-    return bool(record.schema.properties.get(SNAPSHOT)) or "Shape" in _components(
-        record
-    )
-
-
-def _refuse_earlier_pin(tool: str, record: RecordLike) -> None:
-    """Raise where `record` was written by an earlier datarecord pin, which is not migrated."""
-    if _earlier_pin(record):
-        msg = (
+    ctypes = _components(record)
+    if record.schema.properties.get(SNAPSHOT) or "Shape" in ctypes:
+        return (
             "the record was written by an earlier datarecord pin (365f7a50) and "
             "is not migrated: its multi-period `snapshot` dim or its `Shape` "
             "entities are laid out differently; export it again from its network"
         )
+    if "GlobalConstraint" in ctypes:
+        return (
+            "the record was written by an earlier layout of this tool and is "
+            "not migrated: GlobalConstraint members are entities there, here "
+            "labels of the `global_constraint` dim; export it again from its "
+            "network"
+        )
+    return None
+
+
+def _refuse_earlier_layout(tool: str, record: RecordLike) -> None:
+    """Raise where `record` was written by an earlier layout, which is not migrated."""
+    if (msg := _earlier_layout(record)) is not None:
         raise _refusal(tool, msg)
 
 
@@ -172,7 +183,7 @@ class PyPSATool(Tool):
     def verify(self, record: RecordLike) -> Requirements:
         """What this record fails to supply for a PyPSA build; falsy if it is usable.
 
-        Checks what a build needs: the schema declares PyPSA's axes, its key dims are ones this tool can honour, every component
+        Checks what a build needs: the schema declares PyPSA's axes, its key dims are ones this tool can honour, no `global_constraint` label is named like an entity, every component
         type it names is one PyPSA knows, and each type's required attributes
         are resolvable - either owned by some layer (the owner map), a
         property of the entity axis, or carrying a declared default for that type. A
@@ -184,7 +195,7 @@ class PyPSATool(Tool):
         reported in `ignored`, which leaves the result falsy.
 
         A selection (`Record.select`) is narrowed as `build` narrows it
-        (`_narrowed`). Dims of the record's own are reported in
+        (`_narrow`). Dims of the record's own are reported in
         `unsupported_dims`, and an attribute whose rows differ along a dim
         PyPSA holds it without in `unsupported_values` (`_unheld`).
 
@@ -201,7 +212,7 @@ class PyPSATool(Tool):
         - [selecting before a build](https://energy-models.github.io/datarecord/reference/tools/#selecting-before-a-build)
 
         """
-        return self._verify(_narrowed(record))[0]
+        return self._verify(_narrow(record)[0])[0]
 
     def _verify(
         self, record: RecordLike, unheld: dict[str, list[str]] | None = None
@@ -209,10 +220,10 @@ class PyPSATool(Tool):
         """`verify`, with the members it read for each known type.
 
         `build` builds from the same reads rather than repeating them: each is
-        a fold over the record's layers. Empty where a key check returned early.
+        a fold over the record's layers. Empty where a key or names check returned early.
         `unheld` is `_unheld` of the record where the caller has it already.
         """
-        _refuse_earlier_pin(self.name, record)
+        _refuse_earlier_layout(self.name, record)
         dims = REQUIRED_DIMS - set(record.schema.dimensions) - _squeezed(record)
         unsupported_keys = self._unsupported_keys(record)
         unsupported_dims = self._unsupported_dims(record)
@@ -222,6 +233,11 @@ class PyPSATool(Tool):
                 unsupported_keys=frozenset(unsupported_keys),
                 unsupported_dims=frozenset(unsupported_dims),
             ), {}
+        shared = set(_axis_labels(record, GLOBAL_CONSTRAINT)) & set(
+            _axis_labels(record, ENTITY)
+        )
+        if shared:
+            return Requirements(names=frozenset(shared)), {}
 
         categories: set[str] = set()
         attributes: set[tuple[str, str]] = set()
@@ -320,7 +336,7 @@ class PyPSATool(Tool):
         record when first asked for; the others keep their in-memory containers.
 
         A selection (`Record.select`) opens the network of its labels, selected
-        once more as PyPSA holds it (`_narrowed`), before `into` is looked at:
+        once more as PyPSA holds it (`_narrow`), before `into` is looked at:
         a squeezed `period` is a single-period network without
         `investment_period`, a squeezed `scenario` a deterministic one, and kept
         scenarios' weights are renormalised.
@@ -363,8 +379,8 @@ class PyPSATool(Tool):
                 "a network source answers no flags"
             )
             raise TypeError(msg)
-        record = _narrowed(record)
-        _refuse_earlier_pin(self.name, record)
+        record, constraintless = _narrow(record)
+        _refuse_earlier_layout(self.name, record)
         if unheld := _unheld(record, record.flags()):
             over = ", ".join(f"`{attr}` over {dims}" for attr, dims in unheld.items())
             msg = (
@@ -400,7 +416,16 @@ class PyPSATool(Tool):
                 n, where=pd.DataFrame(columns=sorted(ports)), c_name=ctype
             )
 
-        source = RecordSource(record, n, shape, con, read, record.flags(), self.schema)
+        source = RecordSource(
+            record,
+            n,
+            shape,
+            con,
+            read,
+            record.flags(),
+            self.schema,
+            constraintless=constraintless,
+        )
         for ctype in source.types():
             n.c[ctype]._set_source(source)
         _add_shapes(n, record)
