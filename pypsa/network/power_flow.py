@@ -530,11 +530,9 @@ def apply_transformer_types(n: Network) -> None:
     # for some bizarre reason, some of the standard types in pandapower have i0^2 < g^2
     t["b"] = -np.sqrt(((t["i0"] / 100.0) ** 2 - t["g"] ** 2).clip(lower=0))
 
-    for attr in ["r", "x"]:
-        t[attr] /= t["num_parallel"]
-
-    for attr in ["b", "g"]:
-        t[attr] *= t["num_parallel"]
+    # Rate the bank of parallel units at N times the unit rating. r, x, g and b
+    # stay per unit of one unit's rating, which equals per unit of the bank's.
+    t["s_nom"] *= t["num_parallel"]
 
     # deal with tap positions
 

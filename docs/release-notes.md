@@ -50,6 +50,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 ### Bug Fixes
 
+- Typed [Transformers](./user-guide/components/transformers.md) with `num_parallel` other than 1 now get `s_nom` set to the type rating times `num_parallel` when types are applied. Before, they had the impedance of the whole bank but the rating of one unit, and a power flow reset any bank rating set before. Impedances and power flow results are unchanged, but loading and branch flow limits now see the capacity of the bank. (<!-- md:pr XXXX -->)
 - Fix building multi-period models with [`n.optimize(multi_investment_periods=True)`][pypsa.optimization.OptimizationAccessor.__call__] when a link is inactive in some investment periods, which raised a `ValueError` about NaN constants with the stricter arithmetic of upcoming linopy releases. (<!-- md:pr 2180 -->)
 - Re-exporting a network to an existing CSV folder now removes the files of components that no longer exist. Before, the stale files were kept and the removed components reappeared on import. (<!-- md:pr 2158 -->)
 - Fix importing networks from Excel files given as a URL, which raised a `FileNotFoundError`. (<!-- md:pr 2158 -->)
