@@ -1676,3 +1676,134 @@ def test_noncommittable_first_snapshot_ramp(flex_kwargs, with_committable):
 
     assert status == "ok"
     assert n.c.generators.dynamic.p.loc[0, "flex"] == pytest.approx(5)
+
+
+def _ramp_cost_network(load, cheap_kwargs=None, weighting=1.0):
+    """A cheap unit with ramp costs against an expensive steady one."""
+    n = pypsa.Network(snapshots=range(len(load)))
+    n.snapshot_weightings.loc[:, :] = weighting
+    n.add("Bus", "bus")
+    n.add("Load", "load", bus="bus", p_set=load)
+    n.add("Generator", "cheap", bus="bus", p_nom=100, marginal_cost=10, **cheap_kwargs)
+    n.add("Generator", "expensive", bus="bus", p_nom=100, marginal_cost=50)
+    return n
+
+
+@pytest.mark.parametrize(
+    ("ramp_up_cost", "expected"),
+    [(100, [10, 10, 10, 10]), (1, [10, 50, 10, 50])],
+    ids=["smooths", "follows"],
+)
+@pytest.mark.parametrize("committable", [False, True])
+def test_ramp_cost_smooths_dispatch(ramp_up_cost, expected, committable):
+    n = _ramp_cost_network(
+        [10, 50, 10, 50],
+        {"ramp_up_cost": ramp_up_cost, "committable": committable},
+    )
+
+    status, _ = n.optimize()
+
+    assert status == "ok"
+    equal(n.c.generators.dynamic.p["cheap"], expected)
+
+
+def test_ramp_cost_objective_per_event():
+    n = _ramp_cost_network(
+        [10, 50, 10, 50], {"ramp_up_cost": 5, "ramp_down_cost": 1}, weighting=2.0
+    )
+
+    n.optimize()
+
+    dyn = n.c.generators.dynamic
+    dispatch = (dyn.p * n.c.generators.static.marginal_cost).sum(axis=1) * 2
+    ramp = dyn.ramp_up["cheap"] * 5 + dyn.ramp_down["cheap"] * 1
+    equal(dyn.ramp_up["cheap"], [0, 40, 0, 40])
+    equal(dyn.ramp_down["cheap"], [0, 0, 40, 0])
+    assert n.objective == pytest.approx(dispatch.sum() + ramp.sum())
+
+
+def test_ramp_cost_time_series():
+    n = _ramp_cost_network([10, 50, 10, 50], {"ramp_up_cost": [0, 100, 0, 0]})
+
+    n.optimize()
+
+    dyn = n.c.generators.dynamic
+    equal(dyn.p["cheap"], [10, 10, 10, 50])
+    equal(dyn.ramp_up["cheap"], [0, 0, 0, 40])
+
+
+def test_ramp_cost_link_on_p0():
+    n = pypsa.Network(snapshots=range(4))
+    n.add("Bus", ["source", "sink"])
+    n.add("Generator", "cheap", bus="source", p_nom=100, marginal_cost=10)
+    n.add("Generator", "expensive", bus="sink", p_nom=100, marginal_cost=50)
+    n.add(
+        "Link",
+        "link",
+        bus0="source",
+        bus1="sink",
+        p_nom=100,
+        efficiency=0.5,
+        ramp_up_cost=100,
+    )
+    n.add("Load", "load", bus="sink", p_set=[5, 25, 5, 25])
+
+    n.optimize()
+
+    dyn = n.c.links.dynamic
+    equal(dyn.p0["link"], [10, 10, 10, 10])
+    equal(dyn.ramp_up["link"], [0, 0, 0, 0])
+    assert "Link-p-ramp_cost" in n.model.constraints
+
+
+def test_ramp_cost_free_at_investment_period_boundary():
+    n = pypsa.Network()
+    sns = pd.date_range("2025-01-01", periods=2, freq="h").append(
+        pd.date_range("2026-01-01", periods=2, freq="h")
+    )
+    n.set_snapshots(pd.MultiIndex.from_arrays([sns.year, sns]))
+    n.investment_periods = [2025, 2026]
+    n.add("Bus", "bus")
+    n.add("Load", "load", bus="bus", p_set=[10, 10, 50, 50])
+    n.add(
+        "Generator",
+        "cheap",
+        bus="bus",
+        p_nom=100,
+        marginal_cost=10,
+        ramp_up_cost=1000,
+        build_year=2025,
+        lifetime=100,
+    )
+    n.add(
+        "Generator",
+        "expensive",
+        bus="bus",
+        p_nom=100,
+        marginal_cost=50,
+        build_year=2025,
+        lifetime=100,
+    )
+
+    status, _ = n.optimize(multi_investment_periods=True)
+
+    assert status == "ok"
+    equal(n.c.generators.dynamic.p["cheap"], [10, 10, 50, 50])
+    labels = n.model["Generator-ramp_up"].labels.sel(name="cheap")
+    assert (labels.values == -1).tolist() == [True, False, True, False]
+
+
+def test_no_ramp_cost_no_variables():
+    n = _ramp_cost_network([10, 50], {})
+
+    n.optimize()
+
+    assert "Generator-ramp_up" not in n.model.variables
+    assert "Generator-p-ramp_cost" not in n.model.constraints
+
+
+def test_negative_ramp_cost_raises():
+    n = _ramp_cost_network([10, 50], {"ramp_up_cost": -5})
+
+    with pytest.raises(ValueError, match="non-negative"):
+        n.optimize()

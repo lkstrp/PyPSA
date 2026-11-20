@@ -1625,7 +1625,8 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
             are: 'marginal_cost', 'marginal_cost_quadratic',
             'marginal_cost_dispatch', 'marginal_cost_store',
             'marginal_cost_storage', 'spill_cost', 'start_up_cost',
-            'shut_down_cost', 'stand_by_cost'. Defaults to all (when None).
+            'shut_down_cost', 'stand_by_cost', 'ramp_up_cost',
+            'ramp_down_cost'. Defaults to all (when None).
 
         Returns
         -------
@@ -1653,6 +1654,8 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
                 "start_up_cost",
                 "shut_down_cost",
                 "stand_by_cost",
+                "ramp_up_cost",
+                "ramp_down_cost",
             ]
         elif isinstance(cost_types, str):
             cost_types_ = [cost_types]
@@ -1710,6 +1713,21 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
                     w = weights if attr == "status" else weights_one
                     term = self._aggregate_timeseries(opex, w, agg=groupby_time)
                     result.append(term)
+
+            # ramp costs
+            for cost_type, attr in {
+                "ramp_up_cost": "ramp_up",
+                "ramp_down_cost": "ramp_down",
+            }.items():
+                if cost_type not in cost_types_ or cost_type not in n.c[c].static:
+                    continue
+                var = n.c[c].dynamic.get(attr)
+                if var is None or var.empty:
+                    continue
+                cost = n.get_switchable_as_dense(c, cost_type, inds=var.columns)
+                opex = var.fillna(0) * cost
+                term = self._aggregate_timeseries(opex, weights_one, agg=groupby_time)
+                result.append(term)
             if not result:
                 return pd.Series()
             result = pd.concat(result)

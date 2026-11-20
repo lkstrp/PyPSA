@@ -41,6 +41,8 @@ ramp_limit_up,static or series,per unit,NaN,"Maximum increase from one snapshot 
 ramp_limit_down,static or series,per unit,NaN,"Maximum decrease from one snapshot to the next, per unit of `p_nom`. Ignored if NaN. Does not consider snapshot weightings.",Input (optional)
 ramp_limit_start_up,float,per unit,NaN,"Maximum increase at start up, per unit of `p_nom`. Only used if `committable=True`. Ignored if NaN.",Input (optional)
 ramp_limit_shut_down,float,per unit,NaN,"Maximum decrease at shut down, per unit of `p_nom`. Only used if `committable=True`. Ignored if NaN.",Input (optional)
+ramp_up_cost,static or series,currency/MW,0,"Cost per MW of increase in `p0` from one snapshot to the next. Does not consider snapshot weightings.",Input (optional)
+ramp_down_cost,static or series,currency/MW,0,"Cost per MW of decrease in `p0` from one snapshot to the next. Does not consider snapshot weightings.",Input (optional)
 maintainable,boolean,n/a,False,Apply maintenance scheduling constraints.,Input (optional)
 maintenance_duration,float,hours,0,Elapsed time per maintenance event. Each event covers consecutive snapshots whose weightings sum to at least this value. Only if `maintainable=True`.,Input (optional)
 maintenance_pu,float,per unit,1.0,Fraction of capacity unavailable during maintenance (0-1). Only if `maintainable=True`.,Input (optional)
@@ -56,6 +58,8 @@ p_nom_opt,float,MW,0,Optimised nominal capacity.,Output
 status,series,n/a,1.,"Status in the snapshot (1 is on, 0 is off). Only returned if `committable=True`.",Output
 start_up,series,n/a,1.,"Whether the unit was started in the snapshot (1 is yes, 0 is no). Only returned if `committable=True`.",Output
 shut_down,series,n/a,1.,"Whether the unit was shut down in the snapshot (1 is yes, 0 is no).  Only returned if `committable=True`.",Output
+ramp_up,series,MW,0.,Increase in `p0` from the previous snapshot. Only returned if ramp costs are set.,Output
+ramp_down,series,MW,0.,Decrease in `p0` from the previous snapshot. Only returned if ramp costs are set.,Output
 maintenance,series,n/a,0,Maintenance status (1=in maintenance). Only returned if `maintainable=True`.,Output
 maintenance_start,series,n/a,0,"Whether a maintenance event begins in the snapshot (1 is yes, 0 is no). Only returned if `maintainable=True`.",Output
 mu_lower,series,currency/MW,n/a,Shadow price of lower `p_nom` limit  $-F \\leq f$. Always non-negative.,Output
