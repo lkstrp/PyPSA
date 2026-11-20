@@ -76,18 +76,46 @@ def test_optimize_security_constrained(scipy_network):
     assert "mu_lower" in line_dual_attrs, "mu_lower should be assigned"
     assert "mu_upper" in line_dual_attrs, "mu_upper should be assigned"
 
-    # Check for security constraint duals
-    # TODO add again when dual is written to custom constraint
-    # security_duals = [attr for attr in line_dual_attrs if "SubNetwork" in str(attr)]
-    # assert len(security_duals) == 2, (
-    #     "Should have two security constraint duals assigned"
-    # )
+    # Security constraint duals are not written to line attributes
+    for attr, df in n.c.lines.dynamic.items():
+        assert set(df.columns) <= set(n.c.lines.static.index), attr
 
     # Verify security constraint duals exist and can be converted
     security_constraints = [
         name for name in n.model.dual.data_vars if "security" in name
     ]
     assert len(security_constraints) == 4, "Should have four security constraint duals"
+
+
+def test_optimize_security_constrained_duals_not_in_line_attributes():
+    n = pypsa.Network()
+    n.set_snapshots(range(2))
+    n.add("Bus", ["b0", "b1", "b2"])
+    n.add("Line", "l01", bus0="b0", bus1="b1", x=0.1, r=0.01, s_nom=100)
+    n.add("Line", "l12", bus0="b1", bus1="b2", x=0.1, r=0.01, s_nom=100)
+    n.add(
+        "Line",
+        "l02",
+        bus0="b0",
+        bus1="b2",
+        x=0.1,
+        r=0.01,
+        s_nom_extendable=True,
+        capital_cost=1,
+    )
+    n.add("Generator", "gen", bus="b0", p_nom=500, marginal_cost=1)
+    n.add("Load", "load", bus="b2", p_set=[60, 90])
+
+    n.optimize.optimize_security_constrained(
+        branch_outages=n.c.lines.static.index, assign_all_duals=True
+    )
+
+    for attr, df in n.c.lines.dynamic.items():
+        assert set(df.columns) <= set(n.c.lines.static.index), attr
+    assert not n.c.lines.dynamic.mu_upper.empty
+    assert not n.c.lines.dynamic.mu_lower.empty
+    security = [name for name in n.model.dual.data_vars if "-security-for-" in name]
+    assert len(security) == 4
 
 
 def test_optimize_security_constrained_multiindex_branch_outages():

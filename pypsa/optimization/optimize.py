@@ -1244,6 +1244,11 @@ class OptimizationAccessor(OptimizationAbstractMixin):
 
         # Process each constraint and its dual values
         for constraint_name, constraint in m.constraints.items():
+            # Security constraint duals stay in `n.model.dual`
+            if "-security-for-" in constraint_name:
+                unassigned_constraints.append(constraint_name)
+                continue
+
             # Parse constraint name into component and attribute
             # Dual variable doesn't have a designated component are ignored
 
