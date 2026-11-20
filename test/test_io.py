@@ -3,7 +3,9 @@
 # SPDX-License-Identifier: MIT
 
 import sys
+from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 from geopandas.testing import assert_geodataframe_equal
@@ -864,6 +866,123 @@ def test_import_from_pandapower_network(
         assert len(n.loads) == len(net.load)
         assert len(n.c.transformers.static) == len(net.trafo)
         assert len(n.c.shunt_impedances.static) == len(net.shunt)
+
+        lines = n.c.lines.static.reset_index(drop=True)
+        expected_line_s_nom = (
+            np.sqrt(3)
+            * net.bus.vn_kv.loc[net.line.from_bus].values
+            * net.line.max_i_ka.values
+            * net.line.df.values
+            * net.line.parallel.values
+        )
+        equal(lines.s_nom.values, expected_line_s_nom)
+
+        trafos = n.c.transformers.static.reset_index(drop=True)
+        equal(trafos.s_nom.values, (net.trafo.sn_mva * net.trafo.parallel).values)
+
+
+def _pandapower_stand_in_net(line_std_type=None, trafo_std_type=None):
+    """Build a minimal stand-in for a pandapower net from plain DataFrames.
+
+    pandapower does not support pandas>=3.1, so this carries only the
+    tables and columns the importer reads.
+    """
+    bus = pd.DataFrame(
+        {"vn_kv": [110.0, 110.0, 110.0, 20.0, 0.4], "name": list("ABCDE")}
+    )
+    line = pd.DataFrame(
+        {
+            "name": ["single", "double"],
+            "from_bus": [0, 0],
+            "to_bus": [1, 2],
+            "length_km": [10.0, 10.0],
+            "std_type": [line_std_type, line_std_type],
+            "r_ohm_per_km": [0.12, 0.12],
+            "x_ohm_per_km": [0.39, 0.39],
+            "c_nf_per_km": [9.5, 9.5],
+            "max_i_ka": [0.5, 0.5],
+            "df": [1.0, 0.8],
+            "parallel": [1, 2],
+        }
+    )
+    trafo = pd.DataFrame(
+        {
+            "name": ["trafo"],
+            "hv_bus": [3],
+            "lv_bus": [4],
+            "std_type": [trafo_std_type],
+            "sn_mva": [0.4],
+            "vk_percent": [6.0],
+            "vkr_percent": [1.425],
+            "i0_percent": [0.3375],
+            "pfe_kw": [0.3],
+            "shift_degree": [150.0],
+            "tap_pos": [0.0],
+            "parallel": [2],
+        }
+    )
+    return SimpleNamespace(
+        f_hz=50,
+        bus=bus,
+        gen=pd.DataFrame(columns=["bus", "vm_pu", "scaling", "p_mw", "name"]),
+        sgen=pd.DataFrame(columns=["bus", "scaling", "p_mw", "q_mvar", "name"]),
+        ext_grid=pd.DataFrame({"bus": [0], "vm_pu": [1.0], "name": ["Grid"]}),
+        load=pd.DataFrame(
+            {
+                "bus": [1],
+                "scaling": [1.0],
+                "p_mw": [60.0],
+                "q_mvar": [20.0],
+                "name": ["Load"],
+            }
+        ),
+        shunt=pd.DataFrame(columns=["bus", "p_mw", "q_mvar", "vn_kv", "name"]),
+        switch=pd.DataFrame(
+            {
+                "et": pd.Series(dtype=object),
+                "closed": pd.Series(dtype=bool),
+                "bus": pd.Series(dtype=int),
+                "element": pd.Series(dtype=int),
+            }
+        ),
+        line=line,
+        trafo=trafo,
+    )
+
+
+@pytest.mark.parametrize("extra_line_data", [True, False])
+def test_import_from_pandapower_line_ratings(extra_line_data):
+    net = _pandapower_stand_in_net(
+        line_std_type=None if extra_line_data else "NAYY 4x50 SE"
+    )
+    n = pypsa.Network()
+    n.import_from_pandapower_net(net, extra_line_data=extra_line_data)
+
+    lines = n.c.lines.static
+    single = np.sqrt(3) * 110 * 0.5
+    assert lines.at["single", "s_nom"] == pytest.approx(single)
+    assert lines.at["double", "s_nom"] == pytest.approx(single * 0.8 * 2)
+
+    if extra_line_data:
+        for attr, factor in [("r", 0.5), ("x", 0.5), ("b", 2.0)]:
+            assert lines.at["double", attr] == pytest.approx(
+                lines.at["single", attr] * factor
+            )
+    else:
+        assert (lines.type == "NAYY 4x50 SE").all()
+
+
+@pytest.mark.parametrize("trafo_std_type", ["0.4 MVA 20/0.4 kV", None])
+def test_import_from_pandapower_transformer_ratings(trafo_std_type):
+    net = _pandapower_stand_in_net(trafo_std_type=trafo_std_type)
+    n = pypsa.Network()
+    n.import_from_pandapower_net(net, extra_line_data=True)
+
+    trafo = n.c.transformers.static.loc["trafo"]
+    assert trafo.s_nom == pytest.approx(2 * 0.4)
+    if trafo_std_type is not None:
+        assert trafo.type == trafo_std_type
+        assert trafo.num_parallel == 2
 
 
 def test_io_time_dependent_efficiencies(tmpdir):

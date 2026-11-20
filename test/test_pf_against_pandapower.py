@@ -34,6 +34,12 @@ def test_pandapower_custom_case(
         net, use_pandapower_index=use_pandapower_index, extra_line_data=extra_line_data
     )
 
+    # type application in pf resets transformer s_nom to one unit, so read it first
+    equal(
+        n.c.transformers.static.s_nom.values,
+        (net.trafo.sn_mva * net.trafo.parallel).values,
+    )
+
     # seed PF with LPF solution because of phase angle jumps
     n.lpf()
     n.pf(use_seed=True)
@@ -75,6 +81,24 @@ def test_pandapower_custom_case(
     equal(n.c.lines.dynamic.p1.loc[DEFAULT_TIMESTAMP], net.res_line.p_to_mw)
     equal(n.c.lines.dynamic.q0.loc[DEFAULT_TIMESTAMP], net.res_line.q_from_mvar)
     equal(n.c.lines.dynamic.q1.loc[DEFAULT_TIMESTAMP], net.res_line.q_to_mvar)
+
+    # pandapower's loading_percent is the larger end current over the rating current
+    lines = n.c.lines.static
+    v_mag = n.c.buses.dynamic.v_mag_pu.loc[DEFAULT_TIMESTAMP]
+    v_nom = n.c.buses.static.v_nom
+    dyn = n.c.lines.dynamic
+    current = {
+        end: np.hypot(
+            dyn[f"p{end}"].loc[DEFAULT_TIMESTAMP], dyn[f"q{end}"].loc[DEFAULT_TIMESTAMP]
+        )
+        / (np.sqrt(3) * (v_mag * v_nom).loc[lines[f"bus{end}"]].set_axis(lines.index))
+        for end in (0, 1)
+    }
+    rated_current = lines.s_nom / (
+        np.sqrt(3) * v_nom.loc[lines.bus0].set_axis(lines.index)
+    )
+    loading = 100 * np.maximum(current[0], current[1]) / rated_current
+    equal(loading, net.res_line.loading_percent.loc[lines.index], decimal=4)
 
     equal(n.c.transformers.dynamic.p0.loc[DEFAULT_TIMESTAMP], net.res_trafo.p_hv_mw)
     equal(n.c.transformers.dynamic.p1.loc[DEFAULT_TIMESTAMP], net.res_trafo.p_lv_mw)
