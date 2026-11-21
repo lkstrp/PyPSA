@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
+import xarray as xr
 from deprecation import deprecated
 
 from pypsa._options import options
@@ -1024,6 +1025,7 @@ class NetworkConsistencyMixin(_NetworkABC):
             "cost_consistency",
             "dispatch_delays",
             "maintenance",
+            "start_up_tiers",
             "disconnected_buses",
             "investment_periods",
             "shapes",
@@ -1072,6 +1074,7 @@ class NetworkConsistencyMixin(_NetworkABC):
             check_generators(c, "generators" in strict)
             check_volume_limits(c, "volume_limits" in strict)
             check_maintenance_attributes(self, c, "maintenance" in strict)
+            check_start_up_tiers(c, "start_up_tiers" in strict)
             # Checks cost attributes consistency
             check_cost_consistency(c)
             # Checks dispatch delay attributes
@@ -1588,6 +1591,104 @@ def check_maintenance_attributes(
             " capacity reduction:\n%s",
             component.list_name,
             bad_max.index,
+        )
+
+
+def check_start_up_tiers(component: Components, strict: bool = False) -> None:
+    """Check the hot and warm start-up cost tiers of committable components.
+
+    Warns if a tier cost exceeds `start_up_cost` in any snapshot, if
+    `start_up_time_hot` exceeds `start_up_time_warm`, and if a tier has a cost
+    but no positive time or a positive time but no cost.
+
+    Parameters
+    ----------
+    component : Components
+        The component to check.
+    strict : bool, optional
+        If True, raise an error instead of logging a warning.
+
+    See Also
+    --------
+    [pypsa.Network.consistency_check][]
+
+    """
+    if "start_up_cost_hot" not in component.static or component.static.empty:
+        return
+
+    from pypsa.optimization.durations import flagged_names  # noqa: PLC0415
+
+    committables = component.committables
+    if committables.empty:
+        return
+
+    def da(attr: str) -> xr.DataArray:
+        return component.da[attr].sel(name=list(committables))
+
+    def non_name_dims(arr: xr.DataArray) -> list[str]:
+        return [str(d) for d in arr.dims if d != "name"]
+
+    cold = da("start_up_cost")
+    modular = cold["name"].isin(component.modulars)
+    uses_tier = xr.zeros_like(modular)
+    for tier in ("hot", "warm"):
+        cost = da(f"start_up_cost_{tier}")
+        time = da(f"start_up_time_{tier}")
+        cost_set = cost.notnull()
+        time_set = (time > 0) & np.isfinite(time)
+        has_cost = cost_set.any(non_name_dims(cost_set))
+        has_time = time_set.any(non_name_dims(time_set))
+
+        uses_tier = uses_tier | (has_cost & has_time)
+        higher = flagged_names(cost > cold)
+        if higher:
+            _log_or_raise(
+                strict,
+                "The following %s have a start_up_cost_%s above start_up_cost:\n%s",
+                component.list_name,
+                tier,
+                higher,
+            )
+        no_time = flagged_names(has_cost & ~has_time)
+        if no_time:
+            _log_or_raise(
+                strict,
+                "The following %s have start_up_cost_%s but no positive"
+                " start_up_time_%s, so the tier is ignored:\n%s",
+                component.list_name,
+                tier,
+                tier,
+                no_time,
+            )
+        no_cost = flagged_names(has_time & ~has_cost)
+        if no_cost:
+            _log_or_raise(
+                strict,
+                "The following %s have start_up_time_%s but no start_up_cost_%s,"
+                " so the tier is ignored:\n%s",
+                component.list_name,
+                tier,
+                tier,
+                no_cost,
+            )
+
+    ignored = flagged_names(uses_tier & modular)
+    if ignored:
+        _log_or_raise(
+            strict,
+            "The following %s are modular (module size above zero) and set"
+            " start-up tiers, so the tiers are ignored for them:\n%s",
+            component.list_name,
+            ignored,
+        )
+
+    inverted = flagged_names(da("start_up_time_hot") > da("start_up_time_warm"))
+    if inverted:
+        _log_or_raise(
+            strict,
+            "The following %s have start_up_time_hot above start_up_time_warm:\n%s",
+            component.list_name,
+            inverted,
         )
 
 

@@ -2039,3 +2039,248 @@ def test_warn_no_warning_stochastic_attributes_in_different_scenarios():
         with pypsa.option_context("params.optimize.durations_in_hours", False):
             n.optimize.create_model()
     assert [w for w in caught if "durations_in_hours" in str(w.message)] == []
+
+
+def _tier_network(periods=False, weights=None, **gen_kwargs):
+    from pypsa.optimization.durations import tier_lookbacks
+
+    n = pypsa.Network()
+    if periods:
+        sns = pd.date_range("2025-01-01", periods=6, freq="h").append(
+            pd.date_range("2026-01-01", periods=6, freq="h")
+        )
+        n.set_snapshots(pd.MultiIndex.from_arrays([sns.year, sns]))
+        n.investment_periods = [2025, 2026]
+    else:
+        n.set_snapshots(range(8))
+    if weights is not None:
+        n.snapshot_weightings.loc[:, :] = np.resize(weights, len(n.snapshots))[:, None]
+    n.add("Bus", "bus")
+    n.add(
+        "Generator",
+        "gen",
+        bus="bus",
+        p_nom=10,
+        committable=True,
+        start_up_cost=100,
+        **gen_kwargs,
+    )
+    return n, tier_lookbacks
+
+
+def _lags(mask, snapshot):
+    row = mask.sel(name="gen").sel(snapshot=snapshot)
+    return [int(k) for k in row.lag.values[row.values]]
+
+
+def test_tier_lookbacks_empty_for_untiered():
+    n, tier_lookbacks = _tier_network()
+    assert (
+        tier_lookbacks(n, n.c.generators, n.c.generators.static.index, n.snapshots)
+        == {}
+    )
+
+
+def test_tier_lookbacks_equal_downtime_is_hot_on_uneven_weightings():
+    n, tier_lookbacks = _tier_network(
+        weights=[1, 2],
+        start_up_cost_hot=10,
+        start_up_time_hot=3,
+        start_up_cost_warm=50,
+        start_up_time_warm=6,
+    )
+    sns = n.snapshots
+    lb = tier_lookbacks(n, n.c.generators, n.c.generators.static.index, sns)
+    assert set(lb) == {"hot", "warm"}
+    # weights 1, 2, 1, 2, ... put snapshot 4 at hour 6, snapshot 3 at hour 4
+    # (2 h back) and snapshot 2 at hour 3 (3 h back, equal to the hot time)
+    assert _lags(lb["hot"], sns[4]) == [1, 2]
+    assert _lags(lb["warm"], sns[4]) == [3, 4]
+    # no hot and warm overlap
+    assert not (
+        lb["hot"] & lb["warm"].reindex(lag=lb["hot"].lag, fill_value=False)
+    ).any()
+
+
+def test_tier_lookbacks_warm_only_starts_at_lag_one():
+    n, tier_lookbacks = _tier_network(start_up_cost_warm=50, start_up_time_warm=3)
+    sns = n.snapshots
+    lb = tier_lookbacks(n, n.c.generators, n.c.generators.static.index, sns)
+    assert set(lb) == {"warm"}
+    assert _lags(lb["warm"], sns[5]) == [1, 2, 3]
+
+
+def test_tier_lookbacks_hot_only_and_nan_cost_inactive():
+    n, tier_lookbacks = _tier_network(
+        start_up_cost_hot=10,
+        start_up_time_hot=2,
+        start_up_time_warm=6,
+    )
+    sns = n.snapshots
+    lb = tier_lookbacks(n, n.c.generators, n.c.generators.static.index, sns)
+    assert set(lb) == {"hot"}
+    assert _lags(lb["hot"], sns[5]) == [1, 2]
+
+
+def test_tier_lookbacks_zero_weights_keep_warm_only_unit_window():
+    n, tier_lookbacks = _tier_network(
+        weights=[1, 0, 0, 1],
+        start_up_cost_warm=50,
+        start_up_time_warm=3,
+    )
+    n.add(
+        "Generator",
+        "hot_gen",
+        bus="bus",
+        p_nom=10,
+        committable=True,
+        start_up_cost=100,
+        start_up_cost_hot=10,
+        start_up_time_hot=2,
+    )
+    sns = n.snapshots
+    lb = tier_lookbacks(n, n.c.generators, n.c.generators.static.index, sns)
+    expected = lb["warm"].sel(name="gen").sel(snapshot=sns[4])
+    lags = [int(k) for k in expected.lag.values[expected.values]]
+    # the zero-weight lags just before snapshot 4 stay in the warm window
+    assert 1 in lags
+    assert 2 in lags
+    assert not lb["hot"].sel(name="gen").any()
+
+
+def test_tier_lookbacks_stop_at_period_start():
+    n, tier_lookbacks = _tier_network(
+        periods=True,
+        start_up_cost_hot=10,
+        start_up_time_hot=3,
+        start_up_cost_warm=50,
+        start_up_time_warm=5,
+    )
+    sns = n.snapshots
+    lb = tier_lookbacks(n, n.c.generators, n.c.generators.static.index, sns)
+    # third snapshot of the second period reaches back to the period start only
+    assert _lags(lb["hot"], sns[8]) == [1, 2]
+    assert _lags(lb["warm"], sns[8]) == []
+    assert _lags(lb["hot"], sns[6]) == []
+
+
+def test_start_up_tiers_by_downtime(tier_uc_network, tiers):
+    load = [0.0] * 36
+    for t in (0, 3, 10, 35):
+        load[t] = 50.0
+    n = tier_uc_network(load, **tiers)
+    status, _ = n.optimize()
+    assert status == "ok"
+
+    hot = n.c.generators.dynamic.start_up_hot["gen"]
+    warm = n.c.generators.dynamic.start_up_warm["gen"]
+    assert hot.round(6).to_dict() == {t: float(t == 3) for t in range(36)}
+    assert warm.round(6).to_dict() == {t: float(t == 10) for t in range(36)}
+    assert n.objective == pytest.approx(4 * 50 + 10 + 50 + 100)
+
+
+def test_start_up_tiers_hot_only_has_no_warm_variable(tier_uc_network):
+    load = [50.0, 0, 0, 50.0, 0, 0, 0, 0, 0, 0, 50.0]
+    n = tier_uc_network(
+        load, start_up_cost_hot=10, start_up_time_hot=4, start_up_time_warm=12
+    )
+    n.optimize()
+    assert "Generator-start_up_hot" in n.model.variables
+    assert "Generator-start_up_warm" not in n.model.variables
+    assert n.objective == pytest.approx(3 * 50 + 10 + 100)
+
+
+def test_start_up_tiers_series_cost(tier_uc_network):
+    n = tier_uc_network(
+        [50.0, 0, 0, 50.0, 0],
+        start_up_cost_hot=10,
+        start_up_time_hot=4,
+    )
+    n.c.generators.dynamic.start_up_cost_hot["gen"] = [10, 10, 10, 30, 10]
+    n.optimize()
+    assert n.objective == pytest.approx(2 * 50 + 30)
+
+
+@pytest.mark.parametrize(("time_hot", "start_cost"), [(4, 10), (3.9, 100)])
+def test_start_up_tiers_count_hours_with_weightings(
+    time_hot, start_cost, tier_uc_network
+):
+    n = tier_uc_network(
+        [50.0, 0, 0, 50.0],
+        start_up_cost_hot=10,
+        start_up_time_hot=time_hot,
+    )
+    n.snapshot_weightings.loc[:, :] = 2.0
+    n.optimize()
+    assert n.objective == pytest.approx(2 * 50 * 2 + start_cost)
+
+
+def test_start_up_tiers_stop_at_period_boundary(tier_uc_network):
+    snapshots = pd.MultiIndex.from_product([[2020, 2030], [0, 1]])
+    n = tier_uc_network(
+        [50.0, 0, 50.0, 0],
+        snapshots=snapshots,
+        start_up_cost_hot=10,
+        start_up_time_hot=4,
+    )
+    n.investment_periods = [2020, 2030]
+    status, _ = n.optimize(multi_investment_periods=True)
+    assert status == "ok"
+    hot = n.c.generators.dynamic.start_up_hot["gen"]
+    assert hot.abs().max() < 1e-6
+    assert n.objective == pytest.approx(2 * 50 + 100)
+
+
+def test_start_up_tiers_linearized_warns(caplog, tier_uc_network):
+    n = tier_uc_network(
+        [50.0, 0, 0, 50.0],
+        start_up_cost_hot=10,
+        start_up_time_hot=4,
+        shut_down_cost=100,
+    )
+    status, _ = n.optimize(linearized_unit_commitment=True)
+    assert status == "ok"
+    assert "downtime" in caplog.text
+
+
+def test_no_tier_attributes_keep_model_unchanged(tier_uc_network):
+    n = tier_uc_network([50.0, 0, 0, 50.0])
+    n.optimize()
+    names = list(n.model.constraints)
+    assert not any("start-up-" in name for name in names)
+    assert not any(
+        "start_up_hot" in v or "start_up_warm" in v for v in n.model.variables
+    )
+    assert n.objective == pytest.approx(2 * 50 + 100)
+
+
+def test_start_up_tiers_ignored_for_modular_units(tier_uc_network):
+    n = tier_uc_network(
+        [50.0] * 10 + [300.0],
+        p_nom=300,
+        p_nom_mod=100,
+        up_time_before=1,
+        start_up_cost_hot=10,
+        start_up_time_hot=4,
+    )
+    status, _ = n.optimize()
+    assert status == "ok"
+    assert "Generator-start_up_hot" not in n.model.variables
+    assert n.objective == pytest.approx(1000)
+
+
+def test_start_up_tiers_linearized_is_lower_bound(caplog, tier_uc_network):
+    kwargs = {
+        "start_up_cost_hot": 10,
+        "start_up_time_hot": 4,
+        "shut_down_cost": 100,
+    }
+    load = [50.0, 0, 0, 50.0, 0, 0, 50.0]
+    mip = tier_uc_network(load, **kwargs)
+    mip.optimize()
+    lin = tier_uc_network(load, **kwargs)
+    caplog.clear()
+    status, _ = lin.optimize(linearized_unit_commitment=True)
+    assert status == "ok"
+    assert "downtime" in caplog.text
+    assert lin.objective <= mip.objective + 1e-6

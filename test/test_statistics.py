@@ -1100,3 +1100,14 @@ def test_installed_capex_honours_cost_attribute():
     fom = n.statistics.installed_capex(cost_attribute="fom_cost", drop_zero=False)
     assert default.sum() == 1000.0
     assert fom.sum() == 300.0
+
+
+def test_opex_matches_objective_with_start_up_tiers(tier_uc_network, tiers):
+    load = [0.0] * 36
+    for t in (0, 3, 10, 35):
+        load[t] = 50.0
+    n = tier_uc_network(load, **tiers)
+    status, _ = n.optimize()
+    assert status == "ok"
+    assert n.statistics.opex().sum() == pytest.approx(n.objective)
+    assert n.statistics.opex().sum() == pytest.approx(4 * 50 + 10 + 50 + 100)

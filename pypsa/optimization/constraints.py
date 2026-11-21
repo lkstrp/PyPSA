@@ -37,6 +37,8 @@ from pypsa.optimization.durations import (
     history_length,
     in_hours,
     ramp_weighting,
+    tier_lookbacks,
+    tiered_names,
 )
 from pypsa.optimization.flow_based import flow_based_balance_terms
 from pypsa.optimization.piecewise import PiecewiseOptions, define_piecewise
@@ -345,6 +347,48 @@ def _dispatch_before(
     return c.da.p_init.sel(name=idx).where(status > 0, 0.0)
 
 
+def _lookback_sum(
+    transition: Variable, lookback: DataArray, past: DataArray, pos: DataArray
+) -> tuple[LinearExpression, DataArray]:
+    """Sum a transition variable over a lookback, in and before the window.
+
+    Parameters
+    ----------
+    transition : linopy.Variable
+        Transition variable (start-up or shut-down) over the window.
+    lookback : DataArray
+        Mask from the duration helper with dims `snapshot` and `lag`. The lag
+        labels need not start at 0.
+    past : DataArray
+        Transitions before the window, with dim `lag`: lag `j` is `j` steps
+        before the first snapshot.
+    pos : DataArray
+        Position of every snapshot in the window.
+
+    Returns
+    -------
+    tuple of (linopy.LinearExpression, DataArray)
+        Sum of the transitions inside the window as an expression and the sum
+        of the transitions before the window as a constant.
+
+    """
+    shifted = [
+        transition.to_linexpr()
+        .shift(snapshot=k)
+        .where(lookback.sel(lag=k, drop=True))
+        .fillna(0)
+        for k in lookback.lag.to_numpy()
+    ]
+    # a transition `lag` before the window is `pos + lag` before snapshot t
+    depth = (past.lag + pos).rename(lag="j").transpose("snapshot", "j")
+    # depths beyond the lookback clip to a pad slot that counts nothing
+    last = int(lookback.lag.max())
+    padded = lookback.reindex(lag=range(last + 2), fill_value=False)
+    counts = padded.sel(lag=depth.clip(max=last + 1)).drop_vars("lag").rename(j="lag")
+    counts = counts.assign_coords(lag=past.lag.to_numpy())
+    return merge(shifted), (past * counts).sum("lag")
+
+
 def define_operational_constraints_for_committables(
     n: Network, sns: pd.Index, component: str
 ) -> None:
@@ -437,7 +481,10 @@ def define_operational_constraints_for_committables(
         kind: duration_lookback(n, c, min_time, sns, hours=in_hours(f"min_{kind}_time"))
         for kind, min_time in (("up", min_up_time_set), ("down", min_down_time_set))
     }
-    max_time = max(history_length(lb, sns) for lb in lookbacks.values())
+    tier_windows = tier_lookbacks(n, c, com_i, sns)
+    max_time = max(
+        history_length(lb, sns) for lb in [*lookbacks.values(), *tier_windows.values()]
+    )
     history = _status_history(n, c, com_i, sns, max(max_time, 1) + 1)
     status_before = history.sel(lag=1, drop=True)
     first = snapshot_array([1] + [0] * (len(sns) - 1), sns)
@@ -691,29 +738,82 @@ def define_operational_constraints_for_committables(
         if not (min_time > 0).any():
             continue
         lookback = lookbacks[kind]
-        shifted = [
-            transition.to_linexpr()
-            .shift(snapshot=k)
-            .where(lookback.sel(lag=k, drop=True))
-            .fillna(0)
-            for k in lookback.lag.to_numpy()
-        ]
-        lhs = sign * status + merge(shifted)
+        in_window, before = _lookback_sum(
+            transition, lookback, (-sign * switches).clip(min=0), pos
+        )
+        lhs = sign * status + in_window
         if kind == "down" and not com_mod_ext_i.empty:
             n_mod = n.model[f"{c.name}-n_mod"].sel(name=com_mod_ext_i)
             lhs = lhs.add(-n_mod, join="left")
-        past = (-sign * switches).clip(min=0)
-        # a switch `lag` before the window is `pos + lag` before snapshot t
-        depth = (past.lag + pos).rename(lag="j").transpose("snapshot", "j")
-        # any depth beyond the lookback width counts nothing: clip to one pad slot
-        width = lookback.sizes["lag"]
-        padded = lookback.reindex(lag=range(width + 1), fill_value=False)
-        counts = padded.sel(lag=depth.clip(max=width)).drop_vars("lag").rename(j="lag")
-        counts = counts.assign_coords(lag=past.lag.to_numpy())
-        rhs = bound - (past * counts).sum("lag")
+        rhs = bound - before
         mask = active & (min_time > 0)
         n.model.add_constraints(
             lhs, "<=", rhs, name=f"{c.name}-com-{kind}-time", mask=mask
+        )
+
+    tier_vars = {}
+    tiered_i: list[str] = []
+    for tier, window in tier_windows.items():
+        names = tiered_names(c, tier, com_i)
+        tier_var = n.model[f"{c.name}-start_up_{tier}"]
+        tier_vars[tier] = tier_var
+        tiered_i = sorted(set(tiered_i) | set(names))
+        in_window, before = _lookback_sum(
+            shut_down.sel(name=names),
+            window.sel(name=names),
+            (-switches).clip(min=0).sel(name=names),
+            pos,
+        )
+        n.model.add_constraints(
+            tier_var - in_window,
+            "<=",
+            before,
+            name=f"{c.name}-com-start-up-{tier}",
+            mask=active.sel(name=names),
+        )
+
+    if tier_vars:
+        # tie shut-downs to status changes and bound start-ups and shut-downs by
+        # the status, so fake switch pairs cannot chain discounts while off
+        status_prev = status.sel(name=tiered_i).to_linexpr().shift(snapshot=1).fillna(
+            0
+        ) + prior_status.sel(name=tiered_i)
+        n.model.add_constraints(
+            shut_down.sel(name=tiered_i)
+            - start_up.sel(name=tiered_i)
+            + status.sel(name=tiered_i)
+            - status_prev,
+            "==",
+            0,
+            name=f"{c.name}-com-start-up-tiers-shut-down",
+            mask=active.sel(name=tiered_i),
+        )
+        n.model.add_constraints(
+            shut_down.sel(name=tiered_i) - status_prev,
+            "<=",
+            0,
+            name=f"{c.name}-com-start-up-tiers-shut-down-bound",
+            mask=active.sel(name=tiered_i),
+        )
+        n.model.add_constraints(
+            start_up.sel(name=tiered_i) - status.sel(name=tiered_i),
+            "<=",
+            0,
+            name=f"{c.name}-com-start-up-tiers-start-up-bound",
+            mask=active.sel(name=tiered_i),
+        )
+        total = merge(
+            [
+                v.to_linexpr().reindex(name=tiered_i, fill_value=0)
+                for v in tier_vars.values()
+            ]
+        )
+        n.model.add_constraints(
+            total - start_up.sel(name=tiered_i),
+            "<=",
+            0,
+            name=f"{c.name}-com-start-up-tiers",
+            mask=active.sel(name=tiered_i),
         )
 
     # linearized approximation because committable can partly start up and shut down
@@ -722,13 +822,17 @@ def define_operational_constraints_for_committables(
     cost_equal_da = start_up_cost == shut_down_cost
     other_dims = [d for d in cost_equal_da.dims if d != "name"]
     cost_equal = cost_equal_da.all(other_dims).values
+    # downtime-dependent start-up costs differ from the shut-down cost
+    tiered = com_i.isin(tiered_i)
+    cost_equal = cost_equal & ~tiered
 
     # only valid additional constraints if start up costs equal to shut down costs
     if n._linearized_uc and not cost_equal.all():
         logger.warning(
             "The linear relaxation of the unit commitment cannot be "
             "tightened for all generators since the start up costs "
-            "are not equal to the shut down costs in all snapshots. "
+            "are not equal to the shut down costs in all snapshots or depend "
+            "on the downtime (hot and warm start up costs). "
             "Proceed with the linear relaxation without the tightening by "
             "additional constraints for these. This might result in a longer "
             "solving time."

@@ -693,3 +693,44 @@ def test_rolling_horizon_min_up_time_in_hours_across_seam():
     status = n.c.generators.dynamic.status["gen"].round().astype(int).tolist()
     # 5 h on 2 h snapshots hold 3 snapshots, the third lies beyond the seam
     assert status == [0, 0, 1, 1, 1, 0, 0, 0]
+
+
+def _tier_seam_network():
+    n = pypsa.Network(snapshots=range(8))
+    n.snapshot_weightings.loc[:, :] = 1.0
+    n.add("Bus", "bus")
+    n.add(
+        "Generator",
+        "gen",
+        bus="bus",
+        p_nom=10,
+        p_min_pu=0.5,
+        committable=True,
+        marginal_cost=1,
+        start_up_cost=100,
+        start_up_cost_hot=10,
+        start_up_time_hot=4,
+        start_up_cost_warm=50,
+        start_up_time_warm=12,
+        up_time_before=1,
+    )
+    # on at 0, off at 1 and 2 (2 h down), restart at 3 = first snapshot of window 2
+    n.add("Load", "load", bus="bus", p_set=[5, 0, 0, 5, 5, 5, 5, 5])
+    return n
+
+
+def test_rolling_horizon_start_up_tier_across_seam():
+    single = _tier_seam_network()
+    single.optimize()
+    rolling = _tier_seam_network()
+    rolling.optimize.optimize_with_rolling_horizon(horizon=3, overlap=0)
+
+    hot = rolling.c.generators.dynamic.start_up_hot["gen"].round(6)
+    assert hot.loc[3] == 1
+    assert hot.sum() == 1
+    assert rolling.c.generators.dynamic.start_up_warm["gen"].round(6).sum() == 0
+
+    assert rolling.statistics.opex().sum() == pytest.approx(
+        single.statistics.opex().sum()
+    )
+    assert rolling.statistics.opex().sum() == pytest.approx(5 * 6 + 10)

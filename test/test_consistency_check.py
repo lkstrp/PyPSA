@@ -914,3 +914,107 @@ def test_invalid_time_series_power_limits(attr, value, message):
     match = rf"{attr} of element gen of generators has {message}(.|\n)*t1"
     with pytest.raises(pypsa.consistency.ConsistencyError, match=match):
         n.consistency_check(strict=["time_series_power_attrs"])
+
+
+def _tier_messages(n, caplog, text):
+    caplog.clear()
+    n.consistency_check()
+    return [r.message for r in caplog.records if text in r.message]
+
+
+def _tier_gen(n, **kwargs):
+    n.add(
+        "Generator",
+        "tiered",
+        bus="one",
+        p_nom=10,
+        committable=True,
+        start_up_cost=100,
+        **kwargs,
+    )
+
+
+def test_start_up_tiers_valid_not_flagged(consistent_n, caplog):
+    _tier_gen(
+        consistent_n,
+        start_up_cost_hot=10,
+        start_up_time_hot=2,
+        start_up_cost_warm=50,
+        start_up_time_warm=6,
+    )
+    assert not _tier_messages(consistent_n, caplog, "start_up_")
+
+
+@pytest.mark.parametrize("tier", ["hot", "warm"])
+def test_start_up_tier_cost_above_cold_cost(consistent_n, caplog, tier):
+    _tier_gen(
+        consistent_n, **{f"start_up_cost_{tier}": 150, f"start_up_time_{tier}": 2}
+    )
+    messages = _tier_messages(consistent_n, caplog, f"start_up_cost_{tier} above")
+    assert len(messages) == 1
+    assert "tiered" in messages[0]
+
+
+def test_start_up_tier_series_cost_above_cold_cost(consistent_n, caplog):
+    consistent_n.set_snapshots(range(3))
+    _tier_gen(
+        consistent_n,
+        start_up_cost_hot=pd.Series([10, 150, 10], index=consistent_n.snapshots),
+        start_up_time_hot=2,
+    )
+    assert _tier_messages(consistent_n, caplog, "start_up_cost_hot above")
+
+
+def test_start_up_time_hot_above_warm(consistent_n, caplog):
+    _tier_gen(
+        consistent_n,
+        start_up_cost_hot=10,
+        start_up_time_hot=8,
+        start_up_cost_warm=50,
+        start_up_time_warm=6,
+    )
+    messages = _tier_messages(consistent_n, caplog, "start_up_time_hot above")
+    assert len(messages) == 1
+    assert "tiered" in messages[0]
+
+
+def test_start_up_tier_ignored_for_modular_unit(consistent_n, caplog):
+    _tier_gen(
+        consistent_n,
+        p_nom_mod=5,
+        start_up_cost_hot=10,
+        start_up_time_hot=2,
+    )
+    messages = _tier_messages(consistent_n, caplog, "tiers are ignored")
+    assert len(messages) == 1
+    assert "tiered" in messages[0]
+
+
+def test_start_up_tier_cost_without_time(consistent_n, caplog):
+    _tier_gen(consistent_n, start_up_cost_hot=10)
+    messages = _tier_messages(consistent_n, caplog, "but no positive")
+    assert len(messages) == 1
+    assert "tiered" in messages[0]
+
+
+def test_start_up_tier_time_without_cost(consistent_n, caplog):
+    _tier_gen(consistent_n, start_up_time_warm=6)
+    messages = _tier_messages(consistent_n, caplog, "but no start_up_cost_warm")
+    assert len(messages) == 1
+    assert "tiered" in messages[0]
+
+
+def test_start_up_tiers_strict_option_raises(consistent_n):
+    _tier_gen(
+        consistent_n,
+        start_up_cost_hot=150,
+        start_up_time_hot=2,
+    )
+    with pytest.raises(pypsa.consistency.ConsistencyError, match="start_up_cost_hot"):
+        consistent_n.consistency_check(strict=["start_up_tiers"])
+
+
+def test_start_up_tiers_ignored_for_non_committable(consistent_n):
+    _tier_gen(consistent_n, start_up_cost_hot=150, start_up_time_hot=2)
+    consistent_n.c.generators.static.loc["tiered", "committable"] = False
+    consistent_n.consistency_check(strict=["start_up_tiers"])

@@ -571,3 +571,38 @@ def piecewise_network() -> pypsa.Network:
     )
     n.add("Load", "load", bus="bus1", p_set=[10, 20])
     return n
+
+
+@pytest.fixture
+def tiers():
+    """Hot and warm start-up tier settings shared by the tier tests."""
+    return {
+        "start_up_cost_hot": 10,
+        "start_up_time_hot": 4,
+        "start_up_cost_warm": 50,
+        "start_up_time_warm": 12,
+    }
+
+
+@pytest.fixture
+def tier_uc_network():
+    """Build a committable unit that must start whenever the load returns from 0."""
+
+    def build(load, snapshots=None, **gen_kwargs):
+        n = pypsa.Network()
+        n.set_snapshots(range(len(load)) if snapshots is None else snapshots)
+        n.add("Bus", "bus")
+        kwargs = {
+            "committable": True,
+            "p_nom": 100,
+            "p_min_pu": 0.5,
+            "up_time_before": 1,
+            "marginal_cost": 1,
+            "start_up_cost": 100,
+        }
+        kwargs.update(gen_kwargs)
+        n.add("Generator", "gen", bus="bus", **kwargs)
+        n.add("Load", "load", bus="bus", p_set=pd.Series(load, index=n.snapshots))
+        return n
+
+    return build

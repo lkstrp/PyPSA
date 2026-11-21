@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import xarray as xr
 
+from pypsa.optimization.durations import tiered_names
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -202,6 +204,41 @@ def define_shut_down_variables(
         binary=is_binary,
         **kwargs,
     )
+
+
+def define_start_up_tier_variables(n: Network, sns: Sequence, c_name: str) -> None:
+    """Initialize continuous variables for hot and warm start-ups.
+
+    One non-negative variable per tier is created for the committable units
+    that use the tier. Bounds are set by constraint functions.
+
+    Parameters
+    ----------
+    n : pypsa.Network
+        Network instance
+    sns : Sequence
+        Snapshots
+    c_name : str
+        name of the network component
+
+    """
+    c = n.components[c_name]
+    com_i = c.committables.intersection(c.active_assets)
+
+    if com_i.empty:
+        return
+
+    for tier in ("hot", "warm"):
+        names = tiered_names(c, tier, com_i)
+        if not names:
+            continue
+        active = c.da.active.sel(name=names, snapshot=sns)
+        n.model.add_variables(
+            lower=0,
+            coords=active.coords,
+            name=f"{c.name}-start_up_{tier}",
+            mask=active,
+        )
 
 
 def define_maintenance_variables(n: Network, sns: Sequence, c_name: str) -> None:

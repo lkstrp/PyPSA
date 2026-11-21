@@ -60,7 +60,7 @@ from pypsa.optimization.constraints import (
     define_total_supply_constraints,
     define_voltage_angle_constraints,
 )
-from pypsa.optimization.durations import warn_legacy_durations
+from pypsa.optimization.durations import tiered_names, warn_legacy_durations
 from pypsa.optimization.expressions import StatisticExpressionsAccessor
 from pypsa.optimization.flow_based import (
     NET_POSITION,
@@ -91,6 +91,7 @@ from pypsa.optimization.variables import (
     define_phase_shift_variables,
     define_shut_down_variables,
     define_spillage_variables,
+    define_start_up_tier_variables,
     define_start_up_variables,
     define_status_variables,
 )
@@ -453,6 +454,29 @@ def define_objective(
 
         var = m[f"{c.name}-{attr}"].sel(name=com_i)
         opex_terms.append((var * cost).sum(dim=["name", "snapshot"]))
+
+    # hot and warm start-ups are discounts off the cold start-up cost
+    for c_name in lookup.query("variable == 'start_up'").index.get_level_values(0):
+        c = as_components(n, c_name)
+        com_i = c.committables.intersection(c.active_assets)
+        if com_i.empty:
+            continue
+        cold = c.da.start_up_cost.sel(name=com_i)
+        if "snapshot" in cold.dims:
+            cold = cold.sel(snapshot=sns)
+        for tier in ("hot", "warm"):
+            names = tiered_names(c, tier, com_i)
+            if not names:
+                continue
+            tier_cost = c.da[f"start_up_cost_{tier}"].sel(name=names)
+            if "snapshot" in tier_cost.dims:
+                tier_cost = tier_cost.sel(snapshot=sns)
+            cold_t = cold.sel(name=names)
+            discount = tier_cost.fillna(cold_t) - cold_t
+            if n._multi_invest:
+                discount = discount * event_weight
+            tier_var = m[f"{c.name}-start_up_{tier}"]
+            opex_terms.append((tier_var * discount).sum(dim=["name", "snapshot"]))
 
     if not (capex_terms or opex_terms):
         msg = (
@@ -872,6 +896,7 @@ class OptimizationAccessor(OptimizationAbstractMixin):
             define_status_variables(n, sns, c, linearized_unit_commitment)
             define_start_up_variables(n, sns, c, linearized_unit_commitment)
             define_shut_down_variables(n, sns, c, linearized_unit_commitment)
+            define_start_up_tier_variables(n, sns, c)
             define_maintenance_variables(n, sns, c)
             define_maintenance_start_variables(n, sns, c)
             define_maintenance_capacity_variables(n, sns, c)

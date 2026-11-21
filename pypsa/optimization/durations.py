@@ -10,13 +10,13 @@ import warnings
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pandas as pd
 import xarray as xr
 
 from pypsa._options import options
 from pypsa.optimization.window import snapshot_array
 
 if TYPE_CHECKING:
-    import pandas as pd
     from xarray import DataArray
 
     from pypsa import Components, Network
@@ -69,6 +69,7 @@ def duration_lookback(
     sns: pd.Index,
     *,
     hours: bool,
+    inclusive: bool = False,
 ) -> DataArray:
     """Mask of the earlier snapshots that count for each snapshot of the window.
 
@@ -84,6 +85,9 @@ def duration_lookback(
         Snapshots of the window.
     hours : bool
         Count hours of the 'generators' weighting instead of snapshots.
+    inclusive : bool, default False
+        Also count a snapshot that lies exactly `duration` hours back. Only
+        applies if `hours` is True.
 
     Returns
     -------
@@ -121,11 +125,99 @@ def duration_lookback(
         ok = np.where(src < 0, periods[pos][:, None] == periods[0], same)
     elapsed_da = xr.DataArray(elapsed, coords=[sns, k], dims=("snapshot", "lag"))
     ok_da = xr.DataArray(ok, coords=[sns, k], dims=("snapshot", "lag"))
-    mask = (elapsed_da < duration - _TOL) & ok_da
+    within = (
+        elapsed_da <= duration + _TOL if inclusive else elapsed_da < duration - _TOL
+    )
+    mask = within & ok_da
     # drop trailing lags that count for no snapshot and no component
     used = mask.any([d for d in mask.dims if d != "lag"]).to_numpy()
     keep = int(np.flatnonzero(used).max()) + 1 if used.any() else 1
     return mask.isel(lag=slice(keep)).transpose("snapshot", "lag", ...)
+
+
+def tiered_names(c: Components, tier: str, com_i: pd.Index) -> list[str]:
+    """Names in `com_i` that use the start-up cost tier.
+
+    A tier is used if its time is finite and positive and its cost is set in at
+    least one snapshot. Snapshots with a NaN cost fall back to `start_up_cost`.
+    Modular units are excluded, since fake start-up/shut-down pairs of integer
+    module counts cannot be ruled out linearly.
+
+    Parameters
+    ----------
+    c : Components
+        Component with the tier attributes.
+    tier : str
+        Either "hot" or "warm".
+    com_i : pd.Index
+        Names to consider.
+
+    Returns
+    -------
+    list of str
+        Names of `com_i` that use the tier, in the order of `com_i`.
+
+    """
+    time_attr, cost_attr = f"start_up_time_{tier}", f"start_up_cost_{tier}"
+    time = c.da[time_attr].sel(name=list(com_i))
+    cost = c.da[cost_attr].sel(name=list(com_i))
+    cost_set = cost.notnull().any([d for d in cost.dims if d != "name"])
+    active = (time > 0) & np.isfinite(time) & cost_set
+    modular = active["name"].isin(c.modulars)
+    active = active & ~modular
+    return flagged_names(active)
+
+
+def tier_lookbacks(
+    n: Network, c: Components, names: pd.Index, sns: pd.Index
+) -> dict[str, DataArray]:
+    """Windows of the shut-downs that make a start a hot or warm start.
+
+    The downtime runs from the start of the shut-down snapshot to the start of
+    the start-up snapshot and a downtime equal to the tier time counts. The
+    windows stop at period starts and lag 0 is not part of them.
+
+    Parameters
+    ----------
+    n : Network
+        Network whose snapshots and weightings define the time axis.
+    c : Components
+        Component with the tier attributes.
+    names : pd.Index
+        Names to build the windows for.
+    sns : pd.Index
+        Snapshots of the window.
+
+    Returns
+    -------
+    dict of str to DataArray
+        Bool arrays with dims `snapshot`, `lag` and `name`, keyed "hot" and
+        "warm", for the tiers that some unit of `names` uses. The warm window
+        excludes the hot window of the unit.
+
+    """
+    used = {tier: tiered_names(c, tier, names) for tier in ("hot", "warm")}
+    if not any(used.values()):
+        return {}
+    names = pd.Index(names)
+
+    def times(tier: str) -> DataArray:
+        time = c.da[f"start_up_time_{tier}"].sel(name=list(names)).fillna(0)
+        return time.where(time["name"].isin(used[tier]), -1.0)
+
+    def window(tier: str) -> DataArray:
+        mask = duration_lookback(n, c, times(tier), sns, hours=True, inclusive=True)
+        return mask.isel(lag=slice(1, None))
+
+    out: dict[str, DataArray] = {}
+    hot = window("hot")
+    if used["hot"]:
+        out["hot"] = hot
+    if used["warm"]:
+        warm = window("warm")
+        hot_aligned = hot.reindex(lag=warm.lag, fill_value=False)
+        out["warm"] = warm & ~hot_aligned
+    return out
 
 
 def history_length(lookback: DataArray, sns: pd.Index) -> int:

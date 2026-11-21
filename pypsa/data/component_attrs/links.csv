@@ -35,6 +35,10 @@ maintenance_duration,float,hours,0,Elapsed time per maintenance event. Each even
 maintenance_pu,float,per unit,1.0,Fraction of capacity unavailable during maintenance (0-1). Only if `maintainable=True`.,Input (optional)
 maintenance_events,int,n/a,1,Number of required maintenance events per optimization horizon. Only if `maintainable=True`.,Input (optional)
 start_up_cost,static or series,currency,0,Cost to start up the link. Only used if `committable=True`.,Input (optional)
+start_up_cost_hot,static or series,currency,NaN,"Cost to start up the link after a downtime of at most `start_up_time_hot` hours (hot start). Replaces `start_up_cost` for such starts. Ignored if NaN. Only used if `committable=True`.",Input (optional)
+start_up_cost_warm,static or series,currency,NaN,"Cost to start up the link after a downtime of at most `start_up_time_warm` hours (warm start). Replaces `start_up_cost` for such starts. Ignored if NaN. Only used if `committable=True`.",Input (optional)
+start_up_time_hot,float,hours,NaN,"Maximum downtime before a start counts as a hot start, always in hours. Ignored if NaN or 0. Only used if `committable=True`.",Input (optional)
+start_up_time_warm,float,hours,NaN,"Maximum downtime before a start counts as a warm start, always in hours. Ignored if NaN or 0. Only used if `committable=True`.",Input (optional)
 shut_down_cost,static or series,currency,0,Cost to shut down the link. Only used if `committable=True`.,Input (optional)
 min_up_time,float,snapshots or hours,0,Minimum time for status to be 1. Only used if `committable=True`. Counted in snapshots by default (weightings are ignored); in hours of the 'generators' snapshot weightings if `pypsa.options.params.optimize.durations_in_hours` is True. Integers are accepted.,Input (optional)
 min_down_time,float,snapshots or hours,0,Minimum time for status to be 0. Only used if `committable=True`. Counted in snapshots by default (weightings are ignored); in hours of the 'generators' snapshot weightings if `pypsa.options.params.optimize.durations_in_hours` is True. Integers are accepted.,Input (optional)
@@ -52,6 +56,8 @@ p1,series,MW,0.,Power at `bus1` (positive if link is withdrawing from `bus1`).,O
 p_nom_opt,float,MW,0,Optimised nominal capacity.,Output
 status,series,n/a,1.,"Status in the snapshot (1 is on, 0 is off). Only returned if `committable=True`.",Output
 start_up,series,n/a,1.,"Whether the unit was started in the snapshot (1 is yes, 0 is no). Only returned if `committable=True`.",Output
+start_up_hot,series,n/a,1.,"Whether the unit was started in the snapshot after a downtime within the hot tier (1 is yes, 0 is no). Only returned if `committable=True` and the tier is set.",Output
+start_up_warm,series,n/a,1.,"Whether the unit was started in the snapshot after a downtime within the warm tier (1 is yes, 0 is no). Only returned if `committable=True` and the tier is set.",Output
 shut_down,series,n/a,1.,"Whether the unit was shut down in the snapshot (1 is yes, 0 is no).  Only returned if `committable=True`.",Output
 maintenance,series,n/a,0,Maintenance status (1=in maintenance). Only returned if `maintainable=True`.,Output
 maintenance_start,series,n/a,0,"Whether a maintenance event begins in the snapshot (1 is yes, 0 is no). Only returned if `maintainable=True`.",Output

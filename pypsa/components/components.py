@@ -738,12 +738,12 @@ class Components(
         --------
         >>> c = n.components.generators
         >>> c.ds  # doctest: +ELLIPSIS
-        <xarray.Dataset> Size: 9kB
+        <xarray.Dataset> Size: 10kB
         Dimensions:                     (name: 6, snapshot: 10)
         Coordinates:
           * name                        (name) object 48B 'Manchester Wind' ... 'Fran...
           * snapshot                    (snapshot) datetime64[ns] 80B 2015-01-01 ... ...
-        Data variables: (12/48)
+        Data variables: (12/52)
             bus                         (name) object 48B 'Manchester' ... 'Frankfurt'
             control                     (name) object 48B 'Slack' 'PQ' ... 'Slack' 'PQ'
             type                        (name) object 48B '' '' '' '' '' ''
