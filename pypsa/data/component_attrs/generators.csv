@@ -49,6 +49,7 @@ p,series,MW,0.,Active power at bus (positive if net generation),Output
 q,series,MVar,0.,Reactive power (positive if net generation),Output
 p_nom_opt,float,MW,0.,Optimised nominal capacity.,Output
 status,series,n/a,1,"Status in the snapshot (1 is on, 0 is off). Only returned if `committable=True`.",Output
+status_set,series,n/a,n/a,"Fixed status in the snapshot (1 is on, 0 is off, a module count for modular units). NaN leaves the status free. Only applied if `committable=True`.",Input (optional)
 start_up,series,n/a,1.,"Whether the unit was started in the snapshot (1 is yes, 0 is no). Only returned if `committable=True`.",Output
 shut_down,series,n/a,1.,"Whether the unit was shut down in the snapshot (1 is yes, 0 is no).  Only returned if `committable=True`.",Output
 maintenance,series,n/a,0,Maintenance status (1=in maintenance). Only returned if `maintainable=True`.,Output
@@ -56,6 +57,7 @@ maintenance_start,series,n/a,0,"Whether a maintenance event begins in the snapsh
 mu_upper,series,currency/MWh,n/a,Shadow price of upper `p_nom` limit,Output
 mu_lower,series,currency/MWh,n/a,Shadow price of lower `p_nom` limit,Output
 mu_p_set,series,currency/MWh,n/a,Shadow price of fixed power generation `p_set`,Output
+mu_status_set,series,currency,n/a,Shadow price of fixed status `status_set`,Output
 mu_ramp_limit_up,series,currency/MWh,n/a,Shadow price of upper ramp up limit,Output
 mu_ramp_limit_down,series,currency/MWh,n/a,Shadow price of lower ramp down limit,Output
 capital_cost_piecewise_opt,float,currency/MW,0.,Optimised capital cost when using piecewise linearisation.,Output

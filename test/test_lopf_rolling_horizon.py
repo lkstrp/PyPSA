@@ -670,3 +670,22 @@ def test_rolling_horizon_storage_standing_loss(component, level, kwargs):
     pd.testing.assert_frame_equal(
         rolling.c[component].dynamic[level], full.c[component].dynamic[level]
     )
+
+
+def test_rolling_horizon_status_set_in_later_window():
+    n = pypsa.Network(snapshots=range(8))
+    n.add("Bus", "bus")
+    n.add(
+        "Generator",
+        "gen",
+        bus="bus",
+        p_nom=10,
+        committable=True,
+        stand_by_cost=1,
+    )
+    n.add("Load", "load", bus="bus", p_set=0)
+    n.generators_t.status_set.loc[6, "gen"] = 1
+    n.optimize.optimize_with_rolling_horizon(horizon=3, overlap=0)
+    status = n.c.generators.dynamic.status["gen"].round().astype(int).tolist()
+    # the unit is only on where pinned, and only in its own window
+    assert status == [0, 0, 0, 0, 0, 0, 1, 0]

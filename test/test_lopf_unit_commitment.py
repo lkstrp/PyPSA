@@ -1676,3 +1676,241 @@ def test_noncommittable_first_snapshot_ramp(flex_kwargs, with_committable):
 
     assert status == "ok"
     assert n.c.generators.dynamic.p.loc[0, "flex"] == pytest.approx(5)
+
+
+def _status_set_network(component="Generator"):
+    """Cheap unit `a` and dear unit `b` (both committable) cover a small load."""
+    n = pypsa.Network(snapshots=range(3))
+    n.add("Bus", "bus")
+    n.add("Load", "load", bus="bus", p_set=[50, 50, 50])
+    if component == "Generator":
+        n.add("Generator", "a", bus="bus", p_nom=100, marginal_cost=1, committable=True)
+        n.add(
+            "Generator",
+            "b",
+            bus="bus",
+            p_nom=100,
+            p_min_pu=0.3,
+            marginal_cost=10,
+            committable=True,
+        )
+    else:
+        n.add("Bus", "src")
+        n.add("Generator", "fuel", bus="src", p_nom=1e3)
+        n.add("Link", "a", bus0="src", bus1="bus", p_nom=100, marginal_cost=1)
+        n.add(
+            "Link",
+            "b",
+            bus0="src",
+            bus1="bus",
+            p_nom=100,
+            p_min_pu=0.3,
+            marginal_cost=10,
+            committable=True,
+        )
+        n.c.links.static.loc["a", "committable"] = True
+    return n
+
+
+@pytest.mark.parametrize("component", ["Generator", "Link"])
+def test_status_set_pins_on_and_off(component):
+    n = _status_set_network(component)
+    c = n.components[component]
+    t = c.dynamic
+    c.dynamic["status_set"] = pd.DataFrame(
+        {"b": [1.0, np.nan, 0.0]}, index=n.snapshots, columns=["b"]
+    )
+    status, _ = n.optimize(solver_name="highs")
+    assert status == "ok"
+    # pinned on: runs at or above p_min_pu * p_nom despite being dearer
+    assert t.p["b"].iloc[0] >= 30 - 1e-6
+    assert t.p["b"].iloc[2] == pytest.approx(0)
+    assert t.status["b"].iloc[2] == pytest.approx(0)
+    # NaN snapshot is left to the solver, which picks the cheaper unit
+    assert t.status["b"].iloc[1] == pytest.approx(0)
+
+
+def test_status_set_nan_matches_unpinned_run():
+    n = _status_set_network()
+    n.optimize(solver_name="highs")
+    expected = n.generators_t.p.copy()
+    n.c.generators.dynamic["status_set"] = pd.DataFrame(
+        {"b": np.nan}, index=n.snapshots, columns=["b"]
+    )
+    n.optimize(solver_name="highs")
+    equal(n.generators_t.p.values, expected.values)
+
+
+def test_status_set_modular_module_count():
+    n = pypsa.Network(snapshots=range(2))
+    n.add("Bus", "bus")
+    n.add("Load", "load", bus="bus", p_set=[100, 50])
+    n.add("Generator", "shed", bus="bus", p_nom=1e3, marginal_cost=1e3)
+    n.add(
+        "Generator",
+        "gen",
+        bus="bus",
+        p_nom=150,
+        p_nom_mod=50,
+        p_min_pu=1,
+        committable=True,
+        marginal_cost=10,
+    )
+    n.c.generators.dynamic["status_set"] = pd.DataFrame(
+        {"gen": [2.0, np.nan]}, index=n.snapshots, columns=["gen"]
+    )
+    status, _ = n.optimize(solver_name="highs")
+    assert status == "ok"
+    assert n.generators_t.status["gen"].iloc[0] == 2
+    assert n.generators_t.p["gen"].iloc[0] == pytest.approx(100)
+
+
+def test_status_set_non_committable_warns_and_gets_no_row(caplog):
+    n = _status_set_network()
+    n.c.generators.static.loc["b", "committable"] = False
+    n.c.generators.dynamic["status_set"] = pd.DataFrame(
+        {"b": [1.0, np.nan, np.nan]}, index=n.snapshots, columns=["b"]
+    )
+    with caplog.at_level("WARNING"):
+        n.optimize.create_model()
+    assert "Generator-status_set" not in n.model.constraints
+    assert any("status_set" in r.message and "b" in r.message for r in caplog.records)
+
+
+def test_status_set_dual_filled_for_linearized_model():
+    n = _status_set_network()
+    n.c.generators.dynamic["status_set"] = pd.DataFrame(
+        {"b": [1.0, 1.0, 1.0]}, index=n.snapshots, columns=["b"]
+    )
+    n.optimize(
+        solver_name="highs", linearized_unit_commitment=True, assign_all_duals=True
+    )
+    mu = n.generators_t.mu_status_set
+    assert "b" in mu.columns
+    assert mu["b"].notnull().all()
+
+
+def test_fixed_uc_resolve_flag_relaxes_model():
+    """The internal resolve flag makes status continuous and skips tightening."""
+    n = pypsa.Network(snapshots=range(3))
+    n.add("Bus", "bus")
+    n.add("Generator", "backup", bus="bus", p_nom=500, marginal_cost=200)
+    n.add(
+        "Generator",
+        "com",
+        bus="bus",
+        p_nom=100,
+        committable=True,
+        p_min_pu=0.3,
+        marginal_cost=10,
+    )
+    n.add(
+        "Generator",
+        "com_mod",
+        bus="bus",
+        p_nom=100,
+        p_nom_mod=50,
+        committable=True,
+        marginal_cost=12,
+    )
+    n.add("Load", "load", bus="bus", p_set=120)
+
+    n._fixed_uc_resolve = True
+    m = n.optimize.create_model(linearized_unit_commitment=True)
+
+    assert n._linearized_uc == 0
+    assert not list(m.binaries)
+    assert not list(m.integers)
+    assert "Generator-com-p-before" not in m.constraints
+    assert "Generator-com-p-current" not in m.constraints
+    assert any("status" in name and "fixed-upper" in name for name in m.constraints)
+
+    n._fixed_uc_resolve = False
+    m = n.optimize.create_model()
+    assert list(m.integers)
+
+
+def _resolve_network():
+    n = _status_set_network()
+    n.c.loads.dynamic["p_set"] = pd.DataFrame(
+        {"load": [50.0, 130.0, 50.0]}, index=n.snapshots
+    )
+    return n
+
+
+def test_resolve_fixed_uc_matches_first_solve_and_gives_prices():
+    n = _resolve_network()
+    status, _ = n.optimize(solver_name="highs")
+    assert status == "ok"
+    p, st = n.generators_t.p.copy(), n.generators_t.status.copy()
+
+    status, _ = n.optimize.optimize_and_resolve_fixed_unit_commitment(
+        solver_name="highs"
+    )
+    assert status == "ok"
+    equal(n.generators_t.p.values, p.values, decimal=5)
+    equal(n.generators_t.status.values, st.values, decimal=5)
+    price = n.buses_t.marginal_price["bus"]
+    assert np.isfinite(price).all()
+    # snapshots 0 and 2: unit a is marginal; snapshot 1: unit b
+    equal(price.values, [1.0, 10.0, 1.0])
+    assert n._fixed_uc_resolve is False
+
+
+def test_resolve_fixed_uc_restores_status_set():
+    n = _resolve_network()
+    n.c.generators.dynamic["status_set"] = pd.DataFrame(
+        {"b": [1.0, np.nan, 0.0]}, index=n.snapshots, columns=["b"]
+    )
+    before = n.c.generators.dynamic["status_set"].copy()
+    status, _ = n.optimize.optimize_and_resolve_fixed_unit_commitment(
+        solver_name="highs"
+    )
+    assert status == "ok"
+    pd.testing.assert_frame_equal(n.c.generators.dynamic["status_set"], before)
+
+
+def test_resolve_fixed_uc_without_status_set_leaves_it_empty():
+    n = _resolve_network()
+    n.optimize.optimize_and_resolve_fixed_unit_commitment(solver_name="highs")
+    assert n.c.generators.dynamic["status_set"].empty
+
+
+def test_resolve_fixed_uc_failed_first_solve_skips_second(caplog):
+    n = _resolve_network()
+    n.c.loads.dynamic["p_set"] = pd.DataFrame({"load": [500.0] * 3}, index=n.snapshots)
+    with caplog.at_level("WARNING"):
+        status, _ = n.optimize.optimize_and_resolve_fixed_unit_commitment(
+            solver_name="highs"
+        )
+    assert status != "ok"
+    assert "Skipping the resolve with fixed unit commitment" in caplog.text
+    assert n._fixed_uc_resolve is False
+    assert n.c.generators.dynamic["status_set"].empty
+
+
+def test_resolve_fixed_uc_stochastic_network():
+    n = _resolve_network()
+    n.set_scenarios({"s1": 0.5, "s2": 0.5})
+    status, _ = n.optimize.optimize_and_resolve_fixed_unit_commitment(
+        solver_name="highs"
+    )
+    assert status == "ok"
+    assert np.isfinite(n.buses_t.marginal_price.values).all()
+    assert n.c.generators.dynamic["status_set"].empty
+    assert n._fixed_uc_resolve is False
+
+
+def test_resolve_fixed_uc_extendable_keeps_capacity():
+    n = _resolve_network()
+    n.c.generators.static.loc["a", "p_nom_extendable"] = True
+    n.c.generators.static.loc["a", "capital_cost"] = 1.0
+    n.c.generators.static.loc["a", "p_nom"] = 0.0
+    status, _ = n.optimize(solver_name="highs")
+    assert status == "ok"
+    p_nom_opt = n.c.generators.static["p_nom_opt"].copy()
+    status, _ = n.optimize.optimize_and_resolve_fixed_unit_commitment(
+        solver_name="highs"
+    )
+    assert status == "ok"
+    equal(n.c.generators.static["p_nom_opt"].values, p_nom_opt.values, decimal=5)

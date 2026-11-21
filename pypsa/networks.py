@@ -91,6 +91,7 @@ class Network(
     # Optimization
     _multi_invest: int
     _linearized_uc: int
+    _fixed_uc_resolve: bool
     _committable_big_m: float | None
     _optimize_window: SnapshotWindow | None
     iteration: int
@@ -164,6 +165,7 @@ class Network(
         self._objective_constant: float | None = None
         self._multi_invest: int = 0
         self._committable_big_m: float | None = None
+        self._fixed_uc_resolve: bool = False
         self._optimize_window: SnapshotWindow | None = None
 
         # Initialize accessors
