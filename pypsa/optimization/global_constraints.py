@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import re
 import warnings
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -180,6 +181,108 @@ def _storage_withdrawal(
         lhs += terms
         constant += component_constant
     return lhs, constant
+
+
+@dataclass(frozen=True)
+class _LimitRow:
+    """One scenario row of a carrier limit, as resolved by `_define_carrier_limit`.
+
+    `weight` holds the generator snapshot weightings of `period_sns`, multiplied by
+    the years of their investment period.
+    """
+
+    glc: pd.Series
+    scenario: Any
+    period_sns: pd.Index
+    weight: DataArray
+
+
+def _define_carrier_limit(
+    n: Network,
+    sns: pd.Index,
+    glcs: pd.DataFrame,
+    terms: Callable[[_LimitRow], tuple[list[LinearExpression], pd.Series] | None],
+) -> None:
+    """Add one `GlobalConstraint-<name>` per name in `glcs`.
+
+    `terms` returns the generator terms of a row and the factor per carrier that
+    weights the storage withdrawal, or None to skip the row.
+    """
+    m = n.model
+    window = n.optimize._window.subset(sns)
+    weight = window.snapshot_weightings("generators")
+    if n._multi_invest:
+        period_of = window.period_of
+        periods = window.periods
+        period_weighting = n.investment_period_weightings.years[periods]
+        weight = apply_period_weighting(weight, period_weighting)
+
+    for name in glcs.index.unique("name"):
+        if n.has_scenarios:
+            glc_group = glcs.xs(name, level="name")
+            scenarios = glc_group.index.get_level_values("scenario")
+        else:
+            glc_group = glcs.loc[name]
+            scenarios = [slice(None)]
+
+        expressions = []
+        has_variables = False
+        for scenario in scenarios:
+            glc = glc_group.loc[scenario]
+
+            if np.isnan(glc.investment_period):
+                in_period = slice(None)
+            elif not n._multi_invest:
+                msg = (
+                    f"GlobalConstraint '{name}' sets `investment_period`, but the "
+                    "network has no investment periods."
+                )
+                raise ValueError(msg)
+            elif glc.investment_period in periods:
+                in_period = period_of == glc.investment_period
+            else:
+                continue
+            period_sns = sns[in_period]
+            counted = np.zeros(len(sns), dtype=bool)
+            counted[in_period] = True
+
+            row = _LimitRow(
+                glc=glc,
+                scenario=scenario,
+                period_sns=period_sns,
+                weight=weight.sel(snapshot=period_sns),
+            )
+            result = terms(row)
+            if result is None:
+                continue
+            lhs, carrier_factor = result
+
+            storage_lhs, constant = _storage_withdrawal(
+                n, sns, counted, carrier_factor, scenario=scenario
+            )
+            lhs += storage_lhs
+
+            has_variables |= bool(lhs)
+            expression = merge(lhs) if lhs else LinearExpression(None, m)
+            expressions.append(expression + constant)
+
+        if not has_variables:
+            continue
+
+        if n.has_scenarios:
+            expression = merge(expressions, dim="scenario").assign_coords(
+                scenario=scenarios
+            )
+        else:
+            expression = expressions[0]
+
+        m.add_constraints(
+            expression,
+            glc_group.sense,
+            glc_group.constant,
+            name=f"GlobalConstraint-{name}",
+            scaling=global_constraint_factor(n, name),
+        )
 
 
 def define_tech_capacity_expansion_limit(n: Network, sns: Sequence) -> None:
@@ -457,14 +560,6 @@ def define_primary_energy_limit(
     if glcs.empty:
         return
 
-    window = n.optimize._window.subset(sns)
-    weight = window.snapshot_weightings("generators")
-    if n._multi_invest:
-        period_of = window.period_of
-        periods = window.periods
-        period_weighting = n.investment_period_weightings.years[periods]
-        weight = apply_period_weighting(weight, period_weighting)
-
     unique_names = glcs.index.unique("name")
 
     gen_c = n.c.generators
@@ -496,116 +591,58 @@ def define_primary_energy_limit(
             status=status,
         )
 
-    for name in unique_names:
-        if n.has_scenarios:
-            glc_group = glcs.xs(name, level="name")
-            scenarios = glc_group.index.get_level_values("scenario")
-        else:
-            glc_group = glcs.loc[name]
-            scenarios = [slice(None)]
+    def terms(row: _LimitRow) -> tuple[list[LinearExpression], pd.Series] | None:
+        glc, scenario = row.glc, row.scenario
+        emissions = n.c.carriers.static[glc.carrier_attribute][lambda ds: ds != 0].loc[
+            scenario
+        ]
+        if emissions.empty:
+            return None
 
-        expressions = []
-        has_variables = False
-        for scenario in scenarios:
-            glc = glc_group.loc[scenario]
+        lhs = []
+        period = glc.investment_period if n._multi_invest else None
+        gens = n.c.generators.static[
+            n.c.generators.static.carrier.isin(emissions.index)
+        ]
+        gens = n.c.generators.filter_by_active_assets(gens, period)
 
-            if np.isnan(glc.investment_period):
-                in_period = slice(None)
-            elif not n._multi_invest:
-                msg = (
-                    f"GlobalConstraint '{name}' sets `investment_period`, but the "
-                    "network has no investment periods."
+        if not gens.empty:
+            gens = gens.loc[scenario]
+            p = m[var_name].sel(name=gens.index, snapshot=row.period_sns)
+            if n.has_scenarios:
+                p = p.sel(scenario=scenario, drop=True)
+
+            linear_names = gens.index
+            to_sum = []
+            if primary_energy_pw_var is not None:
+                pw_names = gens.index.intersection(
+                    primary_energy_pw_var.indexes["name"]
                 )
-                raise ValueError(msg)
-            elif glc.investment_period in periods:
-                in_period = period_of == glc.investment_period
-            else:
-                continue
-            period_sns = sns[in_period]
-            counted = np.zeros(len(sns), dtype=bool)
-            counted[in_period] = True
+                if not pw_names.empty:
+                    pw_var = primary_energy_pw_var.sel(
+                        name=pw_names, snapshot=row.period_sns
+                    )
+                    to_sum.append(pw_var.to_linexpr())
+                    linear_names = linear_names.difference(pw_names)
 
-            lhs = []
-            emissions = n.c.carriers.static[glc.carrier_attribute][
-                lambda ds: ds != 0
-            ].loc[scenario]
-
-            if emissions.empty:
-                continue
-
-            # Determine investment period for active asset filtering
-            period = glc.investment_period if n._multi_invest else None
-
-            # generators
-            gens = n.c.generators.static[
-                n.c.generators.static.carrier.isin(emissions.index)
-            ]
-            gens = n.c.generators.filter_by_active_assets(gens, period)
-
-            if not gens.empty:
-                gens = gens.loc[scenario]
-                p = m[var_name].sel(name=gens.index, snapshot=period_sns)
-
+            if not linear_names.empty:
+                efficiency = n.c.generators.da.efficiency.sel(
+                    name=linear_names, snapshot=row.period_sns
+                )
                 if n.has_scenarios:
-                    p = p.sel(scenario=scenario, drop=True)
-
-                linear_names = gens.index
-                to_sum = []
-                if primary_energy_pw_var is not None:
-                    pw_names = gens.index.intersection(
-                        primary_energy_pw_var.indexes["name"]
-                    )
-                    if not pw_names.empty:
-                        pw_var = primary_energy_pw_var.sel(
-                            name=pw_names, snapshot=period_sns
-                        )
-                        to_sum.append(pw_var.to_linexpr())
-                        linear_names = linear_names.difference(pw_names)
-
-                if not linear_names.empty:
-                    efficiency = n.c.generators.da.efficiency.sel(
-                        name=linear_names, snapshot=period_sns
-                    )
-                    if n.has_scenarios:
-                        efficiency = efficiency.sel(scenario=scenario, drop=True)
-                    to_sum.append(p.sel(name=linear_names) / efficiency)
-                dispatch = to_sum[0]
-                for term in to_sum[1:]:
-                    dispatch = dispatch.add(term, join="outer")
-                emission_rate = gens.carrier.map(emissions).reindex(
-                    dispatch.indexes["name"]
-                )
-                expr = (
-                    dispatch * weight.sel(snapshot=period_sns) * emission_rate
-                ).sum()
-                lhs.append(expr)
-
-            storage_lhs, constant = _storage_withdrawal(
-                n, sns, counted, emissions, scenario=scenario
+                    efficiency = efficiency.sel(scenario=scenario, drop=True)
+                to_sum.append(p.sel(name=linear_names) / efficiency)
+            dispatch = to_sum[0]
+            for term in to_sum[1:]:
+                dispatch = dispatch.add(term, join="outer")
+            emission_rate = gens.carrier.map(emissions).reindex(
+                dispatch.indexes["name"]
             )
-            lhs += storage_lhs
+            lhs.append((dispatch * row.weight * emission_rate).sum())
 
-            has_variables |= bool(lhs)
-            expression = merge(lhs) if lhs else LinearExpression(None, m)
-            expressions.append(expression + constant)
+        return lhs, emissions
 
-        if not has_variables:
-            continue
-
-        if n.has_scenarios:
-            expression = merge(expressions, dim="scenario").assign_coords(
-                scenario=scenarios
-            )
-        else:
-            expression = expressions[0]
-
-        m.add_constraints(
-            expression,
-            glc_group.sense,
-            glc_group.constant,
-            name=f"GlobalConstraint-{name}",
-            scaling=global_constraint_factor(n, name),
-        )
+    _define_carrier_limit(n, sns, glcs, terms)
 
 
 def define_operational_limit(n: Network, sns: pd.Index) -> None:
@@ -627,92 +664,21 @@ def define_operational_limit(n: Network, sns: pd.Index) -> None:
     if glcs.empty:
         return
 
-    window = n.optimize._window.subset(sns)
-    weight = window.snapshot_weightings("generators")
-    if n._multi_invest:
-        period_of = window.period_of
-        periods = window.periods
-    unique_names = glcs.index.unique("name")
+    gens_static = n.c.generators.static
 
-    for name in unique_names:
-        if n.has_scenarios:
-            glc_group = glcs.xs(name, level="name")
-            scenarios = glc_group.index.get_level_values("scenario")
-        else:
-            glc_group = glcs.loc[name]
-            scenarios = [slice(None)]
+    def terms(row: _LimitRow) -> tuple[list[LinearExpression], pd.Series]:
+        carrier = row.glc.carrier_attribute
+        lhs = []
+        gens = gens_static[(gens_static.carrier == carrier) & gens_static.active]
+        if not gens.empty:
+            gens = gens.loc[row.scenario]
+            p = m["Generator-p"].sel(name=gens.index, snapshot=row.period_sns)
+            if n.has_scenarios:
+                p = p.sel(scenario=row.scenario, drop=True)
+            lhs.append((p * row.weight).sum())
+        return lhs, pd.Series({carrier: 1.0})
 
-        expressions = []
-        has_variables = False
-        for scenario in scenarios:
-            glc = glc_group.loc[scenario]
-
-            if np.isnan(glc.investment_period):
-                in_period = slice(None)
-            elif not n._multi_invest:
-                msg = (
-                    f"GlobalConstraint '{name}' sets `investment_period`, but the "
-                    "network has no investment periods."
-                )
-                raise ValueError(msg)
-            elif glc.investment_period in periods:
-                in_period = period_of == glc.investment_period
-            else:
-                continue
-            period_sns = sns[in_period]
-            counted = np.zeros(len(sns), dtype=bool)
-            counted[in_period] = True
-
-            # Filter weightings and calculate period-specific values
-            w = weight.sel(snapshot=period_sns)
-            if n._multi_invest:
-                period_weighting = n.investment_period_weightings.years[
-                    period_of[in_period].unique()
-                ]
-                w = apply_period_weighting(w, period_weighting)
-
-            lhs = []
-
-            # generators
-            gens = n.c.generators.static.query(
-                "carrier == @glc.carrier_attribute and active"
-            )
-            if not gens.empty:
-                gens = gens.loc[scenario]
-                p = m["Generator-p"].sel(name=gens.index, snapshot=period_sns)
-                if n.has_scenarios:
-                    p = p.sel(scenario=scenario, drop=True)
-
-                expr = (p * w).sum()
-                lhs.append(expr)
-
-            carrier_factor = pd.Series({glc.carrier_attribute: 1.0})
-            storage_lhs, constant = _storage_withdrawal(
-                n, sns, counted, carrier_factor, scenario=scenario
-            )
-            lhs += storage_lhs
-
-            has_variables |= bool(lhs)
-            expression = merge(lhs) if lhs else LinearExpression(None, m)
-            expressions.append(expression + constant)
-
-        if not has_variables:
-            continue
-
-        if n.has_scenarios:
-            expression = merge(expressions, dim="scenario").assign_coords(
-                scenario=scenarios
-            )
-        else:
-            expression = expressions[0]
-
-        m.add_constraints(
-            expression,
-            glc_group.sense,
-            glc_group.constant,
-            name=f"GlobalConstraint-{name}",
-            scaling=global_constraint_factor(n, name),
-        )
+    _define_carrier_limit(n, sns, glcs, terms)
 
 
 def _define_transmission_expansion_limit(
