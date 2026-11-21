@@ -2,9 +2,11 @@
 #
 # SPDX-License-Identifier: MIT
 
+import pandas as pd
 import pytest
 
 import pypsa
+from pypsa.optimization.optimize import OptimizationAccessor
 
 
 def test_optimize_post_discretization():
@@ -126,3 +128,49 @@ def test_iterative_expansion_stochastic_raises():
 
     with pytest.raises(ValueError, match="not yet implemented for stochastic"):
         n.optimize.optimize_transmission_expansion_iteratively()
+
+
+def test_iterative_expansion_restores_extendable_branches(ac_dc_network):
+    n = ac_dc_network
+    n.c.lines.static.loc["0", "s_nom_extendable"] = False
+    n.c.lines.static.loc["0", "s_nom"] = 1234.0
+    lines = n.c.lines.static[["s_nom", "s_nom_extendable"]].copy()
+    links = n.c.links.static[["p_nom", "p_nom_extendable"]].copy()
+    ext = lines.s_nom_extendable
+
+    status, _ = n.optimize.optimize_transmission_expansion_iteratively(
+        max_iterations=2, line_unit_size=500
+    )
+
+    assert status == "ok"
+    pd.testing.assert_frame_equal(n.c.lines.static.loc[ext, lines.columns], lines[ext])
+    pd.testing.assert_frame_equal(n.c.links.static[links.columns], links)
+    # Discretization rewrites `s_nom` of non-extendable lines unrestored, pinned as is.
+    assert n.c.lines.static.at["0", "s_nom"] == 1500.0
+    assert n.c.lines.static.s_nom_opt.to_list() == pytest.approx(
+        [1500.0, 1500.0, 1000.0, 500.0, 1000.0, 500.0, 1000.0]
+    )
+    assert n.objective == pytest.approx(-1611080.7307937962, rel=1e-6)
+
+
+def test_iterative_expansion_restores_branches_when_final_solve_raises(
+    ac_dc_network, monkeypatch
+):
+    n = ac_dc_network
+    lines = n.c.lines.static[["s_nom", "s_nom_extendable"]].copy()
+    links = n.c.links.static[["p_nom", "p_nom_extendable"]].copy()
+    solve = OptimizationAccessor.__call__
+
+    def fail_final_solve(self, *args, **kwargs):
+        if not self._n.c.lines.static.s_nom_extendable.any():
+            msg = "solver crashed"
+            raise RuntimeError(msg)
+        return solve(self, *args, **kwargs)
+
+    monkeypatch.setattr(OptimizationAccessor, "__call__", fail_final_solve)
+
+    with pytest.raises(RuntimeError, match="solver crashed"):
+        n.optimize.optimize_transmission_expansion_iteratively(max_iterations=1)
+
+    pd.testing.assert_frame_equal(n.c.lines.static[lines.columns], lines)
+    pd.testing.assert_frame_equal(n.c.links.static[links.columns], links)
