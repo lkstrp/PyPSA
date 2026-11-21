@@ -310,6 +310,12 @@ def _get_breakpoints(
         if cumulative_attr:
             slopes = y_da.shift({BREAKPOINT_DIM: -1})
             y_breakpoints = Slopes(slopes, y0=0).to_breakpoints(x_da)
+            # Anchor the cost at zero output: a curve starting below 0 would
+            # otherwise carry the cost of its negative part at x=0.
+            below_zero = (
+                x_da.shift({BREAKPOINT_DIM: -1}).clip(max=0) - x_da.clip(max=0)
+            ).clip(min=0)
+            y_breakpoints = y_breakpoints - (slopes * below_zero).sum(BREAKPOINT_DIM)
         else:
             y_breakpoints = breakpoints(
                 (y_da * x_da).fillna(0).where(valid_breakpoints)
