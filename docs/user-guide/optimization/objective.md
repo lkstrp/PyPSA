@@ -9,7 +9,7 @@ SPDX-License-Identifier: CC-BY-4.0
 The objective is to **minimise total system costs** (i.e. the sum of all costs) subject to
 meeting all constraints of the optimisation problem (e.g. energy balance, dispatch limits, etc.) for the selected snapshots.
 
-The objective function is composed of investment costs and multiple forms of operational costs, such as marginal costs, quadratic marginal costs, marginal storage costs, spillage costs, start-up, shut-down and stand-by costs.
+The objective function is composed of investment costs and multiple forms of operational costs, such as marginal costs, quadratic marginal costs, marginal storage costs, spillage costs, start-up, shut-down and stand-by costs, and ramp costs.
 
 Which cost components are included in the objective function depends on the data provided for the network components. For instance, if no extendable components are present (`{p,s,e}_nom_extendable=False`), the investment cost terms are skipped. Or, if no components are marked as committable (`committable=False`), the start-up, shut-down and stand-by costs are skipped. All cost coefficients default to zero, so that the objective function is empty if no costs are defined.
 
@@ -230,6 +230,53 @@ where $sbc_{*,t}$, $suc_{*,t}$, and $sdc_{*,t}$ are the stand-by, start-up, and 
         | $suc_{m,t}$       | `n.processes_t.start_up_cost` | Parameter |
         | $sdc_{m,t}$       | `n.processes_t.shut_down_cost` | Parameter |
         | $w_t^o$           | `n.snapshots.weightings.objective` | Parameter |
+
+## Ramp Costs
+
+For generators, links and processes, the ramp-up costs $ruc_{*,t}$ and ramp-down costs $rdc_{*,t}$ are given by
+
+=== "Generator"
+
+    $$+ \sum_{n,s,t} ruc_{n,s,t} r^+_{n,s,t} + \sum_{n,s,t} rdc_{n,s,t} r^-_{n,s,t}$$
+
+=== "Link"
+
+    $$+ \sum_{l,t} ruc_{l,t} r^+_{l,t} + \sum_{l,t} rdc_{l,t} r^-_{l,t}$$
+
+=== "Process"
+
+    $$+ \sum_{m,t} ruc_{m,t} r^+_{m,t} + \sum_{m,t} rdc_{m,t} r^-_{m,t}$$
+
+where $r^+_{*,t} \geq 0$ and $r^-_{*,t} \geq 0$ are the increase and decrease in dispatch (`p0` for links and processes) from the previous snapshot, defined by $p_{*,t} - p_{*,t-1} = r^+_{*,t} - r^-_{*,t}$ in `define_ramp_cost_constraints()`. Like the ramp limits, they do not require unit commitment, and they are not weighted by the snapshot weightings.
+
+??? note "Mapping of symbols to attributes"
+
+    === "Generator"
+
+        | Symbol | Attribute | Type |
+        |-------------------|-----------|-------------|
+        | $r^+_{n,s,t}$     | `n.generators_t.ramp_up` | Decision variable |
+        | $r^-_{n,s,t}$     | `n.generators_t.ramp_down` | Decision variable |
+        | $ruc_{n,s,t}$     | `n.generators_t.ramp_up_cost` | Parameter |
+        | $rdc_{n,s,t}$     | `n.generators_t.ramp_down_cost` | Parameter |
+
+    === "Link"
+
+        | Symbol | Attribute | Type |
+        |-------------------|-----------|-------------|
+        | $r^+_{l,t}$     | `n.links_t.ramp_up` | Decision variable |
+        | $r^-_{l,t}$     | `n.links_t.ramp_down` | Decision variable |
+        | $ruc_{l,t}$     | `n.links_t.ramp_up_cost` | Parameter |
+        | $rdc_{l,t}$     | `n.links_t.ramp_down_cost` | Parameter |
+
+    === "Process"
+
+        | Symbol | Attribute | Type |
+        |-------------------|-----------|-------------|
+        | $r^+_{m,t}$     | `n.processes_t.ramp_up` | Decision variable |
+        | $r^-_{m,t}$     | `n.processes_t.ramp_down` | Decision variable |
+        | $ruc_{m,t}$     | `n.processes_t.ramp_up_cost` | Parameter |
+        | $rdc_{m,t}$     | `n.processes_t.ramp_down_cost` | Parameter |
 
 Some decision variables do not show up in the objective function, such as the power flow on lines and transformers ($p_{l,t} \in \mathbb{R}$) and the storage unit charging ($h_{n,s,t}^+ \in \mathbb{R}$). They are only used to enforce constraints, e.g. the power flow on lines and transformers.
 

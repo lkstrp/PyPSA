@@ -3,6 +3,8 @@ Generator,p,True,True,False,False,False,False,False,False
 Generator,status,False,False,False,False,False,False,False,True
 Generator,start_up,False,False,False,False,False,False,False,True
 Generator,shut_down,False,False,False,False,False,False,False,True
+Generator,ramp_up,False,False,False,False,False,False,False,True
+Generator,ramp_down,False,False,False,False,False,False,False,True
 Generator,maintenance,False,False,False,False,False,False,False,True
 Generator,p_nom,False,False,False,False,False,False,True,False
 Generator,n_mod,False,False,False,False,False,False,False,True
@@ -16,6 +18,8 @@ Link,p,True,True,False,False,False,False,False,False
 Link,status,False,False,False,False,False,False,False,True
 Link,start_up,False,False,False,False,False,False,False,True
 Link,shut_down,False,False,False,False,False,False,False,True
+Link,ramp_up,False,False,False,False,False,False,False,True
+Link,ramp_down,False,False,False,False,False,False,False,True
 Link,maintenance,False,False,False,False,False,False,False,True
 Link,p_nom,False,False,False,False,False,False,True,False
 Link,n_mod,False,False,False,False,False,False,False,True
@@ -23,6 +27,8 @@ Process,p,True,True,False,False,False,False,False,False
 Process,status,False,False,False,False,False,False,False,True
 Process,start_up,False,False,False,False,False,False,False,True
 Process,shut_down,False,False,False,False,False,False,False,True
+Process,ramp_up,False,False,False,False,False,False,False,True
+Process,ramp_down,False,False,False,False,False,False,False,True
 Process,maintenance,False,False,False,False,False,False,False,True
 Process,p_nom,False,False,False,False,False,False,True,False
 Process,n_mod,False,False,False,False,False,False,False,True

@@ -143,6 +143,41 @@ def test_supply_withdrawal(ac_dc_network_r):
     assert np.allclose(energy_balance.reindex(target.index), target)
 
 
+def test_opex_ramp_costs():
+    n = pypsa.Network(snapshots=range(4))
+    n.snapshot_weightings.iloc[:, :] = 2
+    n.add("Bus", "bus")
+    n.add("Load", "load", bus="bus", p_set=[10, 50, 10, 50])
+    n.add(
+        "Generator",
+        "cheap",
+        bus="bus",
+        carrier="cheap",
+        p_nom=100,
+        marginal_cost=10,
+        ramp_up_cost=5,
+        ramp_down_cost=1,
+    )
+    n.add(
+        "Generator",
+        "expensive",
+        bus="bus",
+        carrier="expensive",
+        p_nom=100,
+        marginal_cost=50,
+    )
+
+    n.optimize()
+
+    opex = n.statistics.opex()
+    assert opex.sum() == pytest.approx(n.objective + n.objective_constant)
+
+    ramp_up = n.statistics.opex(cost_types="ramp_up_cost")
+    assert ramp_up.loc["Generator", "cheap"] == pytest.approx(2 * 40 * 5)
+    ramp_down = n.statistics.opex(cost_types="ramp_down_cost")
+    assert ramp_down.loc["Generator", "cheap"] == pytest.approx(40 * 1)
+
+
 def test_opex():
     n = pypsa.Network()
     n.set_snapshots([0, 1, 2])

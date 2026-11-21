@@ -338,6 +338,34 @@ def _dispatch_before(
     return c.da.p_init.sel(name=idx).where(status > 0, 0.0)
 
 
+def _previous_dispatch(
+    n: Network, c: Components, idx: pd.Index, sns: pd.Index
+) -> tuple[LinearExpression, DataArray, DataArray]:
+    """Previous dispatch, the mask where it is defined, and the initial status.
+
+    Shared by ramp limits and ramp costs.
+    """
+    m = n.model
+    window = n.optimize._window.subset(sns)
+    filter_first_sn = snapshot_array([1] + [0] * (len(sns) - 1), sns)
+
+    s_init = _status_history(n, c, idx, sns, 1).squeeze("lag", drop=True)
+    p_init = _dispatch_before(n, c, idx, sns, s_init)
+
+    mask = c.da.active.sel(snapshot=sns, name=idx)
+    mask.loc[{"snapshot": sns[0]}] = p_init.notnull()
+    # skip starts of periods except the first where p_init is used
+    boundary = window.period_start_mask()
+    boundary[0] = False
+    mask = mask & ~boundary
+
+    p = m[f"{c.name}-p"]
+    p_prev = (
+        p.to_linexpr().shift(snapshot=1).fillna(0) + p_init.fillna(0) * filter_first_sn
+    )
+    return p_prev, mask, s_init
+
+
 def define_operational_constraints_for_committables(
     n: Network, sns: pd.Index, component: str
 ) -> None:
@@ -1111,7 +1139,6 @@ def define_ramp_limit_constraints(
     limit_down = c.da.ramp_limit_down.sel(snapshot=sns, name=idx)
     limit_start = c.da.ramp_limit_start_up.sel(name=idx)
     limit_shut = c.da.ramp_limit_shut_down.sel(name=idx)
-    mask = c.da.active.sel(snapshot=sns, name=idx)
 
     no_up_limit = limit_up.isnull() & limit_start.isnull()
     no_down_limit = limit_down.isnull() & limit_shut.isnull()
@@ -1124,7 +1151,6 @@ def define_ramp_limit_constraints(
     limit_start = limit_start.fillna(1.0)
     limit_shut = limit_shut.fillna(1.0)
 
-    window = n.optimize._window.subset(sns)
     filter_first_sn = snapshot_array([1] + [0] * (len(sns) - 1), sns)
 
     # Status counts modules for modular committables, so they ramp per module
@@ -1146,9 +1172,7 @@ def define_ramp_limit_constraints(
         status_var = m[f"{c.name}-status"].sel(name=com_main_names)
         status = status.add(status_var, join="left")
 
-    s_init = _status_history(n, c, idx, sns, 1).squeeze("lag", drop=True)
-    p_init = _dispatch_before(n, c, idx, sns, s_init)
-    mask.loc[{"snapshot": sns[0]}] = p_init.notnull()
+    p_prev, mask, s_init = _previous_dispatch(n, c, idx, sns)
     is_com_fix_mod = is_com_mod & ~is_ext
     if is_com_fix_mod.any() and (not _window_start(n, sns) or c.dynamic.status.empty):
         # Before n.snapshots the status is a 0/1 flag, so a unit that was on
@@ -1156,15 +1180,7 @@ def define_ramp_limit_constraints(
         modules = c.da[nom_attr].sel(name=idx) / c.da[nom_mod_attr].sel(name=idx)
         s_init = s_init.where(~is_com_fix_mod, s_init * modules)
 
-    # skip starts of periods except the first where p_init is used
-    boundary = window.period_start_mask()
-    boundary[0] = False
-    mask = mask & ~boundary
-
     p = m[f"{c.name}-{var_attr}"]
-    p_prev = (
-        p.to_linexpr().shift(snapshot=1).fillna(0) + p_init.fillna(0) * filter_first_sn
-    )
     status_shifted = status.shift(snapshot=1).fillna(0)
     status_prev = status_shifted + s_init * filter_first_sn
 
@@ -1219,6 +1235,65 @@ def define_ramp_limit_constraints(
             no_down_limit,
             mask,
         )
+
+
+def define_ramp_cost_constraints(n: Network, sns: pd.Index, component: str) -> None:
+    """Define ramp variables with `p - p_prev == ramp_up - ramp_down`.
+
+    Only for components with a non-zero `ramp_up_cost` or `ramp_down_cost`.
+    Applies to Generator (p), Link (p) and Process (p).
+
+    Parameters
+    ----------
+    n : pypsa.Network
+        Network instance containing the model and component data
+    sns : pd.Index
+        Set of snapshots for which to define the constraints
+    component : str
+        Name of the network component (e.g. "Generator")
+
+    """
+    m = n.model
+    c = n.c[component]
+
+    if c.static.empty or "ramp_up_cost" not in c.static:
+        return
+
+    idx = c.active_assets
+    costs = []
+    for attr in ("ramp_up_cost", "ramp_down_cost"):
+        cost = c.da[attr].sel(name=idx)
+        if "snapshot" in cost.dims:
+            cost = cost.sel(snapshot=sns)
+        if (cost < 0).any():
+            msg = (
+                f"{c.name} {attr} must be non-negative, otherwise the optimization "
+                f"is unbounded. Negative values found for: {_flagged_names(cost < 0)}."
+            )
+            raise ValueError(msg)
+        costs.append(cost)
+    names = _flagged_names((costs[0] != 0) | (costs[1] != 0))
+    if not names:
+        return
+    idx = pd.Index(names, name=idx.name)
+
+    p_prev, mask, _ = _previous_dispatch(n, c, idx, sns)
+    p_prev = p_prev.sel(name=idx)
+
+    ramp_up = m.add_variables(
+        lower=0, coords=mask.coords, name=f"{c.name}-ramp_up", mask=mask
+    )
+    ramp_down = m.add_variables(
+        lower=0, coords=mask.coords, name=f"{c.name}-ramp_down", mask=mask
+    )
+
+    p = m[f"{c.name}-p"].sel(name=idx)
+    m.add_constraints(
+        p - p_prev - ramp_up + ramp_down == 0,
+        name=f"{c.name}-p-ramp_cost",
+        mask=mask,
+        scaling=c._scaling(idx),
+    )
 
 
 def _flagged_names(mask: DataArray) -> list[str]:

@@ -670,3 +670,30 @@ def test_rolling_horizon_storage_standing_loss(component, level, kwargs):
     pd.testing.assert_frame_equal(
         rolling.c[component].dynamic[level], full.c[component].dynamic[level]
     )
+
+
+@pytest.mark.parametrize(
+    ("ramp_up_cost", "expected"),
+    [(100, [10, 10, 10, 10]), (10, [10, 10, 50, 50])],
+    ids=["seam-too-costly", "seam-worth-it"],
+)
+def test_rolling_horizon_ramp_cost_at_seam(ramp_up_cost, expected):
+    """The first snapshot of a window pays for the change from the last one."""
+    n = pypsa.Network(snapshots=range(4))
+    n.add("Bus", "bus")
+    n.add("Load", "load", bus="bus", p_set=[10, 10, 50, 50])
+    n.add(
+        "Generator",
+        "cheap",
+        bus="bus",
+        p_nom=100,
+        marginal_cost=10,
+        ramp_up_cost=ramp_up_cost,
+    )
+    n.add("Generator", "expensive", bus="bus", p_nom=100, marginal_cost=50)
+
+    n.optimize.optimize_with_rolling_horizon(horizon=2)
+
+    dyn = n.c.generators.dynamic
+    np.testing.assert_allclose(dyn.p["cheap"], expected)
+    np.testing.assert_allclose(dyn.ramp_up.loc[2, "cheap"], expected[2] - 10)

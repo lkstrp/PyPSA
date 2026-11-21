@@ -51,6 +51,7 @@ from pypsa.optimization.constraints import (
     define_operational_constraints_for_committables,
     define_operational_constraints_for_extendables,
     define_operational_constraints_for_non_extendables,
+    define_ramp_cost_constraints,
     define_ramp_limit_constraints,
     define_secant_loss_constraints,
     define_storage_unit_constraints,
@@ -451,6 +452,20 @@ def define_objective(
             cost = cost * event_weight
 
         var = m[f"{c.name}-{attr}"].sel(name=com_i)
+        opex_terms.append((var * cost).sum(dim=["name", "snapshot"]))
+
+    # ramp costs
+    keys = ["ramp_up", "ramp_down"]  # noqa: F841
+    for c_name, attr in lookup.query("variable in @keys").index:
+        if f"{c_name}-{attr}" not in m.variables:
+            continue
+        var = m[f"{c_name}-{attr}"]
+        c = as_components(n, c_name)
+        cost = c.da[attr + "_cost"].sel(name=var.indexes["name"])
+        if "snapshot" in cost.dims:
+            cost = cost.sel(snapshot=sns)
+        if n._multi_invest:
+            cost = cost * event_weight
         opex_terms.append((var * cost).sum(dim=["name", "snapshot"]))
 
     if not (capex_terms or opex_terms):
@@ -908,6 +923,7 @@ class OptimizationAccessor(OptimizationAbstractMixin):
             )
             define_operational_constraints_for_committables(n, sns, c)
             define_ramp_limit_constraints(n, sns, c, attr)
+            define_ramp_cost_constraints(n, sns, c)
             define_fixed_operation_constraints(n, sns, c, attr)
 
         # Handle StorageUnit p_set separately (fixes p_dispatch - p_store = p_set)
