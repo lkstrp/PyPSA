@@ -2153,6 +2153,44 @@ def define_committability_variables_constraints_with_variable_upper_limit(
     )
 
 
+def _define_fixed_status_constraints(n: Network, sns: pd.Index, c: Any) -> None:
+    """Fix the status variable of committable units to ``status_set``.
+
+    Non-committable units with a non-NaN ``status_set`` get no row and are
+    named in a single warning.
+    """
+    if "status_set" not in c.dynamic.keys():
+        return
+
+    fix_all = c.da["status_set"].sel(snapshot=sns)
+    pinned = fix_all.notnull().any([d for d in fix_all.dims if d != "name"])
+    committable = np.isin(pinned.coords["name"].values, c.committables)
+    stray = pinned.coords["name"].values[pinned.values & ~committable]
+    if len(stray):
+        logger.warning(
+            "`status_set` is ignored for non-committable %s: %s.",
+            c.name,
+            ", ".join(map(str, stray)),
+        )
+
+    names = c.committables.intersection(c.active_assets)
+    if names.empty or f"{c.name}-status" not in n.model.variables:
+        return
+
+    fix = fix_all.sel(name=names)
+    if fix.isnull().all():
+        return
+
+    active = c.da.active.sel(snapshot=sns, name=names)
+    n.model.add_constraints(
+        n.model[f"{c.name}-status"].sel(name=names),
+        "=",
+        fix.fillna(0),
+        name=f"{c.name}-status_set",
+        mask=active & fix.notnull(),
+    )
+
+
 def define_fixed_operation_constraints(
     n: Network, sns: pd.Index, component: str, attr: str
 ) -> None:
@@ -2161,8 +2199,9 @@ def define_fixed_operation_constraints(
     Sets constraints to fix dispatch variables of components to values specified
     in the corresponding '_set' attribute.
 
-    Applies to Generator (p), Line (s), Transformer (s), Link (p), Store (e),
-    StorageUnit (p_dispatch, p_store, state_of_charge).
+    Applies to Generator (p, status), Line (s), Transformer (s), Link (p, status),
+    Process (p, status), Store (e), StorageUnit (p_dispatch, p_store,
+    state_of_charge).
 
     Parameters
     ----------
@@ -2190,6 +2229,10 @@ def define_fixed_operation_constraints(
     """
     c = as_components(n, component)
     attr_set = f"{attr}_set"
+
+    if attr == "status":
+        _define_fixed_status_constraints(n, sns, c)
+        return
 
     # Those internal guards should be removed and for Lines/ Transformers which are passive, the method should not even be called (clean up needed everywhere)
     if attr_set not in c.dynamic.keys():

@@ -1368,6 +1368,8 @@ class NetworkIOMixin(_NetworkABC):
             "iterate_components",
             "_name",
             "_pypsa_version",
+            # transient flag of optimize_and_resolve_fixed_unit_commitment
+            "_fixed_uc_resolve",
         }
 
         _attrs = {}

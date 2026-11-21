@@ -342,6 +342,26 @@ To tighten the relaxation, additional constraints are introduced that improve ca
 
 These constraints are defined in the function `define_operational_constraints_for_committables()`.
 
+## Fixing the Status and Resolving for Prices
+
+The time series `status_set` of [Generator](../components/generators.md), [Link](../components/links.md) and [Process](../components/processes.md) fixes the commitment status of a committable unit. A value in a snapshot pins the status of the unit in that snapshot. `NaN` leaves the status free. For [modular units](capacity-limits.md#modular-and-committable-components) (`p_nom_mod` > 0), the value is a number of modules, not a status between 0 and 1. The input only acts on units with `committable=True`; for other units, values raise a warning and add no constraint. The constraint is named `<Component>-status_set`, and its dual is `mu_status_set` in the unit of currency per unit of status. It is assigned to the network with `assign_all_duals=True`.
+
+Prices from a mixed-integer problem are not meaningful, because the problem has no duals. [`n.optimize.optimize_and_resolve_fixed_unit_commitment()`][pypsa.optimization.OptimizationAccessor.optimize_and_resolve_fixed_unit_commitment] gets prices from the commitment found by the mixed-integer solve:
+
+1. Solve the problem as usual. If the solve is not successful, return its status.
+2. Round the solved `status` of all committable units and write it to `status_set`.
+3. Solve again with continuous status, start-up and shut-down variables. The linearized tightening constraints are not used.
+4. Keep the dispatch and the duals of the second solve, such as `marginal_price`, on the network. Restore the original `status_set`.
+
+```python
+n.optimize.optimize_and_resolve_fixed_unit_commitment(solver_name="highs")
+n.buses_t.marginal_price
+```
+
+The method does not fix capacities. Extendable capacities are optimized again in the second solve. To keep them at the values of a previous run, call `n.optimize.fix_optimal_capacities()` first. Extendable modular units keep an integer number of modules `n_mod`, so the second solve is still a mixed-integer problem for them and has no duals.
+
+See the [example](../../examples/uc-prices.ipynb) for prices with and without the resolve.
+
 ## Examples
 
 

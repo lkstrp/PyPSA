@@ -816,7 +816,9 @@ class OptimizationAccessor(OptimizationAbstractMixin):
         """
         n = self._n
         sns = as_index(n, snapshots, "snapshots")
-        n._linearized_uc = int(linearized_unit_commitment)
+        # Fixed-UC resolve relaxes status variables and skips tightening
+        relaxed_uc = linearized_unit_commitment or n._fixed_uc_resolve
+        n._linearized_uc = int(linearized_unit_commitment and not n._fixed_uc_resolve)
         n._multi_invest = int(multi_investment_periods)
         n._committable_big_m = committable_big_m
         piecewise_opts: list[PiecewiseOptions] = list(
@@ -825,7 +827,7 @@ class OptimizationAccessor(OptimizationAbstractMixin):
                 for opt in (piecewise_options or [])
             }
         )
-        if linearized_unit_commitment:
+        if linearized_unit_commitment and not n._fixed_uc_resolve:
             check_no_modular_committables(n)
 
         if consistency_check:
@@ -866,9 +868,9 @@ class OptimizationAccessor(OptimizationAbstractMixin):
 
         for c, attr in lookup.query("not nominal and not handle_separately").index:
             define_operational_variables(n, sns, c, attr)
-            define_status_variables(n, sns, c, linearized_unit_commitment)
-            define_start_up_variables(n, sns, c, linearized_unit_commitment)
-            define_shut_down_variables(n, sns, c, linearized_unit_commitment)
+            define_status_variables(n, sns, c, relaxed_uc)
+            define_start_up_variables(n, sns, c, relaxed_uc)
+            define_shut_down_variables(n, sns, c, relaxed_uc)
             define_maintenance_variables(n, sns, c)
             define_maintenance_start_variables(n, sns, c)
             define_maintenance_capacity_variables(n, sns, c)
@@ -907,6 +909,8 @@ class OptimizationAccessor(OptimizationAbstractMixin):
                 n, sns, c, attr, transmission_losses
             )
             define_operational_constraints_for_committables(n, sns, c)
+            if c in ("Generator", "Link", "Process"):
+                define_fixed_operation_constraints(n, sns, c, "status")
             define_ramp_limit_constraints(n, sns, c, attr)
             define_fixed_operation_constraints(n, sns, c, attr)
 

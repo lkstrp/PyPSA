@@ -797,6 +797,100 @@ class OptimizationAbstractMixin(OptimizationAbstractMGAMixin):
             stores.static.cycles_max = cycles_max
         return n
 
+    def optimize_and_resolve_fixed_unit_commitment(
+        self,
+        snapshots: Sequence | None = None,
+        **kwargs: Any,
+    ) -> tuple[str, str]:
+        """Solve a unit commitment problem, then resolve it with fixed commitment.
+
+        A mixed-integer problem has no meaningful duals. This method first solves
+        the problem as usual, then pins the solved (rounded) status of every
+        committable generator, link and process through the `status_set` input
+        and solves again as a continuous problem. The second solve assigns the
+        optimal dispatch and the duals, such as `marginal_price`, to the network.
+
+        Parameters
+        ----------
+        snapshots : Sequence | None, optional
+            Set of snapshots to consider in the optimization. If None, uses all
+            snapshots in the network.
+        **kwargs : Any
+            Keyword arguments passed to `n.optimize()` in both solves. Pass
+            `assign_all_duals=True` to also get `mu_status_set`, the dual of the
+            fixing constraint. The second solve always uses
+            `linearized_unit_commitment=False`.
+
+        Returns
+        -------
+        tuple[str, str]
+            Status and termination condition of the second solve. If the first
+            solve is not successful, its status and condition are returned and
+            no second solve is run.
+
+        Notes
+        -----
+        Capacities are not fixed: extendable capacities are optimized again in
+        the second solve. Call `n.optimize.fix_optimal_capacities()` beforehand
+        to keep them at the values of a previous optimization. A user-set
+        `status_set` is overwritten during the method and restored afterwards.
+
+        Examples
+        --------
+        >>> import pypsa
+        >>> n = pypsa.Network(snapshots=range(2))
+        >>> n.add("Bus", "bus")
+        >>> n.add("Load", "load", bus="bus", p_set=[50, 130])
+        >>> n.add("Generator", "a", bus="bus", p_nom=100, marginal_cost=1,
+        ...       committable=True)
+        >>> n.add("Generator", "b", bus="bus", p_nom=100, marginal_cost=10,
+        ...       committable=True)
+        >>> status, condition = n.optimize.optimize_and_resolve_fixed_unit_commitment(
+        ...     solver_name="highs"
+        ... )
+        >>> n.buses_t.marginal_price["bus"].tolist()
+        [1.0, 10.0]
+
+        """
+        n = self._n
+        components = [n.c.generators, n.c.links, n.c.processes]
+        saved = {c.name: c.dynamic["status_set"].copy() for c in components}
+
+        try:
+            status, condition = n.optimize(snapshots, **kwargs)
+            if status != "ok":
+                logger.warning(
+                    "Optimization failed with status %s and condition %s. "
+                    "Skipping the resolve with fixed unit commitment.",
+                    status,
+                    condition,
+                )
+                return status, condition
+
+            for c in components:
+                units = c.committables.intersection(c.active_assets)
+                if units.empty:
+                    continue
+                status_t = c.dynamic["status"]
+                solved = status_t.loc[
+                    :, status_t.columns.get_level_values("name").isin(units)
+                ].round()
+                current = c.dynamic["status_set"]
+                status_set = current.reindex(
+                    index=current.index.union(solved.index),
+                    columns=current.columns.union(solved.columns),
+                )
+                status_set.loc[solved.index, solved.columns] = solved
+                c.dynamic["status_set"] = status_set
+
+            n._fixed_uc_resolve = True
+            kwargs["linearized_unit_commitment"] = False
+            return n.optimize(snapshots, **kwargs)
+        finally:
+            n._fixed_uc_resolve = False
+            for c in components:
+                c.dynamic["status_set"] = saved[c.name]
+
     def optimize_and_run_non_linear_powerflow(
         self,
         snapshots: Sequence | None = None,
