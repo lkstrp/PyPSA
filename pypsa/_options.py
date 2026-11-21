@@ -525,6 +525,17 @@ options._add_option(
     "to linopy's Model.solve(). When None, solver default behavior is used.\n\t"
     "Note: not all solvers support this option (e.g. HiGHS does, CPLEX does not).",
 )
+options._add_option(
+    "params.optimize.durations_in_hours",
+    False,
+    "Interpret `ramp_limit_up`, `ramp_limit_down`, `min_up_time` and "
+    "`min_down_time` in hours and per hour, using the 'generators' snapshot "
+    "weightings. If False, they count snapshots and ignore the weightings. "
+    "If True, ramp limits are scaled by the snapshot weighting, including the "
+    "start-up and shut-down ramp terms, and minimum times are lookbacks in "
+    "hours that stop at investment period boundaries. The default changes to "
+    "True in v2.0.",
+)
 
 options._add_option(
     "params.consistency.numerical_tolerance",

@@ -119,6 +119,14 @@ optimize.log_to_console:
     Description: Whether to print solver output to console. Passed as a solver option
     	to linopy's Model.solve(). When None, solver default behavior is used.
     	Note: not all solvers support this option (e.g. HiGHS does, CPLEX does not).
+optimize.durations_in_hours:
+    Default: False
+    Description: Interpret `ramp_limit_up`, `ramp_limit_down`, `min_up_time` and
+        `min_down_time` in hours and per hour, using the 'generators' snapshot
+        weightings. If False, they count snapshots and ignore the weightings. If True,
+        ramp limits are scaled by the snapshot weighting, including the start-up and
+        shut-down ramp terms, and minimum times are lookbacks in hours that stop at
+        investment period boundaries. The default changes to True in v2.0.
 consistency.numerical_tolerance:
     Default: 1e-09
     Description: Tolerance for numerical comparisons in consistency checks (e.g. p_min_pu > p_max_pu).
