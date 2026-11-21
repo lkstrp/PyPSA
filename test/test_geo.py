@@ -5,8 +5,9 @@
 import numpy as np
 import pytest
 from numpy.testing import assert_allclose
+from pyproj.exceptions import CRSError
 
-from pypsa.geo import haversine, haversine_pts
+from pypsa.geo import get_projection_from_crs, haversine, haversine_pts
 
 EARTH_RADIUS = 6371.0  # km
 DEGREE = EARTH_RADIUS * np.pi / 180  # km per degree of a great circle
@@ -49,3 +50,10 @@ def test_haversine_matrix_matches_pairwise():
 def test_haversine_wrong_shape_raises():
     with pytest.raises(ValueError, match="shape"):
         haversine([1.0, 2.0, 3.0], [[0.0, 0.0]])
+
+
+def test_get_projection_from_crs():
+    ccrs = pytest.importorskip("cartopy.crs")
+    assert isinstance(get_projection_from_crs(4326), ccrs.PlateCarree)
+    with pytest.raises(CRSError):
+        get_projection_from_crs(999999)

@@ -154,20 +154,27 @@ def compute_bbox(
 
 
 def get_projection_from_crs(crs: int | str) -> ccrs.Projection:
-    """Get cartopy projection from EPSG code or proj4 string.
+    """Get cartopy projection from EPSG code.
 
-    If the projection is not found, a warning is issued and the default
-    PlateCarree projection is returned.
+    If the EPSG code does not define a projection, e.g. a geographic CRS
+    like 4326, the default PlateCarree projection is returned. A warning is
+    issued for any such code other than 4326.
 
     Parameters
     ----------
     crs : int | str
-        EPSG code or proj4 string
+        EPSG code, e.g. ``3035`` or ``"3035"``
 
     Returns
     -------
     projection : cartopy.crs.Projection
         Cartopy projection object
+
+    Raises
+    ------
+    pyproj.exceptions.CRSError
+        If ``crs`` is not a known EPSG code, e.g. ``999999``, a proj4 string
+        or ``"EPSG:3035"``.
 
     Examples
     --------
