@@ -1188,6 +1188,23 @@ class OptimizationAccessor(OptimizationAbstractMixin):
                             sns, c.static.index[c.static[f"bus{i}"] == ""]
                         ] = float(c.defaults.loc[f"p{i}", "default"])
 
+                    w_gen = n.snapshot_weightings.generators.loc[sns]
+                    for fuel_attr, var_attr, scale in (
+                        ("stand_by_fuel", "status", 1),
+                        ("start_up_fuel", "start_up", 1 / w_gen),
+                    ):
+                        if f"{c.name}-{var_attr}" not in m.variables:
+                            continue
+                        fuel = n.get_switchable_as_dense(c.name, fuel_attr, sns)
+                        var = _from_xarray(
+                            m.variables[f"{c.name}-{var_attr}"].solution, c
+                        )
+                        cols = fuel.columns[(fuel != 0).any()].intersection(var.columns)
+                        if cols.empty:
+                            continue
+                        fuel_p = fuel[cols].mul(var[cols].fillna(0)).mul(scale, axis=0)
+                        c.dynamic.p0.loc[sns, cols] += fuel_p
+
                 else:
                     _set_dynamic_data(n, c.name, attr, df)
             # Ignore `n_mod`
@@ -1465,7 +1482,7 @@ class OptimizationAccessor(OptimizationAbstractMixin):
         for c in self._n.one_port_components:
             self._n.components[c].dynamic.p_set = self._n.components[c].dynamic.p
         for c in self._n.controllable_branch_components:
-            self._n.components[c].dynamic.p_set = self._n.components[c].dynamic.p0
+            self._n.components[c].dynamic.p_set = self._n.components[c].dynamic.p
 
     def add_load_shedding(
         self,

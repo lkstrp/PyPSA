@@ -342,6 +342,23 @@ To tighten the relaxation, additional constraints are introduced that improve ca
 
 These constraints are defined in the function `define_operational_constraints_for_committables()`.
 
+## Start-up and stand-by fuel
+
+Committable components can consume fuel independent of their dispatch:
+`stand_by_fuel` (MWh/h) while running and `start_up_fuel` (MWh) per start-up.
+
+=== "Generator"
+
+    The fuel counts towards `primary_energy` [global constraints](global-constraints.md) with the `co2_emissions` of the carrier, without dividing by `efficiency`.
+
+=== "Link"
+
+    The fuel is drawn from `bus0`. The nodal balance of `bus0` gains the term
+
+    $$- \left( \textrm{stand\_by\_fuel}_{l,t} \cdot u_{l,t} + \frac{\textrm{start\_up\_fuel}_{l,t}}{w_t} \cdot su_{l,t} \right)$$
+
+    with the `generators` snapshot weighting $w_t$. It is included in `n.links_t.p0`, while `n.links_t.p` stays the dispatch $f_{l,t}$.
+
 ## Examples
 
 
