@@ -343,7 +343,7 @@ class NetworkIndexMixin(_NetworkABC):
                 "which is required for multi-period investment optimisation."
             )
             raise ValueError(msg)
-        if isinstance(self.snapshots, pd.MultiIndex):
+        if self.has_periods:
             if not periods_.isin(self.snapshots.unique("period")).all():
                 msg = "Not all investment periods are in level `period` of snapshots."
                 raise ValueError(msg)
