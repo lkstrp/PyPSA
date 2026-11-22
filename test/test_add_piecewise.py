@@ -319,7 +319,7 @@ class TestPiecewiseErrors:
         """Test that a first x breakpoint above zero raises for cumulative curves only."""
         n = base_network
         curve = pd.DataFrame({x_attr: [0.1, 0.5, 1.0], attr: [0.0, 0.1, 0.4]})
-        with pytest.raises(ValueError, match=rf"must start at {x_attr}=0"):
+        with pytest.raises(ValueError, match=rf"must not start above {x_attr}=0"):
             n.add(comp, "c1", **base_kwargs, **{attr: curve})
 
     @pytest.mark.parametrize(("comp", "base_kwargs", "attr", "x_attr"), ALL_PU_PARAMS)
