@@ -3,7 +3,9 @@
 # SPDX-License-Identifier: MIT
 
 import sys
+from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 from geopandas.testing import assert_geodataframe_equal
@@ -864,6 +866,110 @@ def test_import_from_pandapower_network(
         assert len(n.loads) == len(net.load)
         assert len(n.c.transformers.static) == len(net.trafo)
         assert len(n.c.shunt_impedances.static) == len(net.shunt)
+
+
+def _pandapower_stand_in_net_with_unnamed_bus():
+    """Build a minimal pandapower-like net whose second bus has no name."""
+    return SimpleNamespace(
+        f_hz=50.0,
+        bus=pd.DataFrame(
+            {"name": ["Bus A", np.nan], "vn_kv": [0.4, 0.4]}, index=[0, 1]
+        ),
+        line=pd.DataFrame(
+            {
+                "std_type": ["NAYY 4x50 SE"],
+                "from_bus": [0],
+                "to_bus": [1],
+                "length_km": [0.1],
+                "parallel": [1],
+                "name": ["Line 1"],
+            }
+        ),
+        load=pd.DataFrame(
+            {
+                "bus": [1],
+                "p_mw": [0.1],
+                "q_mvar": [0.05],
+                "scaling": [1.0],
+                "name": ["Load 1"],
+            }
+        ),
+        ext_grid=pd.DataFrame({"bus": [0], "vm_pu": [1.02], "name": ["Grid"]}),
+        gen=pd.DataFrame(
+            columns=["bus", "p_mw", "vm_pu", "scaling", "name"], dtype=float
+        ),
+        sgen=pd.DataFrame(
+            columns=["bus", "p_mw", "q_mvar", "scaling", "name"], dtype=float
+        ),
+        trafo=pd.DataFrame(
+            columns=[
+                "std_type",
+                "hv_bus",
+                "lv_bus",
+                "sn_mva",
+                "vk_percent",
+                "vkr_percent",
+                "i0_percent",
+                "pfe_kw",
+                "shift_degree",
+                "tap_pos",
+                "name",
+            ],
+            dtype=float,
+        ),
+        shunt=pd.DataFrame(
+            columns=["bus", "p_mw", "q_mvar", "vn_kv", "name"], dtype=float
+        ),
+        switch=pd.DataFrame(columns=["bus", "element", "et", "closed"]),
+    )
+
+
+@pytest.mark.parametrize("use_pandapower_index", [True, False])
+def test_import_from_pandapower_net_names_unnamed_buses(use_pandapower_index):
+    net = _pandapower_stand_in_net_with_unnamed_bus()
+    n = pypsa.Network()
+    n.import_from_pandapower_net(
+        net, extra_line_data=False, use_pandapower_index=use_pandapower_index
+    )
+
+    assert list(n.c.buses.static.index) == ["Bus A", "1"]
+    line = n.c.lines.static.iloc[0]
+    assert line.bus0 == "Bus A"
+    assert line.bus1 == "1"
+    assert n.c.loads.static.bus.iloc[0] == "1"
+
+
+@pytest.mark.skipif(
+    Version(pd.__version__) >= Version("3.1"),
+    reason="pandapower does not yet support pandas>=3.1",
+)
+@pytest.mark.parametrize("use_pandapower_index", [True, False])
+def test_import_from_pandapower_net_unnamed_bus_reported_case(use_pandapower_index):
+    """Reproduction from PyPSA#2162 with the second bus left unnamed."""
+    pp = pytest.importorskip("pandapower", reason="pandapower not installed")
+    net = pp.create_empty_network()
+    b1 = pp.create_bus(net, vn_kv=110.0, name="B1")
+    b2 = pp.create_bus(net, vn_kv=110.0)
+    pp.create_ext_grid(net, b1, name="Grid")
+    pp.create_load(net, b2, p_mw=60.0, q_mvar=20.0, name="Load")
+    pp.create_line_from_parameters(
+        net,
+        b1,
+        b2,
+        length_km=10.0,
+        r_ohm_per_km=0.12,
+        x_ohm_per_km=0.39,
+        c_nf_per_km=9.5,
+        max_i_ka=0.5,
+        name="Line",
+    )
+
+    n = pypsa.Network()
+    n.import_from_pandapower_net(net, use_pandapower_index=use_pandapower_index)
+    n.pf()
+
+    assert list(n.c.buses.static.index) == ["B1", str(b2)]
+    assert n.c.loads.static.at["Load", "bus"] == str(b2)
 
 
 def test_io_time_dependent_efficiencies(tmpdir):
