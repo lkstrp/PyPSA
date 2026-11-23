@@ -2651,7 +2651,11 @@ class NetworkIOMixin(_NetworkABC):
         net : pandapower network
             pandapower network to import from.
         extra_line_data : boolean, default: False
-            if True, the line data for all parameters is imported instead of only the type
+            if True, the line data for all parameters is imported instead of only the type.
+            Line and transformer ratings ``s_nom`` are taken from pandapower's
+            ``max_i_ka``, ``df``, ``parallel`` and ``sn_mva`` in both modes; the flag
+            only decides whether line impedance comes from the standard type or from
+            the explicit per-km values.
         use_pandapower_index : boolean, default: False
             if True, use integer numbers which is the pandapower index standard
             if False, use any net.name as index (e.g. 'Bus 1' (str) or 1 (int))
@@ -2733,56 +2737,67 @@ class NetworkIOMixin(_NetworkABC):
             [_tmp_gen, _tmp_sgen, _tmp_ext_grid], ignore_index=use_pandapower_index
         )
 
+        # three-phase rating that pandapower measures loading_percent against
+        parallel = net.line.parallel.values
+        line_s_nom = (
+            np.sqrt(3)
+            * net.bus.vn_kv.loc[net.line.from_bus].values
+            * net.line.max_i_ka.values
+            * net.line.df.values
+            * parallel
+        )
+
         if extra_line_data is False:
             d["Line"] = pd.DataFrame(
                 {
                     "type": net.line.std_type.values,
+                    "s_nom": line_s_nom,
                     "bus0": net.bus.name.loc[net.line.from_bus].values,
                     "bus1": net.bus.name.loc[net.line.to_bus].values,
                     "length": net.line.length_km.values,
-                    "num_parallel": net.line.parallel.values,
+                    "num_parallel": parallel,
                 },
                 index=net.line.name,
             )
         else:
-            r = net.line.r_ohm_per_km.values * net.line.length_km.values
-            x = net.line.x_ohm_per_km.values * net.line.length_km.values
+            # PyPSA ignores num_parallel on untyped lines, so scale impedance here
+            r = net.line.r_ohm_per_km.values * net.line.length_km.values / parallel
+            x = net.line.x_ohm_per_km.values * net.line.length_km.values / parallel
             # capacitance values from pandapower in nF; transformed here:
             f = net.f_hz
             b = net.line.c_nf_per_km.values * net.line.length_km.values * 1e-9
-            b = b * 2 * math.pi * f
-
-            u = net.bus.vn_kv.loc[net.line.from_bus].values
-            s_nom = u * net.line.max_i_ka.values
+            b = b * 2 * math.pi * f * parallel
 
             d["Line"] = pd.DataFrame(
                 {
                     "r": r,
                     "x": x,
                     "b": b,
-                    "s_nom": s_nom,
+                    "s_nom": line_s_nom,
                     "bus0": net.bus.name.loc[net.line.from_bus].values,
                     "bus1": net.bus.name.loc[net.line.to_bus].values,
                     "length": net.line.length_km.values,
-                    "num_parallel": net.line.parallel.values,
+                    "num_parallel": parallel,
                 },
                 index=net.line.name,
             )
+
+        trafo_s_nom = net.trafo.sn_mva.values * net.trafo.parallel.values
 
         # check, if the trafo is based on a standard-type:
         if net.trafo.std_type.any():
             d["Transformer"] = pd.DataFrame(
                 {
                     "type": net.trafo.std_type.values,
+                    "s_nom": trafo_s_nom,
                     "bus0": net.bus.name.loc[net.trafo.hv_bus].values,
                     "bus1": net.bus.name.loc[net.trafo.lv_bus].values,
                     "tap_position": net.trafo.tap_pos.values,
+                    "num_parallel": net.trafo.parallel.values,
                 },
                 index=net.trafo.name,
             )
         else:
-            s_nom = net.trafo.sn_mva.values
-
             # documented at https://pandapower.readthedocs.io/en/develop/elements/trafo.html?highlight=transformer#impedance-values
             z = net.trafo.vk_percent.values / 100.0 / net.trafo.sn_mva.values
             r = net.trafo.vkr_percent.values / 100.0 / net.trafo.sn_mva.values
@@ -2800,7 +2815,7 @@ class NetworkIOMixin(_NetworkABC):
             d["Transformer"] = pd.DataFrame(
                 {
                     "phase_shift": net.trafo.shift_degree.values,
-                    "s_nom": s_nom,
+                    "s_nom": trafo_s_nom,
                     "bus0": net.bus.name.loc[net.trafo.hv_bus].values,
                     "bus1": net.bus.name.loc[net.trafo.lv_bus].values,
                     "r": r,

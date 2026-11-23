@@ -51,6 +51,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 ### Bug Fixes
 
+- **Behavior change**: [`n.import_from_pandapower_net()`][pypsa.Network.import_from_pandapower_net] now rates lines at `√3 · v_nom · max_i_ka · df · parallel` in both `extra_line_data` modes, the rating pandapower measures `loading_percent` against. Imported line ratings therefore rise by a factor √3, and by `df · parallel` on top, and typed lines no longer arrive with `s_nom=0`. With `extra_line_data=True`, parallel circuits now also scale `r`, `x` and `b`. Transformers are rated `sn_mva · parallel`, so untyped parallel transformers also get the bank impedance, and typed ones get `num_parallel`. See [#2162](https://github.com/PyPSA/PyPSA/issues/2162). (<!-- md:pr XXXX -->)
 - Fix [`n.merge`][pypsa.Network.merge] filling dynamic output data such as the links' `p0` with default values, even when the data was absent from both input networks. Empty time series are now skipped during the merge.
 - Fix modelling-to-generate-alternatives (MGA) objectives that combine weights across component types with different names under linopy v1 semantics.
 - Fix building multi-period models with [`n.optimize(multi_investment_periods=True)`][pypsa.optimization.OptimizationAccessor.__call__] when a link is inactive in some investment periods, which raised a `ValueError` about NaN constants with the stricter arithmetic of upcoming linopy releases. (<!-- md:pr 2180 -->)
