@@ -921,6 +921,39 @@ def annuity(r: float | pd.Series, n: int | pd.Series) -> float | pd.Series:
     return costs_annuity(r, n)
 
 
+def match_carriers(
+    carriers: pd.Series | pd.Index,
+    selection: str | Sequence[str],
+) -> pd.Index:
+    """Return the unique carriers selected by `selection`.
+
+    A string that is one of the carriers selects it, any other string is matched as
+    a regular expression. A list-like selects the carriers it contains.
+
+    Parameters
+    ----------
+    carriers : pd.Series | pd.Index
+        Carriers to select from, e.g. ``n.c.buses.static.carrier``.
+    selection : str | Sequence[str]
+        Carrier name, regular expression or list of carrier names.
+
+    Returns
+    -------
+    pd.Index
+        Selected carriers.
+
+    """
+    carriers = pd.Index(pd.unique(pd.Series(carriers).dropna()))
+    if isinstance(selection, str):
+        if selection in carriers:
+            return pd.Index([selection])
+        return carriers[carriers.str.contains(selection, regex=True)]
+    if is_list_like(selection):
+        return carriers[carriers.isin(selection)]
+    msg = f"Argument `bus_carrier` must be a string or list-like, got {type(selection)}"
+    raise TypeError(msg)
+
+
 def normalize_carrier_nice_names(
     nice_name_series: pd.Series,
     carrier: str | Sequence[str] | None,
