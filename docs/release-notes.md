@@ -51,6 +51,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 ### Bug Fixes
 
+- Fix the carrier growth limits `max_growth` and `max_relative_growth` in multi-period optimisation. Limited carriers on different component types, such as a Generator and a Link, now each get their own constraint row instead of being added to one carrier's row, and with pandas 3.1 each carrier is no longer bounded by the limits of all other limited carriers. (<!-- md:pr XXXX -->)
 - Fix [`n.merge`][pypsa.Network.merge] filling dynamic output data such as the links' `p0` with default values, even when the data was absent from both input networks. Empty time series are now skipped during the merge.
 - Fix modelling-to-generate-alternatives (MGA) objectives that combine weights across component types with different names under linopy v1 semantics.
 - Fix building multi-period models with [`n.optimize(multi_investment_periods=True)`][pypsa.optimization.OptimizationAccessor.__call__] when a link is inactive in some investment periods, which raised a `ValueError` about NaN constants with the stricter arithmetic of upcoming linopy releases. (<!-- md:pr 2180 -->)
