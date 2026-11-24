@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import gc
 import logging
+from contextlib import contextmanager
 from functools import reduce
 from itertools import product
 from typing import TYPE_CHECKING, Any
@@ -27,7 +28,7 @@ from pypsa.optimization.constraints import ENERGY_LIMITS, ENERGY_WEIGHTING
 from pypsa.optimization.mga import OptimizationAbstractMGAMixin
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Iterator, Sequence
 
     from linopy import Model
 
@@ -38,6 +39,28 @@ _STORAGE_LEVELS = (
     ("stores", "e_initial", "e"),
     ("storage_units", "state_of_charge_initial", "state_of_charge"),
 )
+
+
+@contextmanager
+def _restore_static(
+    n: Network, targets: Iterable[tuple[str, list[str], pd.Index | None]]
+) -> Iterator[None]:
+    """Restore `(component, attrs, rows or None)` static targets on exit, also on error."""
+    copies = [
+        (
+            name,
+            n.c[name].static.loc[slice(None) if rows is None else rows, attrs].copy(),
+        )
+        for name, attrs, rows in targets
+    ]
+    try:
+        yield
+    finally:
+        for name, copy in copies:
+            static = n.c[name].static
+            static.loc[copy.index, copy.columns] = copy
+            for attr, dtype in copy.dtypes.items():
+                static[attr] = static[attr].astype(dtype)
 
 
 def discretized_capacity(
@@ -516,36 +539,36 @@ class OptimizationAbstractMixin(OptimizationAbstractMGAMixin):
             n.c.links.static.p_nom_extendable
             & n.c.links.static.carrier.isin(link_carriers)
         )
-        s_nom_orig = n.c.lines.static.s_nom.copy()
-        p_nom_orig = n.c.links.static.p_nom.copy()
-
-        n.c.lines.static.loc[ext_i, "s_nom"] = n.c.lines.static.loc[ext_i, "s_nom_opt"]
-        n.c.lines.static.loc[ext_i, "s_nom_extendable"] = False
-
-        n.c.links.static.loc[ext_links_to_fix_b, "p_nom"] = n.c.links.static.loc[
-            ext_links_to_fix_b, "p_nom_opt"
+        targets = [
+            ("lines", ["s_nom", "s_nom_extendable"], ext_i),
+            (
+                "links",
+                ["p_nom", "p_nom_extendable"],
+                ext_links_to_fix_b[ext_links_to_fix_b].index,
+            ),
         ]
-        n.c.links.static.loc[ext_links_to_fix_b, "p_nom_extendable"] = False
+        with _restore_static(n, targets):
+            n.c.lines.static.loc[ext_i, "s_nom"] = n.c.lines.static.loc[
+                ext_i, "s_nom_opt"
+            ]
+            n.c.lines.static.loc[ext_i, "s_nom_extendable"] = False
 
-        discretize_branch_components(
-            n,
-            line_unit_size,
-            link_unit_size,
-            line_threshold,
-            link_threshold,
-            fractional_last_unit_size,
-        )
+            n.c.links.static.loc[ext_links_to_fix_b, "p_nom"] = n.c.links.static.loc[
+                ext_links_to_fix_b, "p_nom_opt"
+            ]
+            n.c.links.static.loc[ext_links_to_fix_b, "p_nom_extendable"] = False
 
-        n.calculate_dependent_values()
-        status, condition = n.optimize(snapshots, **kwargs)
+            discretize_branch_components(
+                n,
+                line_unit_size,
+                link_unit_size,
+                line_threshold,
+                link_threshold,
+                fractional_last_unit_size,
+            )
 
-        n.c.lines.static.loc[ext_i, "s_nom"] = s_nom_orig.loc[ext_i]
-        n.c.lines.static.loc[ext_i, "s_nom_extendable"] = True
-
-        n.c.links.static.loc[ext_links_to_fix_b, "p_nom"] = p_nom_orig.loc[
-            ext_links_to_fix_b
-        ]
-        n.c.links.static.loc[ext_links_to_fix_b, "p_nom_extendable"] = True
+            n.calculate_dependent_values()
+            status, condition = n.optimize(snapshots, **kwargs)
 
         ## add costs of additional infrastructure to objective value of last iteration
         obj_links = (
@@ -745,7 +768,12 @@ class OptimizationAbstractMixin(OptimizationAbstractMGAMixin):
         ):
             kwargs["io_api"] = "direct"
 
-        try:
+        targets = [
+            *((c, [attr], None) for c, attr, _ in _STORAGE_LEVELS),
+            ("stores", ["cycles_max"], None),
+            *((name, [attr], None) for name, attr, *_ in tracked),
+        ]
+        with _restore_static(n, targets):
             for i, start in enumerate(starting_points):
                 end = min(len(snapshots), start + horizon)
                 sns = snapshots[start:end]
@@ -791,10 +819,6 @@ class OptimizationAbstractMixin(OptimizationAbstractMGAMixin):
                         status,
                         condition,
                     )
-        finally:
-            for name, attr, original, _ in tracked:
-                n.c[name].static[attr] = original
-            stores.static.cycles_max = cycles_max
         return n
 
     def optimize_and_run_non_linear_powerflow(
