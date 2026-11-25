@@ -1684,18 +1684,24 @@ def test_sub_networks_are_labels_of_their_own_dim(store, ac_dc):
     assert sorted(built.c["SubNetwork"].static.index) == ["0", "1", "2", "3"]
 
 
+_PER_UNIT = ("x_pu", "r_pu", "g_pu", "b_pu", "x_pu_eff", "r_pu_eff")
+
+
 def test_a_derived_v_nom_stays_on_the_bus(store, ac_dc):
     """`calculate_dependent_values` copies the bus's `v_nom` onto lines and shunts.
 
-    The record keeps `v_nom` over `bus` alone, and `build` gets the copies
-    back once PyPSA recomputes them.
+    The record keeps `v_nom` over `bus` alone and no per-unit impedance, and
+    `build` gets both back once PyPSA recomputes them.
     """
     n = ac_dc.copy()
     n.add("ShuntImpedance", "shunt", bus="London", b=0.1)
+    n.add("Bus", "London LV", v_nom=110.0, carrier="AC")
+    n.add("Transformer", "trafo", bus0="London", bus1="London LV", x=0.1, s_nom=100)
     n.calculate_dependent_values()
 
     record = export_network(n, store).record
     assert record.schema.attributes["v_nom"].dims == {"bus", "scenario"}
+    assert not set(_PER_UNIT) & set(record.schema.attributes)
 
     built = PyPSA.build(record)
     built.calculate_dependent_values()
@@ -1709,6 +1715,68 @@ def test_a_solved_network_exports(store, solved):
     pd.testing.assert_series_equal(
         built.c.Line.static.v_nom, solved.c.Line.static.v_nom
     )
+
+
+def test_a_results_layer_holds_no_per_unit_impedance(results):
+    """A solve sets the per-unit impedances, yet its results layer restates none of them."""
+    record = results.record
+    assert not set(_PER_UNIT) & set(record.schema.attributes)
+    assert not set(_PER_UNIT) & set(record.attributes)
+
+
+@pytest.fixture
+def per_unit_written(store, ac_dc, monkeypatch):
+    """`ac_dc` with a transformer, exported as a record written before the per-unit impedances were derived."""
+    from pypsa.network.io.datarecord import schema
+
+    n = ac_dc.copy()
+    n.add("Bus", "London LV", v_nom=110.0, carrier="AC")
+    n.add("Transformer", "trafo", bus0="London", bus1="London LV", x=0.1, s_nom=100)
+    n.calculate_dependent_values()
+
+    schema._registry.cache_clear()
+    with monkeypatch.context() as patch:
+        for ctype in ("Line", "ShuntImpedance", "Transformer"):
+            patch.setitem(schema._DERIVED, ctype, frozenset({"v_nom"}))
+        try:
+            record = export_network(n, store).record
+        finally:
+            schema._registry.cache_clear()
+    return n, record
+
+
+def test_a_record_holding_per_unit_impedances_still_opens(per_unit_written):
+    """A record that holds the per-unit impedances verifies and builds, and PyPSA recomputes them."""
+    n, record = per_unit_written
+    assert {"x_pu", "x_pu_eff"} <= set(record.schema.attributes)
+
+    assert not PyPSA.verify(record)
+    built = PyPSA.build(record)
+    built.calculate_dependent_values()
+    for ctype in ("Line", "Transformer"):
+        pd.testing.assert_frame_equal(
+            built.c[ctype].static[list(_PER_UNIT)],
+            n.c[ctype].static[list(_PER_UNIT)],
+            check_dtype=False,
+        )
+    assert "x_pu" not in built.c.Generator.static
+
+
+def test_a_per_unit_impedance_is_recomputed_not_read(store):
+    """A line exported before `calculate_dependent_values` gets its `x_pu_eff` from PyPSA, not a `0`."""
+    import pypsa
+
+    n = pypsa.Network(snapshots=pd.date_range("2030", periods=2, freq="h"))
+    n.add("Bus", "b")
+    n.add("Bus", "c")
+    n.add("Line", "ln", bus0="b", bus1="c", x=0.1, s_nom=10)
+
+    record = export_network(n, store).record
+    assert "x_pu_eff" not in record.schema.attributes
+
+    built = PyPSA.build(record)
+    built.calculate_dependent_values()
+    assert built.c.lines.static.at["ln", "x_pu_eff"] != 0
 
 
 def test_a_stochastic_network_is_not_a_false_collision():
@@ -3389,9 +3457,7 @@ def test_a_solved_network_round_trips_through_a_folder(solved, tmp_path):
     # `Bus.control`, `generator` and `sub_network` are derived, so a build does not set them.
     for column in ("control", "generator", "sub_network"):
         got.c.buses.static[column] = solved.c.buses.static[column]
-    for ctype in ("Line", "ShuntImpedance"):
-        if "v_nom" in solved.c[ctype].static:
-            got.c[ctype].static["v_nom"] = solved.c[ctype].static["v_nom"]
+    got.calculate_dependent_values()
     assert_networks_equal(got, solved)
 
 

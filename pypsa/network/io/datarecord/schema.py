@@ -242,11 +242,18 @@ def _output_attributes(c: pypsa.Components) -> frozenset[str]:
     return frozenset(defaults.index[is_output])
 
 
+_PER_UNIT = frozenset({"x_pu", "r_pu", "g_pu", "b_pu", "x_pu_eff", "r_pu_eff"})
+
+
+"""A branch's per-unit impedances, which `calculate_dependent_values` sets."""
+
+
 _DERIVED: dict[str, frozenset[str]] = {
     "Bus": frozenset({"q", "control", "generator", "sub_network"}),
-    "Line": frozenset({"v_nom"}),
-    "ShuntImpedance": frozenset({"v_nom"}),
+    "Line": frozenset({"v_nom", *_PER_UNIT}),
+    "ShuntImpedance": frozenset({"v_nom", "g_pu", "b_pu"}),
     "SubNetwork": frozenset({"obj"}),
+    "Transformer": _PER_UNIT,
 }
 
 
@@ -258,7 +265,11 @@ topology. `Bus.p` is written, as `p_bus` (`_RESULT_RENAMES`), since PyPSA's
 solve sets it and a bus-level `p` would collide with the connection-level one. `Line.v_nom` and `ShuntImpedance.v_nom`
 are no registry column: `calculate_dependent_values` copies them from the
 bus, and as a custom column over `entity` they would clash with the `v_nom`
-over `bus`.
+over `bus`. `calculate_dependent_values` also recomputes the per-unit
+impedances from `x`, `r`, `g`, `b`, the bus `v_nom` and `tap_ratio`, so a
+written copy goes stale once a child layer changes one of those inputs;
+PyPSA recomputes them before a solve or a power flow, and `build` leaves
+them at the registry default.
 """
 
 
@@ -689,9 +700,10 @@ def _registry() -> tuple[RecordSchema, dict[str, frozenset[str]], frozenset[str]
 def _taken(schema: RecordSchema, ctype: str, names: Iterable[str]) -> list[str]:
     """Those of `names` a `ctype` takes, in order: what no other type claims, or its own.
 
-    A type claims its registry names (`_registry_carries`) and the custom
-    columns its network was exported with (`meta`). A name no type claims - an
-    attribute a record adds - reaches every type.
+    A type claims its registry names (`_registry_carries`), its `_DERIVED`
+    names, which an earlier record may still hold, and the custom columns its
+    network was exported with (`meta`). A name no type claims - an attribute a
+    record adds - reaches every type.
 
     Notes
     -----
@@ -700,7 +712,7 @@ def _taken(schema: RecordSchema, ctype: str, names: Iterable[str]) -> list[str]:
     """
     custom = schema.meta.get(_CUSTOM) or {}
     claimed = {
-        t: carried | frozenset(custom.get(t, ()))
+        t: carried | _DERIVED.get(t, frozenset()) | frozenset(custom.get(t, ()))
         for t, carried in _registry_carries().items()
     }
     everyone = frozenset().union(*claimed.values(), *map(frozenset, custom.values()))
