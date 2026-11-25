@@ -5,6 +5,7 @@
 """Tests of the benchmark harness in `test/benchmarks`."""
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -21,6 +22,13 @@ import relative  # noqa: E402
 import run  # noqa: E402
 from relative import Side, interleave, relative_results  # noqa: E402
 from run import compare  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _quiet_host(monkeypatch):
+    """Keep the load retry out of tests that do not exercise it."""
+    monkeypatch.setattr(os, "getloadavg", lambda: (0.5, 0.5, 0.5))
+
 
 no_wait4 = pytest.mark.skipif(sys.platform == "win32", reason="harness needs os.wait4")
 
@@ -99,6 +107,23 @@ def test_compare_memory_ratio_uses_import_rss_stored_beside_results():
     assert spec["w1_record_one_attribute peak_rss/attribute (net of import)"] == (
         pytest.approx((1.0, 3.0))
     )
+
+
+def test_compare_reports_w5_against_twice_the_w1_wall():
+    data = _spec_results(4.0)
+    data["results"]["w5_record_writeback"] = {"wall_s": 6.0, "peak_rss_mb": 1.0}
+    _, _, spec = compare(data, data)
+    assert spec["w5_record_writeback"] == pytest.approx((1.5, 2.0))
+
+
+def test_compare_memory_ratio_is_net_of_open_only():
+    data = _spec_results(4.0)
+    data["results"]["w0_import_pypsa"] = {"wall_s": 1.0, "peak_rss_mb": 30.0}
+    data["results"]["w1_record_open_only"] = {"wall_s": 1.0, "peak_rss_mb": 35.0}
+    _, _, spec = compare(data, data)
+    key = "w1_record_one_attribute peak_rss/attribute (net of open-only)"
+    assert spec[key] == pytest.approx((0.5, 3.0))
+    assert "w1_record_one_attribute peak_rss/attribute (net of import)" not in spec
 
 
 def test_compare_skips_spec_ratios_for_missing_workloads():
@@ -183,7 +208,7 @@ def test_relative_subtracts_each_sides_own_w0():
     assert res["ratios"][W3] == pytest.approx(1.0)
 
 
-def test_relative_takes_medians():
+def test_relative_takes_min():
     # each round: base W0, head W0, base W3, head W3
     seq = iter([1.0, 1.0, 2.0, 2.0, 1.0, 1.0, 9.0, 3.0, 1.0, 1.0, 3.0, 2.0])
 
@@ -192,8 +217,105 @@ def test_relative_takes_medians():
 
     runs = interleave([W3], {}, BASE_SIDE, HEAD_SIDE, 3, run=run)
     res = relative_results(runs)
-    # base W3 runs 2, 9, 3 -> median 3, head 2, 3, 2 -> median 2, W0 is 1
-    assert res["ratios"][W3] == pytest.approx(1.0 / 2.0)
+    assert res["ratios"][W3] == pytest.approx(1.0)
+
+
+def _loads(monkeypatch, loads):
+    seq = iter(loads)
+    monkeypatch.setattr(os, "getloadavg", lambda: (next(seq), 0.0, 0.0))
+
+
+def _counting_run(calls):
+    def run(name, paths, python, cwd):
+        calls.append(name)
+        return 1.0, 1.0, None
+
+    return run
+
+
+def test_measure_does_not_retry_at_the_load_limit(monkeypatch):
+    _loads(monkeypatch, [8.0])
+    calls: list = []
+    runs, loads = run.measure("x", {}, "py", None, run=_counting_run(calls))
+    assert len(calls) == 1
+    assert len(runs) == 1
+    assert loads == [8.0]
+
+
+def test_measure_retries_once_and_is_clean_when_the_retry_is_quiet(monkeypatch):
+    _loads(monkeypatch, [9.0, 2.0])
+    calls: list = []
+    runs, loads = run.measure("x", {}, "py", None, run=_counting_run(calls))
+    assert len(calls) == 2
+    assert len(runs) == 2
+    assert loads == [9.0, 2.0]
+    assert run.high_load(loads) is False
+
+
+def test_measure_marks_a_retry_that_is_still_loaded(monkeypatch):
+    _loads(monkeypatch, [9.0, 9.5, 9.9])
+    calls: list = []
+    runs, loads = run.measure("x", {}, "py", None, run=_counting_run(calls))
+    assert len(calls) == 2
+    assert loads == [9.0, 9.5]
+    assert run.high_load(loads) is True
+
+
+def test_high_load_is_false_for_a_single_run():
+    assert run.high_load([2.0]) is False
+
+
+class _NoPaths:
+    @staticmethod
+    def to_dict():
+        return {}
+
+
+def _patch_paths(monkeypatch):
+    import fixtures
+
+    monkeypatch.setattr(fixtures, "build_paths", lambda root, snapshots: _NoPaths())
+
+
+def test_run_all_is_round_robin(tmp_path, monkeypatch):
+    _patch_paths(monkeypatch)
+    calls: list = []
+    names = ["w1_record_one_attribute", "w1_nc_one_attribute"]
+    data = run.run_all(names, 1, 2, tmp_path, run=_counting_run(calls))
+    assert calls == ["w0_import_pypsa", *names] * 2
+    entry = data["results"]["w1_record_one_attribute"]
+    assert entry["load_avg"] == [0.5, 0.5]
+    assert "high_load" not in entry
+
+
+def test_run_all_marks_high_load(tmp_path, monkeypatch):
+    _patch_paths(monkeypatch)
+    monkeypatch.setattr(os, "getloadavg", lambda: (9.0, 0.0, 0.0))
+    data = run.run_all(["w1_record_eight"], 1, 1, tmp_path, run=_counting_run([]))
+    assert data["results"]["w1_record_eight"]["high_load"] is True
+
+
+def test_table_shows_load_and_marks_high_load():
+    data = {
+        "snapshots": 1,
+        "results": {
+            "a": {"wall_s": 1.0, "peak_rss_mb": 1.0, "load_avg": [1.0, 3.5]},
+            "b": {
+                "wall_s": 1.0,
+                "peak_rss_mb": 1.0,
+                "load_avg": [9.0, 9.5],
+                "high_load": True,
+            },
+        },
+    }
+    lines = run.table(data).splitlines()
+    assert "load" in lines[2]
+    row_a = next(x for x in lines if x.startswith("| a "))
+    row_b = next(x for x in lines if x.startswith("| b "))
+    assert "3.5" in row_a
+    assert "*" not in row_a
+    assert "*" in row_b
+    assert "high load" in lines[-1]
 
 
 def test_relative_base_failure_on_w1_is_not_applicable():
@@ -353,3 +475,30 @@ def test_smoke_every_workload(tmp_path):
     for res in results.values():
         assert res["wall_s"] > 0
         assert res["peak_rss_mb"] > 0
+
+
+@pytest.mark.slow
+@no_wait4
+def test_breakdown_reports_every_step(tmp_path):
+    pytest.importorskip("datarecord")
+    out = tmp_path / "breakdown.json"
+    proc = subprocess.run(
+        [sys.executable, str(BENCH / "breakdown.py"), "--snapshots", "24"]
+        + ["--top", "5", "--root", str(tmp_path / "root"), "--out", str(out)],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    steps = json.loads(out.read_text())["steps"]
+    assert set(steps) == {"open", "static_read", "dynamic_read", "export", "writeback"}
+    for res in steps.values():
+        assert res["wall_s"] > 0
+        assert 0 < res["share"] <= 1
+        assert res["load_avg"] >= 0
+        assert res["top_self"]
+        assert res["top_cumulative"]
+        assert {"function", "ncalls", "tottime", "cumtime", "self_share"} <= set(
+            res["top_self"][0]
+        )
+    assert "| step |" in proc.stdout

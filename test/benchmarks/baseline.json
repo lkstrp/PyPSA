@@ -3,7 +3,7 @@
     "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
     "python": "3.14.7",
     "cpu_count": 8,
-    "pypsa": "1.4.0.post1.dev252+gb32ffe81.d20261124",
+    "pypsa": "1.4.0.post1.dev264+g897428af.d20261124",
     "datarecord": "0.1.0a2",
     "duckdb": "2.0.0"
   },
@@ -14,32 +14,82 @@
       "peak_rss_mb": 315.53125
     },
     "w1_record_one_attribute": {
-      "wall_s": 3.357503459788859,
-      "peak_rss_mb": 663.65625,
-      "attribute_mb": 14.515769958496094
+      "wall_s": 2.4106592079624534,
+      "peak_rss_mb": 657.3125,
+      "attribute_mb": 14.515769958496094,
+      "load_avg": [
+        19.0,
+        28.29833984375,
+        21.69775390625,
+        20.2060546875,
+        17.54541015625,
+        16.78076171875
+      ],
+      "high_load": true
     },
     "w1_nc_one_attribute": {
-      "wall_s": 3.4484787080436945,
-      "peak_rss_mb": 1737.359375,
-      "attribute_mb": 14.452743530273438
+      "wall_s": 4.245018374174833,
+      "peak_rss_mb": 1218.453125,
+      "attribute_mb": 14.452743530273438,
+      "load_avg": [
+        29.0751953125,
+        27.84619140625,
+        19.388671875,
+        18.56005859375,
+        15.904296875,
+        15.99169921875
+      ],
+      "high_load": true
     },
     "w1_record_eight": {
-      "wall_s": 17.21936949994415,
-      "peak_rss_mb": 777.453125,
-      "attribute_mb": 116.12615966796875
+      "wall_s": 15.844022332690656,
+      "peak_rss_mb": 769.546875,
+      "attribute_mb": 116.12615966796875,
+      "load_avg": [
+        16.64501953125,
+        22.95263671875,
+        30.01025390625,
+        27.99609375,
+        32.97265625,
+        40.68505859375
+      ],
+      "high_load": true
     },
     "w1_nc_eight": {
-      "wall_s": 39.58071408327669,
-      "peak_rss_mb": 2476.40625,
-      "attribute_mb": 115.6219482421875
+      "wall_s": 37.26528170797974,
+      "peak_rss_mb": 2081.765625,
+      "attribute_mb": 115.6219482421875,
+      "load_avg": [
+        34.27978515625,
+        31.14013671875,
+        28.5751953125,
+        26.64306640625,
+        41.63232421875,
+        35.37890625
+      ],
+      "high_load": true
     },
     "w2_record_open_touch_export_nc": {
-      "wall_s": 31.458472459577024,
-      "peak_rss_mb": 2304.671875
+      "wall_s": 36.94957495946437,
+      "peak_rss_mb": 1531.28125,
+      "load_avg": [
+        22.55029296875,
+        35.50341796875,
+        47.42529296875,
+        42.8291015625
+      ],
+      "high_load": true
     },
     "w2_nc_import_export": {
-      "wall_s": 19.048330582678318,
-      "peak_rss_mb": 2307.765625
+      "wall_s": 21.99953420739621,
+      "peak_rss_mb": 1508.765625,
+      "load_avg": [
+        36.9365234375,
+        40.2626953125,
+        36.98486328125,
+        42.43115234375
+      ],
+      "high_load": true
     },
     "w3_create_model_scigrid": {
       "wall_s": 0.6519877910614014,
@@ -48,7 +98,33 @@
     "w4_add_10k": {
       "wall_s": 37.88969441689551,
       "peak_rss_mb": 309.40625
+    },
+    "w1_record_open_only": {
+      "wall_s": 1.5397131675854325,
+      "peak_rss_mb": 475.421875,
+      "load_avg": [
+        27.5908203125,
+        26.66259765625,
+        18.27490234375,
+        19.13330078125,
+        15.23046875,
+        14.6513671875
+      ],
+      "high_load": true
+    },
+    "w5_record_writeback": {
+      "wall_s": 4.129114458337426,
+      "peak_rss_mb": 604.390625,
+      "load_avg": [
+        26.208984375,
+        25.138671875,
+        18.46533203125,
+        18.02734375,
+        15.23974609375,
+        15.70068359375
+      ],
+      "high_load": true
     }
   },
-  "partial_refresh": "w1 and w2 re-measured 2026-11-24 at 2190 snapshots on datarecord 0.1.0a2; w0, w3 and w4 are from 2026-11-05"
+  "partial_refresh": "w1_*, w2_*, w5_record_writeback and w1_record_open_only re-measured 2026-11-25 at 2190 snapshots on datarecord 0.1.0a2 (W2 pair with --repeat 2, the rest --repeat 3), min of repeats, start load 14 to 49 (every row high_load); w0, w3 and w4 are from 2026-11-05 and do not depend on the snapshot count"
 }

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import statistics
 import subprocess
 import sys
 import tempfile
@@ -22,7 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from run import BASE as W0
-from run import GATED_PREFIXES, TOLERANCE, _run_child
+from run import GATED_PREFIXES, TOLERANCE, _run_child, measure, summarize, tag
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -32,7 +31,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # the worktree's own `.venv`.
 _UV_ENV_DROP = ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT")
 
-Run = tuple[float, float, float | None]
+Run = tuple[float, float, float | None, float, bool]
 
 
 @dataclass(frozen=True)
@@ -116,7 +115,7 @@ def interleave(
     base: Side,
     head: Side,
     repeat: int,
-    run: Callable[..., Run] = _run_child,
+    run: Callable[..., tuple[float, float, float | None]] = _run_child,
 ) -> dict[str, dict[str, list[Run | None]]]:
     """Run every workload `repeat` rounds, base then head within each round.
 
@@ -131,12 +130,13 @@ def interleave(
         for name in order:
             for side in (base, head):
                 try:
-                    result = run(name, paths, python=side.python, cwd=side.cwd)
+                    measured = measure(name, paths, side.python, side.cwd, run=run)
                 except RuntimeError:
                     if name == W0 or name.startswith(GATED_PREFIXES):
                         raise
-                    result = None
-                runs[side.label][name].append(result)
+                    runs[side.label][name].append(None)
+                else:
+                    runs[side.label][name].extend(tag(*measured))
     return runs
 
 
@@ -146,18 +146,11 @@ def _side_results(runs: dict[str, list[Run | None]]) -> dict[str, dict]:
         for name, rs in runs.items()
         if None not in rs
     }
-    w0 = statistics.median(r[0] for r in complete[W0])
-    results: dict[str, dict] = {}
-    for name, rs in complete.items():
-        wall = statistics.median(r[0] for r in rs)
-        entry: dict = {
-            "wall_s": wall if name == W0 else max(wall - w0, 1e-3),
-            "peak_rss_mb": max(r[1] for r in rs),
-        }
-        if rs[0][2] is not None:
-            entry["attribute_mb"] = rs[0][2]
-        results[name] = entry
-    return results
+    w0 = summarize(complete[W0])["wall_s"]
+    return {
+        name: summarize(rs, net=0.0 if name == W0 else w0)
+        for name, rs in complete.items()
+    }
 
 
 def relative_results(
@@ -165,7 +158,7 @@ def relative_results(
 ) -> dict:
     """Reduce interleaved runs to per-side results and head-over-base ratios.
 
-    `ratios` maps each workload to the median of head over the median of
+    `ratios` maps each workload to the min of head over the min of
     base, both net of their own side's W0, or `None` when either side failed.
     `failed` lists the gated workloads whose ratio exceeds `tolerance`.
     """

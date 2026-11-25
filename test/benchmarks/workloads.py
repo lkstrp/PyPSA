@@ -31,6 +31,13 @@ def _attribute_sum(path: str) -> int:
     return int(df.memory_usage(deep=True).sum())
 
 
+def w1_record_open_only(paths: Paths) -> None:
+    """Open the record as a network and read nothing."""
+    import pypsa  # noqa: PLC0415
+
+    pypsa.Network(paths.record)
+
+
 def w1_record_one_attribute(paths: Paths) -> int:
     """Open the record as a network, read `p_max_pu` and sum it."""
     return _attribute_sum(paths.record)
@@ -49,6 +56,22 @@ def w1_record_eight(paths: Paths) -> int:
 def w1_nc_eight(paths: Paths) -> int:
     """`w1_nc_one_attribute` over eight files."""
     return sum(_attribute_sum(p) for p in paths.nc_copies)
+
+
+def w5_record_writeback(paths: Paths) -> None:
+    """Open the record, change one `p_max_pu` value, call `to_datarecord(base=n.record)`.
+
+    Times the call including its `check()`, not the comparison against the base
+    or a layer write.
+    """
+    import pypsa  # noqa: PLC0415
+
+    n = pypsa.Network(paths.record)
+    c = n.c.generators
+    df = c.dynamic["p_max_pu"]
+    df.iloc[0, 0] += 0.01
+    c.dynamic["p_max_pu"] = df
+    n.to_datarecord(base=n.record)
 
 
 def w2_record_open_touch_export_nc(paths: Paths) -> None:
@@ -97,8 +120,10 @@ def w4_add_10k(paths: Paths) -> None:
 
 _FUNCTIONS: list[tuple[Callable, str]] = [
     (w0_import_pypsa, "none"),
+    (w1_record_open_only, "carbon"),
     (w1_record_one_attribute, "carbon"),
     (w1_nc_one_attribute, "carbon"),
+    (w5_record_writeback, "carbon"),
     (w1_record_eight, "carbon"),
     (w1_nc_eight, "carbon"),
     (w2_record_open_touch_export_nc, "carbon"),

@@ -10,12 +10,15 @@ import argparse
 import json
 import os
 import platform
-import statistics
 import subprocess
 import sys
 import time
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 GATED_PREFIXES = ("w3_", "w4_")
 TOLERANCE = 1.05
@@ -25,8 +28,12 @@ SPEC_PAIRS = (
     ("w1_record_one_attribute", "w1_nc_one_attribute", 0.2),
     ("w1_record_eight", "w1_nc_eight", 0.2),
     ("w2_record_open_touch_export_nc", "w2_nc_import_export", 1.5),
+    ("w5_record_writeback", "w1_record_one_attribute", 2.0),
 )
+# A run that starts above this 1-minute load average is repeated once.
+LOAD_LIMIT = 8.0
 MEMORY_BOUND = 3.0
+OPEN_ONLY = "w1_record_open_only"
 
 
 def _version(name: str) -> str | None:
@@ -60,9 +67,10 @@ def compare(
     failed : list[str]
         Gated workloads (W3, W4) whose ratio exceeds `tolerance`.
     spec : dict[str, tuple[float, float]]
-        Informational W1 and W2 rows of `current` alone: the measured ratio
-        and its spec bound. Never gates. The memory ratio subtracts the peak
-        RSS of the `pypsa` import (`import_peak_rss_mb`, else W0's row).
+        Informational W1, W2 and W5 rows of `current` alone: the measured
+        ratio and its spec bound. Never gates. The RSS row nets out the peak
+        RSS of `w1_record_open_only` when present, else that of the `pypsa`
+        import (`import_peak_rss_mb`, else W0's row).
 
     """
     ratios = {
@@ -79,22 +87,34 @@ def compare(
 
 
 def spec_rows(current: dict) -> dict[str, tuple[float, float]]:
-    """Return the informational W1 and W2 rows of one result dict, never gated."""
+    """Return the informational W1, W2 and W5 rows of one result dict, never gated.
+
+    The W5 row is its wall over the W1 one-attribute wall. The RSS row nets
+    out `w1_record_open_only` when present, else the `pypsa` import.
+    """
     results = current["results"]
     spec: dict[str, tuple[float, float]] = {}
     for record, nc, bound in SPEC_PAIRS:
         if record in results and nc in results:
             spec[record] = (results[record]["wall_s"] / results[nc]["wall_s"], bound)
     one = results.get("w1_record_one_attribute", {})
-    base_rss = current.get(
-        "import_peak_rss_mb", results.get(BASE, {}).get("peak_rss_mb")
-    )
+    open_only = results.get(OPEN_ONLY, {}).get("peak_rss_mb")
+    if open_only is not None:
+        base_rss, net = open_only, "open-only"
+    else:
+        base_rss = current.get(
+            "import_peak_rss_mb", results.get(BASE, {}).get("peak_rss_mb")
+        )
+        net = "import"
     if "attribute_mb" in one and base_rss is not None:
-        spec["w1_record_one_attribute peak_rss/attribute (net of import)"] = (
+        spec[f"w1_record_one_attribute peak_rss/attribute (net of {net})"] = (
             (one["peak_rss_mb"] - base_rss) / one["attribute_mb"],
             MEMORY_BOUND,
         )
     return spec
+
+
+Run = tuple[float, float, float | None]
 
 
 def _run_child(
@@ -123,27 +143,85 @@ def _run_child(
     return wall, peak, attribute
 
 
-def run_all(names: list[str], snapshots: int, repeat: int, root: Path) -> dict:
-    """Run the workloads and return the result dict."""
+def high_load(loads: list[float]) -> bool:
+    """Return whether a retried measurement still started above `LOAD_LIMIT`."""
+    return len(loads) > 1 and loads[-1] > LOAD_LIMIT
+
+
+def measure(
+    name: str,
+    paths: dict,
+    python: str,
+    cwd: Path | None,
+    run: Callable[..., Run] = _run_child,
+) -> tuple[list[Run], list[float]]:
+    """Run one workload, once more when it started above `LOAD_LIMIT`.
+
+    Returns the runs and the 1-minute load average read before each started.
+    """
+    runs: list[Run] = []
+    loads: list[float] = []
+    for _ in range(2):
+        loads.append(os.getloadavg()[0])
+        runs.append(run(name, paths, python=python, cwd=cwd))
+        if loads[-1] <= LOAD_LIMIT:
+            break
+    return runs, loads
+
+
+def summarize(runs: list[tuple], net: float = 0.0) -> dict:
+    """Reduce the runs of one workload to a result entry.
+
+    Each run is `(wall, peak_rss, attribute_mb, start_load, high_load)`. Wall
+    is the min, less `net` unless that is zero (W0 itself).
+    """
+    wall = min(r[0] for r in runs)
+    entry: dict = {
+        "wall_s": max(wall - net, 1e-3) if net else wall,
+        "peak_rss_mb": max(r[1] for r in runs),
+    }
+    if runs[0][2] is not None:
+        entry["attribute_mb"] = runs[0][2]
+    entry["load_avg"] = [r[3] for r in runs]
+    if any(r[4] for r in runs):
+        entry["high_load"] = True
+    return entry
+
+
+def tag(runs: list[Run], loads: list[float]) -> list[tuple]:
+    """Attach the start load and the high-load mark to the runs of one `measure`."""
+    flag = high_load(loads)
+    return [(*r, load, flag) for r, load in zip(runs, loads, strict=True)]
+
+
+def run_all(
+    names: list[str],
+    snapshots: int,
+    repeat: int,
+    root: Path,
+    run: Callable[..., Run] = _run_child,
+) -> dict:
+    """Run the workloads in `repeat` rounds and return the result dict.
+
+    A round runs W0, then every workload once, so related workloads sit next
+    to each other in time.
+    """
     from fixtures import build_paths  # noqa: PLC0415
 
     paths = build_paths(root, snapshots).to_dict()
-    results: dict[str, dict] = {}
-    for name in [BASE, *[n for n in names if n != BASE]]:
-        runs = [_run_child(name, paths) for _ in range(repeat)]
-        entry: dict = {
-            "wall_s": statistics.median(r[0] for r in runs),
-            "peak_rss_mb": max(r[1] for r in runs),
-        }
-        if runs[0][2] is not None:
-            entry["attribute_mb"] = runs[0][2]
-        results[name] = entry
+    order = [BASE, *[n for n in names if n != BASE]]
+    runs: dict[str, list[tuple]] = {name: [] for name in order}
+    for _ in range(repeat):
+        for name in order:
+            measured = measure(name, paths, sys.executable, None, run=run)
+            runs[name].extend(tag(*measured))
+    results: dict[str, dict] = {BASE: summarize(runs[BASE])}
+    w0 = results[BASE]["wall_s"]
+    for name in order[1:]:
+        results[name] = summarize(runs[name], net=w0)
+    for name, entry in results.items():
         print(f"{name}: {entry}", file=sys.stderr, flush=True)
     import_rss = results[BASE]["peak_rss_mb"]
-    base = results[BASE]["wall_s"]
-    for name, entry in results.items():
-        if name != BASE:
-            entry["wall_s"] = max(entry["wall_s"] - base, 1e-3)
     if BASE not in names:
         del results[BASE]
     return {
@@ -159,14 +237,23 @@ def table(data: dict) -> str:
     lines = [
         f"Snapshots: {data['snapshots']}. Wall time minus `import pypsa` where the workload imports it.",
         "",
-        "| workload | wall_s | peak_rss_mb | attribute_mb |",
-        "|---|---:|---:|---:|",
+        "| workload | wall_s | peak_rss_mb | attribute_mb | load |",
+        "|---|---:|---:|---:|---:|",
     ]
+    marked = False
     for name, res in data["results"].items():
         attr = f"{res['attribute_mb']:.1f}" if "attribute_mb" in res else ""
+        load = f"{max(res['load_avg']):.1f}" if res.get("load_avg") else ""
+        mark = "*" if res.get("high_load") else ""
+        marked = marked or bool(mark)
         lines.append(
-            f"| {name} | {res['wall_s']:.2f} | {res['peak_rss_mb']:.0f} | {attr} |"
+            f"| {name} | {res['wall_s']:.2f}{mark} | {res['peak_rss_mb']:.0f} | {attr} | {load} |"
         )
+    if marked:
+        lines += [
+            "",
+            f"\\* high load: a repeat still started above load {LOAD_LIMIT:g} after one retry.",
+        ]
     return "\n".join(lines)
 
 
