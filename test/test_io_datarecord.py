@@ -2928,6 +2928,51 @@ def test_snapshot_weightings_survive_a_round_trip(store, ac_dc):
     )
 
 
+def _two_scenarios() -> pypsa.Network:
+    """A bus, a load and a generator over two equally weighted scenarios."""
+    n = pypsa.Network(snapshots=pd.date_range("2030", periods=2, freq="h"))
+    n.add("Bus", "b")
+    n.add("Load", "l", bus="b", p_set=5)
+    n.add("Generator", "g", bus="b", p_nom=10, marginal_cost=1)
+    n.set_scenarios({"low": 0.5, "high": 0.5})
+    return n
+
+
+def _risk_averse() -> pypsa.Network:
+    n = _two_scenarios()
+    n.set_risk_preference(alpha=0.9, omega=0.5)
+    return n
+
+
+def test_risk_preference_survives_a_round_trip(store):
+    built = PyPSA.build(export_network(_risk_averse(), store).record)
+    assert built.risk_preference == {"alpha": 0.9, "omega": 0.5}
+
+
+def test_risk_preference_survives_a_round_trip_through_a_folder(tmp_path):
+    got = _round_trip(_risk_averse(), tmp_path)
+    assert got.risk_preference == {"alpha": 0.9, "omega": 0.5}
+
+
+@pytest.mark.parametrize(
+    "stochastic", [True, False], ids=["stochastic", "deterministic"]
+)
+def test_risk_preference_stays_none_without_one(store, ac_dc, stochastic):
+    n = _two_scenarios() if stochastic else ac_dc
+    revision = export_network(n, store)
+    assert "risk_preference" not in revision.record.schema.meta
+    assert PyPSA.build(revision.record).risk_preference is None
+
+
+def test_risk_preference_survives_a_commit_of_an_opened_network(store):
+    revision = export_network(_risk_averse(), store)
+    opened = pypsa.Network(revision.store.uri, revision=str(revision.id))
+    opened.add("Generator", "extra", bus="b", p_nom=1)
+    opened.commit()
+    reopened = pypsa.Network(revision.store.uri, revision=str(opened._revision.id))
+    assert reopened.risk_preference == {"alpha": 0.9, "omega": 0.5}
+
+
 @pytest.fixture(scope="module", params=["repeated", "distinct"])
 def layout(request) -> str:
     """How `multiperiod` lays its timesteps over the periods."""

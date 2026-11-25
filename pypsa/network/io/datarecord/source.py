@@ -89,6 +89,22 @@ logger = logging.getLogger(__name__)
 _MELT_BATCH = 122_880
 
 
+def _risk_preference(n: pypsa.Network) -> dict[str, dict[str, float]]:
+    """`n`'s risk preference as a schema meta entry, empty when it has none.
+
+    Cast to `float`, so a numpy scalar passed to `set_risk_preference` keeps the meta JSON-clean.
+    """
+    preference = n.risk_preference
+    if preference is None:
+        return {}
+    return {
+        "risk_preference": {
+            "alpha": float(preference["alpha"]),
+            "omega": float(preference["omega"]),
+        }
+    }
+
+
 def _own_static(c: pypsa.Components) -> pd.DataFrame:
     """`c.static` less the rows named as in PyPSA's standard type library, edited or not, its custom columns of dtype `object` cast to the dtype their values give (`_column_dtype`), an all-NULL one left NULL for the declared dtype to take."""
     library = c.standard_types
@@ -692,6 +708,7 @@ class _NetworkSource:
         names of its custom static columns (`_Custom.of`), each a property or an
         attribute of its type's dim, and, where the network has investment periods,
         `snapshot` as the multi-dim `(period, timestep)`.
+        Meta also carries the network's risk preference, when it has one.
 
         Notes
         -----
@@ -738,6 +755,7 @@ class _NetworkSource:
                     },
                     "meta": dict(self.n.meta),
                     "crs": self.n.crs.to_string(),
+                    **_risk_preference(self.n),
                 },
             }
         )

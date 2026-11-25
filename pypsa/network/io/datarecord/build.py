@@ -244,7 +244,7 @@ def _apply_axes(
     shape: NetworkShape,
     con: DuckDBPyConnection,
 ) -> None:
-    """Establish the record's axes on `n`: attributes, meta, crs, snapshots, periods, scenarios.
+    """Establish the record's axes on `n`: attributes, meta, crs, snapshots, periods, scenarios, risk preference.
 
     Meant for a network whose components are still in memory, so that
     `set_snapshots` and `set_scenarios` reshape only empty frames.
@@ -270,6 +270,9 @@ def _apply_axes(
         # level, so later imports union against a correctly named 2-level index
         # instead of the single-level one a fresh component carries.
         n.set_scenarios(_scenario_weights(record, scenarios))
+        risk_preference = schema.meta.get("risk_preference")
+        if risk_preference is not None:
+            n.set_risk_preference(**risk_preference)
 
 
 def _required_attributes(ctype: str) -> frozenset[str]:
