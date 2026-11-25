@@ -1717,6 +1717,32 @@ class StatisticsAccessor(AbstractStatisticsAccessor):
                     w = weights if attr == "status" else weights_one
                     term = self._aggregate_timeseries(opex, w, agg=groupby_time)
                     result.append(term)
+                    if cost_type != "start_up_cost":
+                        continue
+                    for tier in ("hot", "warm"):
+                        tier_cost = f"start_up_cost_{tier}"
+                        tier_attr = f"start_up_{tier}"
+                        if (
+                            tier_cost not in n.c[c].static
+                            or tier_attr not in n.c[c].dynamic
+                            or n.c[c].dynamic[tier_attr].empty
+                        ):
+                            continue
+                        tier_names = cost.columns.intersection(
+                            n.c[c].dynamic[tier_attr].columns
+                        )
+                        tier_dense = n.get_switchable_as_dense(
+                            c, tier_cost, inds=tier_names
+                        )
+                        discount = (
+                            tier_dense.fillna(cost[tier_names]) - cost[tier_names]
+                        )
+                        var_tier = n.c[c].dynamic[tier_attr].loc[:, tier_names]
+                        result.append(
+                            self._aggregate_timeseries(
+                                var_tier * discount, weights_one, agg=groupby_time
+                            )
+                        )
             if not result:
                 return pd.Series()
             result = pd.concat(result)

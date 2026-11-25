@@ -165,6 +165,62 @@ These constraints are defined in the function `define_operational_constraints_fo
         | $T_{\textrm{up_time_before}}$ | `n.processes.up_time_before` | Parameter |
         | $T_{\textrm{down_time_before}}$ | `n.processes.down_time_before` | Parameter |
 
+## Hot, warm and cold starts
+
+A unit that restarts shortly after a shut-down is usually cheaper to start than one that has been off for days. `start_up_cost` is the cost of a cold start. Two optional tiers, hot and warm, replace it for starts after a short downtime:
+
+| Attribute | Meaning |
+|-----------|---------|
+| `start_up_cost_hot`, `start_up_cost_warm` | Cost of a hot or warm start. Static or time series, default NaN. |
+| `start_up_time_hot`, `start_up_time_warm` | Maximum downtime of a hot or warm start in hours. Static floats, default NaN. |
+
+The attributes exist for [Generator](../components/generators.md), [Link](../components/links.md) and [Process](../components/processes.md) components with `committable=True`. With all four at NaN the model is unchanged. A tier is used if its time is positive and finite and its cost is set. A snapshot where the tier cost is NaN falls back to `start_up_cost`. Each tier can be used alone, e.g. only the hot tier for a two-tier plant. The times are always in hours, independent of [`durations_in_hours`](#durations-in-hours).
+
+The downtime of a start runs from the start of the shut-down snapshot to the start of the start-up snapshot, counted in hours of the snapshot weightings (the `generators` weightings for all components, as for the other durations). The windows are inclusive: a downtime equal to `start_up_time_hot` is a hot start. A downtime above the hot time and up to `start_up_time_warm` is a warm start, and a longer one is a cold start.
+
+For each tiered unit, two continuous variables $su^{\textrm{hot}}_{*,t}, su^{\textrm{warm}}_{*,t} \geq 0$ are added, following Morales-España et al. (2013)[^3]. They count the start-ups at $t$ that fall into the tier. Each is bounded by the shut-downs in its downtime window, and together they are bounded by the start-up variable $su_{*,t}$:
+
+$$su^{\textrm{hot}}_{*,t} \leq \sum_{t' \in W^{\textrm{hot}}_t} sd_{*,t'}$$
+
+$$su^{\textrm{warm}}_{*,t} \leq \sum_{t' \in W^{\textrm{warm}}_t} sd_{*,t'}$$
+
+$$su^{\textrm{hot}}_{*,t} + su^{\textrm{warm}}_{*,t} \leq su_{*,t}$$
+
+$W^{\textrm{hot}}_t$ are the snapshots $t' < t$ with a downtime of at most $T_{\textrm{hot}}$ hours until $t$. $W^{\textrm{warm}}_t$ are those with a downtime above $T_{\textrm{hot}}$ and at most $T_{\textrm{warm}}$ hours. The shut-down in the same snapshot as the start-up is not part of the windows. A unit with only a hot tier gets only the hot variable and row.
+
+The tier variables enter the objective as discounts off the cold cost, weighted like the start-up cost, i.e. by the investment period weighting only:
+
+$$\sum_t \left[ su_{*,t}\, suc_{*,t} + su^{\textrm{hot}}_{*,t} \left(suc^{\textrm{hot}}_{*,t} - suc_{*,t}\right) + su^{\textrm{warm}}_{*,t} \left(suc^{\textrm{warm}}_{*,t} - suc_{*,t}\right) \right]$$
+
+As the discount is negative for cheaper tiers, the model fills the tier variables up to their bounds. The bounds only hold if the shut-downs are real. For tiered units, three rows therefore tie the transition variables to the status, which stops the model from using fake start-up and shut-down pairs for discounts:
+
+$$sd_{*,t} - su_{*,t} = u_{*,t-1} - u_{*,t}$$
+
+$$sd_{*,t} \leq u_{*,t-1}$$
+
+$$su_{*,t} \leq u_{*,t}$$
+
+| Constraint | Name |
+|------------|------|
+| Tier variable bounded by shut-downs in the window | `Generator-com-start-up-hot`, `Generator-com-start-up-warm` |
+| Tier variables bounded by the start-up | `Generator-com-start-up-tiers` |
+| Balance of start-up and shut-down | `Generator-com-start-up-tiers-shut-down` |
+| Shut-down bounded by the previous status | `Generator-com-start-up-tiers-shut-down-bound` |
+| Start-up bounded by the status | `Generator-com-start-up-tiers-start-up-bound` |
+
+The names for `Link` and `Process` follow the same pattern.
+
+Windows stop at the start of an investment period: a shut-down in an earlier period does not make a start in the next period a hot or warm start, so periods stay independent. In a rolling horizon ([`n.optimize.optimize_with_rolling_horizon()`][pypsa.optimization.OptimizationAccessor.optimize_with_rolling_horizon]), the status history before a window is extended to cover the warm window, and the shut-downs before the window are the negative differences of these statuses, as for the minimum down time above. A start at the first snapshot of a window is tiered by the shut-down in the previous window.
+
+The tier variables are returned as `start_up_hot` and `start_up_warm` (e.g. `n.generators_t.start_up_hot`), for units that use the tier. They are included in [`n.statistics.opex()`][pypsa.statistics.StatisticsAccessor.opex], which keeps matching the objective.
+
+!!! warning "Modular units and linearized unit commitment"
+
+    - Modular units (`p_nom_mod > 0`) are excluded from the tiers and pay `start_up_cost` for every start. The consistency check warns about modular units that set tiers.
+    - With [linearized unit commitment](#linearization), tiered units are left out of the tightening constraints, because their start-up cost depends on the downtime and differs from the shut-down cost. A warning is logged. The relaxation is looser, so the objective is a lower bound.
+
+The [consistency check][pypsa.Network.consistency_check] warns if a tier cost exceeds `start_up_cost` in any snapshot, if `start_up_time_hot` exceeds `start_up_time_warm`, if a tier has a cost but no positive time or a time but no cost (the tier is ignored), and if a modular unit sets tiers. With `strict=["start_up_tiers"]` these raise an error.
+
 ## Ramping
 
 Ramp rate limits can be defined for increasing output $ru_{n,s,t}$ and decreasing output $rd_{n,s,t}$. By default these are null and ignored. They must be provided per unit of the nominal capacity. The ramp limits at start-up $rusu_{n,s,t}$ and shut-down $rdsd_{n,s,t}$ are static or time-varying, like $ru$ and $rd$, and the same holds for links and processes. The factor $w_t^g$ is the snapshot weighting of the `generators` column if [`durations_in_hours`](#durations-in-hours) is enabled, and one otherwise.
@@ -381,3 +437,5 @@ These constraints are defined in the function `define_operational_constraints_fo
 [^1]: J.A. Taylor (2015), [Convex Optimization of Power Systems](http://www.cambridge.org/de/academic/subjects/engineering/control-systems-and-optimization/convex-optimization-power-systems), Cambridge University Press, Chapter 4.3.
 
 [^2]: B. Hua, R. Baldick and J. Wang (2018), [Representing Operational Flexibility in Generation Expansion Planning Through Convex Relaxation of Unit Commitment](https://doi.org/10.1109/TPWRS.2017.2735026), IEEE Transactions on Power Systems, 33, 2, 2272-2281, doi:10.1109/TPWRS.2017.2735026, equations (21-24).
+
+[^3]: M. Morales-España, J.M. Latorre and A. Ramos (2013), Tight and Compact MILP Formulation for the Thermal Unit Commitment Problem, IEEE Transactions on Power Systems, 28, 4, 4897-4908, doi:10.1109/TPWRS.2013.2251373.
