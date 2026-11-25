@@ -31,6 +31,13 @@ from pypsa.components._types.mixin.multiports import _Multiport
 from pypsa.components.common import as_components, invariant
 from pypsa.constants import PYPSA_DATA_DIR
 from pypsa.descriptors import nominal_attrs
+from pypsa.optimization.durations import (
+    duration_lookback,
+    flagged_names,
+    history_length,
+    in_hours,
+    ramp_weighting,
+)
 from pypsa.optimization.flow_based import flow_based_balance_terms
 from pypsa.optimization.piecewise import PiecewiseOptions, define_piecewise
 from pypsa.optimization.scaling import KVL, check_sub_networks
@@ -407,14 +414,31 @@ def define_operational_constraints_for_committables(
     min_up_time_set = c.da.min_up_time.sel(name=com_i)
     min_down_time_set = c.da.min_down_time.sel(name=com_i)
 
-    ramp_up_limit = nominal * c.da.ramp_limit_up.sel(name=com_i, snapshot=sns).fillna(1)
-    ramp_down_limit = nominal * c.da.ramp_limit_down.sel(
-        name=com_i, snapshot=sns
-    ).fillna(1)
-    ramp_start_up = nominal * c.da.ramp_limit_start_up.sel(name=com_i).fillna(1)
-    ramp_shut_down = nominal * c.da.ramp_limit_shut_down.sel(name=com_i).fillna(1)
-    max_time = max(int(min_up_time_set.max()), int(min_down_time_set.max()), 1)
-    history = _status_history(n, c, com_i, sns, max_time + 1)
+    weighting = ramp_weighting(n, sns)
+    ramp_up_limit = (
+        nominal * c.da.ramp_limit_up.sel(name=com_i, snapshot=sns).fillna(1) * weighting
+    )
+    ramp_down_limit = (
+        nominal
+        * c.da.ramp_limit_down.sel(name=com_i, snapshot=sns).fillna(1)
+        * weighting
+    )
+    ramp_start_up = (
+        nominal
+        * c.da.ramp_limit_start_up.sel(name=com_i, snapshot=sns).fillna(1)
+        * weighting
+    )
+    ramp_shut_down = (
+        nominal
+        * c.da.ramp_limit_shut_down.sel(name=com_i, snapshot=sns).fillna(1)
+        * weighting
+    )
+    lookbacks = {
+        kind: duration_lookback(n, c, min_time, sns, hours=in_hours(f"min_{kind}_time"))
+        for kind, min_time in (("up", min_up_time_set), ("down", min_down_time_set))
+    }
+    max_time = max(history_length(lb, sns) for lb in lookbacks.values())
+    history = _status_history(n, c, com_i, sns, max(max_time, 1) + 1)
     status_before = history.sel(lag=1, drop=True)
     first = snapshot_array([1] + [0] * (len(sns) - 1), sns)
     pos = snapshot_array(range(len(sns)), sns)
@@ -666,16 +690,27 @@ def define_operational_constraints_for_committables(
     ):
         if not (min_time > 0).any():
             continue
+        lookback = lookbacks[kind]
         shifted = [
-            transition.to_linexpr().shift(snapshot=k).where(k < min_time).fillna(0)
-            for k in range(int(min_time.max()))
+            transition.to_linexpr()
+            .shift(snapshot=k)
+            .where(lookback.sel(lag=k, drop=True))
+            .fillna(0)
+            for k in lookback.lag.to_numpy()
         ]
         lhs = sign * status + merge(shifted)
         if kind == "down" and not com_mod_ext_i.empty:
             n_mod = n.model[f"{c.name}-n_mod"].sel(name=com_mod_ext_i)
             lhs = lhs.add(-n_mod, join="left")
         past = (-sign * switches).clip(min=0)
-        rhs = bound - (past * (past.lag + pos < min_time)).sum("lag")
+        # a switch `lag` before the window is `pos + lag` before snapshot t
+        depth = (past.lag + pos).rename(lag="j").transpose("snapshot", "j")
+        # any depth beyond the lookback width counts nothing: clip to one pad slot
+        width = lookback.sizes["lag"]
+        padded = lookback.reindex(lag=range(width + 1), fill_value=False)
+        counts = padded.sel(lag=depth.clip(max=width)).drop_vars("lag").rename(j="lag")
+        counts = counts.assign_coords(lag=past.lag.to_numpy())
+        rhs = bound - (past * counts).sum("lag")
         mask = active & (min_time > 0)
         n.model.add_constraints(
             lhs, "<=", rhs, name=f"{c.name}-com-{kind}-time", mask=mask
@@ -1109,8 +1144,8 @@ def define_ramp_limit_constraints(
 
     limit_up = c.da.ramp_limit_up.sel(snapshot=sns, name=idx)
     limit_down = c.da.ramp_limit_down.sel(snapshot=sns, name=idx)
-    limit_start = c.da.ramp_limit_start_up.sel(name=idx)
-    limit_shut = c.da.ramp_limit_shut_down.sel(name=idx)
+    limit_start = c.da.ramp_limit_start_up.sel(snapshot=sns, name=idx)
+    limit_shut = c.da.ramp_limit_shut_down.sel(snapshot=sns, name=idx)
     mask = c.da.active.sel(snapshot=sns, name=idx)
 
     no_up_limit = limit_up.isnull() & limit_start.isnull()
@@ -1123,6 +1158,12 @@ def define_ramp_limit_constraints(
     limit_down = limit_down.fillna(1.0)
     limit_start = limit_start.fillna(1.0)
     limit_shut = limit_shut.fillna(1.0)
+
+    weighting = ramp_weighting(n, sns)
+    limit_up = limit_up * weighting
+    limit_down = limit_down * weighting
+    limit_start = limit_start * weighting
+    limit_shut = limit_shut * weighting
 
     window = n.optimize._window.subset(sns)
     filter_first_sn = snapshot_array([1] + [0] * (len(sns) - 1), sns)
@@ -1219,12 +1260,6 @@ def define_ramp_limit_constraints(
             no_down_limit,
             mask,
         )
-
-
-def _flagged_names(mask: DataArray) -> list[str]:
-    """Names of the assets for which `mask` holds in any scenario."""
-    flagged = mask.any([d for d in mask.dims if d != "name"])
-    return flagged.indexes["name"][flagged.values].tolist()
 
 
 def _get_delay_config(
@@ -2358,7 +2393,7 @@ def define_storage_unit_constraints(n: Network, sns: pd.Index) -> None:
 
     ignored = global_conflict | period_conflict
     if ignored.any():
-        affected = _flagged_names(ignored)
+        affected = flagged_names(ignored)
         logger.warning(
             "StorageUnits %s: Cyclic state of charge constraint overrules initial storage level setting. "
             "User-defined state_of_charge_initial will be ignored.",
@@ -2371,7 +2406,7 @@ def define_storage_unit_constraints(n: Network, sns: pd.Index) -> None:
             name=c.active_assets
         ) & c.da.cyclic_state_of_charge_per_period.sel(name=c.active_assets)
         if cp_overrides_c.any():
-            affected = _flagged_names(cp_overrides_c)
+            affected = flagged_names(cp_overrides_c)
             logger.warning(
                 "StorageUnits %s: Per-period cyclic (cyclic_state_of_charge_per_period=True) "
                 "overrides global cyclic (cyclic_state_of_charge=True). "
@@ -2532,7 +2567,7 @@ def define_store_constraints(n: Network, sns: pd.Index) -> None:
 
     ignored = global_conflict | period_conflict
     if ignored.any():
-        affected = _flagged_names(ignored)
+        affected = flagged_names(ignored)
         logger.warning(
             "Stores %s: Cyclic energy level constraint overrules initial value setting. "
             "User-defined e_initial will be ignored.",
@@ -2545,7 +2580,7 @@ def define_store_constraints(n: Network, sns: pd.Index) -> None:
             name=c.active_assets
         ) & c.da.e_cyclic_per_period.sel(name=c.active_assets)
         if cp_overrides_c.any():
-            affected = _flagged_names(cp_overrides_c)
+            affected = flagged_names(cp_overrides_c)
             logger.warning(
                 "Stores %s: Per-period cyclic (e_cyclic_per_period=True) "
                 "overrides global cyclic (e_cyclic=True). "

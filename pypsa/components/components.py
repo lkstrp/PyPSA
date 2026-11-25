@@ -738,7 +738,7 @@ class Components(
         --------
         >>> c = n.components.generators
         >>> c.ds  # doctest: +ELLIPSIS
-        <xarray.Dataset> Size: 8kB
+        <xarray.Dataset> Size: 9kB
         Dimensions:                     (name: 6, snapshot: 10)
         Coordinates:
           * name                        (name) object 48B 'Manchester Wind' ... 'Fran...
@@ -751,8 +751,8 @@ class Components(
             p_nom_mod                   (name) float64 48B 0.0 0.0 0.0 0.0 0.0 0.0
             p_nom_extendable            (name) bool 6B True True True True True True
             ...                          ...
-            ramp_limit_start_up         (name) float64 48B nan nan nan nan nan nan
-            ramp_limit_shut_down        (name) float64 48B nan nan nan nan nan nan
+            ramp_limit_start_up         (snapshot, name) float64 480B nan nan ... nan
+            ramp_limit_shut_down        (snapshot, name) float64 480B nan nan ... nan
             weight                      (name) float64 48B 1.0 1.0 1.0 1.0 1.0 1.0
             p_nom_opt                   (name) float64 48B 4.091e+03 0.0 ... 982.0
             capital_cost_piecewise_opt  (name) float64 48B 0.0 0.0 0.0 0.0 0.0 0.0
