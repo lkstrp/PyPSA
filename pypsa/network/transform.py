@@ -26,6 +26,7 @@ from pypsa.components.common import as_components
 from pypsa.components.types import all_standard_attrs_set
 from pypsa.descriptors import nominal_attrs
 from pypsa.network.abstract import _NetworkABC
+from pypsa.network.names import check_names_free
 from pypsa.type_utils import is_1d_list_like
 
 if TYPE_CHECKING:
@@ -575,6 +576,9 @@ class NetworkTransformMixin(_NetworkABC):
         to_iterate = other.all_components - to_skip
         # ensure buses are merged first
         to_iterate_list = ["Bus"] + sorted(to_iterate - {"Bus"})
+        for c in other.components:
+            if c.name in to_iterate_list:
+                check_names_free(self, c.name, pd.Index(c.names))
         for c in other.components:
             if c.name not in to_iterate_list:
                 continue

@@ -17,10 +17,12 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
-if TYPE_CHECKING:
-    from collections.abc import Sequence
+import pandas as pd
 
-    import pandas as pd
+from pypsa.network.names import check_names_free
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
 
     from pypsa import Network
     from pypsa.definitions.structures import Dict
@@ -40,6 +42,7 @@ class ComponentsTransformMixin:
     piecewise: Dict
     n: Network
     name: Any
+    _materialize: Callable[[], None]
 
     def add(
         self,
@@ -199,6 +202,11 @@ class ComponentsTransformMixin:
         if not all(isinstance(v, str) for v in kwargs.values()):
             msg = "New names must be strings."
             raise ValueError(msg)
+
+        check_names_free(self.n, self.name, pd.Index(list(kwargs.values())))
+
+        # Pending source data is keyed by the old names, so read it first.
+        self._materialize()
 
         # Rename component name definitions
         self.static = self.static.rename(index=kwargs)

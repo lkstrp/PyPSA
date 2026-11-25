@@ -131,7 +131,7 @@ class TestCSVDir:
     def test_csv_io_shapes_with_missing(self, ac_dc_shapes, tmpdir):
         fn = tmpdir / "csv_export"
         n = ac_dc_shapes.copy()
-        n.c.shapes.static.loc["Manchester", "geometry"] = None
+        n.c.shapes.static.loc["shape Manchester", "geometry"] = None
         n.export_to_csv_folder(fn)
         m = pypsa.Network(fn)
         assert_geodataframe_equal(
@@ -240,7 +240,7 @@ class TestNetcdf:
     def test_netcdf_io_shapes_with_missing(self, ac_dc_shapes, tmpdir):
         fn = tmpdir / "netcdf_export.nc"
         n = ac_dc_shapes.copy()
-        n.c.shapes.static.loc["Manchester", "geometry"] = None
+        n.c.shapes.static.loc["shape Manchester", "geometry"] = None
         n.export_to_netcdf(fn)
         m = pypsa.Network(fn)
         assert_geodataframe_equal(
@@ -493,7 +493,7 @@ class TestHDF5:
     def test_hdf5_io_shapes_with_missing(self, ac_dc_shapes, tmpdir):
         fn = tmpdir / "hdf5_export.h5"
         n = ac_dc_shapes.copy()
-        n.c.shapes.static.loc["Manchester", "geometry"] = None
+        n.c.shapes.static.loc["shape Manchester", "geometry"] = None
         n.export_to_hdf5(fn)
         m = pypsa.Network(fn)
         assert_geodataframe_equal(
@@ -601,7 +601,7 @@ class TestExcelIO:
     def test_excel_io_shapes_with_missing(self, ac_dc_shapes, tmpdir):
         fn = tmpdir / "excel_export.xlsx"
         n = ac_dc_shapes.copy()
-        n.c.shapes.static.loc["Manchester", "geometry"] = None
+        n.c.shapes.static.loc["shape Manchester", "geometry"] = None
         n.export_to_excel(fn)
         m = pypsa.Network(fn)
         assert_geodataframe_equal(
@@ -815,7 +815,7 @@ def test_excel_from_url(ac_dc_network, tmp_path, monkeypatch):
     local = tmp_path / "network.xlsx"
     ac_dc_network.export_to_excel(local)
     monkeypatch.setattr(
-        pypsa.network.io, "urlretrieve", lambda url, fn: shutil.copy(local, fn)
+        pypsa.network.io._common, "urlretrieve", lambda url, fn: shutil.copy(local, fn)
     )
 
     with pypsa.option_context("general.allow_network_requests", True):
@@ -828,7 +828,7 @@ def test_failed_url_retrieval_raises(monkeypatch):
     def fail(url, fn):
         raise OSError("unreachable")
 
-    monkeypatch.setattr(pypsa.network.io, "urlretrieve", fail)
+    monkeypatch.setattr(pypsa.network.io._common, "urlretrieve", fail)
     with pypsa.option_context("general.allow_network_requests", True):
         with pytest.raises(ValueError, match="Failed to retrieve.*unreachable"):
             pypsa.Network("https://example.com/unreachable.nc")
@@ -952,3 +952,13 @@ def test_version_warning(caplog, tmp_path):
     n.export_to_netcdf(fn)
     pypsa.Network(fn)
     assert "Importing network from PyPSA version v0.10.0" in caplog.text
+
+
+def test_network_io_mixin_reexport():
+    """The package re-exports the mixin from its module."""
+    import pypsa.network.io as io_pkg
+    from pypsa.network.io import mixin
+
+    assert io_pkg.NetworkIOMixin is mixin.NetworkIOMixin
+    assert callable(io_pkg._sort_attrs)
+    assert callable(io_pkg._retrieve_from_url)

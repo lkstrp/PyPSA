@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 import warnings
 from typing import TYPE_CHECKING, Any, NoReturn
 from weakref import ref
@@ -62,6 +63,8 @@ from pypsa.version import __version_base__
 if TYPE_CHECKING:
     from collections.abc import Collection, Iterator, Sequence
 
+    from datarecord.protocols import RecordLike
+    from datarecord.store.store import Revision
     from scipy.sparse import spmatrix
 
     from pypsa.components.legacy import Component
@@ -87,6 +90,11 @@ class Network(
     <!-- md:badge-version v0.1.0 --> | <!-- md:guide design.md -->
     """
 
+    deduplicated_names: dict[str, dict[str, str]]
+    """Renames `{Type: {old: new}}` made by the most recent import to keep names
+    unique across entity types, see [pypsa.network.names.deduplicate_names][].
+    Empty if nothing was renamed or the import opened a record lazily."""
+
     # Optimization
     _multi_invest: int
     _linearized_uc: int
@@ -103,6 +111,7 @@ class Network(
         import_name: str | Path = "",
         name: str = "Unnamed Network",
         ignore_standard_types: bool = False,
+        revision: str | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize a new PyPSA Network.
@@ -110,7 +119,7 @@ class Network(
         Parameters
         ----------
         import_name : string or Path
-            Path to netCDF file, HDF5 .h5 store or folder of CSV files from which to
+            Path to netCDF file, HDF5 .h5 store, datarecord store or folder of CSV files from which to
             import network data. The string could be a URL. If cloudpathlib is installed,
             the string could be a object storage URI with an `s3`, `gs` or `az` URI scheme.
         name : string
@@ -118,6 +127,10 @@ class Network(
         ignore_standard_types : boolean
             If True, do not read in PyPSA standard types into standard types
             DataFrames.
+        revision : string, optional
+            Revision of the datarecord store at `import_name`, by full id or
+            unique prefix. Only for a store, and needed if it has several
+            leaf revisions.
         kwargs : Any
             Any remaining attributes to set
 
@@ -127,6 +140,9 @@ class Network(
         >>> nw2 = pypsa.Network("/my/folder") # doctest: +SKIP
         >>> nw3 = pypsa.Network("https://github.com/PyPSA/PyPSA/raw/master/examples/networks/scigrid-de/scigrid-de.nc") # doctest: +SKIP
         >>> nw4 = pypsa.Network("s3://my-bucket/my-network.nc") # doctest: +SKIP
+        >>> nw5 = pypsa.Network("runs/") # doctest: +SKIP
+        >>> nw6 = pypsa.Network("runs/", revision="3f2a") # doctest: +SKIP
+        >>> rid = nw6.commit(meta={"rule": "solve"}) # doctest: +SKIP
 
         """
         # Initialise root logger and set its level, if this has not been done before
@@ -138,6 +154,10 @@ class Network(
         # Set attributes
         self._name = name
         self._meta: dict = {}
+        self.deduplicated_names = {}
+        self._record: RecordLike | None = None
+        self._revision: Revision | None = None
+        self._names_unchecked = False
         self._crs: CRS = CRS.from_epsg(DEFAULT_EPSG)
 
         # Dimensions
@@ -188,25 +208,98 @@ class Network(
         if not ignore_standard_types:
             self._read_in_default_standard_types()
 
+        if revision is not None and not import_name:
+            msg = "revision= needs a path to a datarecord store"
+            raise ValueError(msg)
+
         if import_name:
             if not validators.url(str(import_name)):
                 import_name = Path(import_name)
 
             # Read specified file
             if str(import_name).endswith(".h5"):
+                self._refuse_revision(revision, import_name)
                 self.import_from_hdf5(import_name)
             elif str(import_name).endswith(".nc"):
+                self._refuse_revision(revision, import_name)
                 self.import_from_netcdf(import_name)
             elif str(import_name).endswith((".xls", ".xlsx", ".xlsm", ".xlsb")):
+                self._refuse_revision(revision, import_name)
                 self.import_from_excel(import_name)
             elif isinstance(import_name, Path) and import_name.is_dir():
-                self.import_from_csv_folder(import_name)
+                from pypsa.network.io._datarecord_store import classify  # noqa: PLC0415
+
+                if classify(import_name) == "csv":
+                    self._refuse_revision(revision, import_name)
+                    self.import_from_csv_folder(import_name)
+                else:
+                    self.import_from_datarecord(import_name, revision=revision)
             else:
-                msg = f"import_name '{import_name}' is not a valid .h5 file, .nc file or directory."
+                msg = (
+                    f"import_name '{import_name}' is not a valid .h5 file, .nc file, "
+                    "Excel file, csv folder or datarecord folder."
+                )
                 raise ValueError(msg)
 
         for key, value in kwargs.items():
             setattr(self, key, value)
+
+    @staticmethod
+    def _refuse_revision(revision: str | None, path: Any) -> None:
+        if revision is not None:
+            msg = f"revision= is for a datarecord store, '{path}' is not one"
+            raise ValueError(msg)
+
+    @classmethod
+    def from_datarecord(
+        cls, record: RecordLike | str | os.PathLike, revision: str | None = None
+    ) -> Network:
+        """Open a datarecord `Record`, or a selection of one, as a network, reading its frames lazily.
+
+        Requires the optional `datarecord` package
+        (`pip install 'pypsa[datarecord]'`). A selection (`record.select(...)`)
+        opens the smaller network of its labels: a squeezed `period` is a
+        single-period network, a squeezed `scenario` a deterministic one.
+
+        Parameters
+        ----------
+        record : RecordLike | string | PathLike
+            The record to build from, e.g. `Workspace.process().at(path)`, or
+            a `Selection` of it, or the path to a plain record folder, a
+            datarecord store or one of its layer folders.
+        revision : string, optional
+            Revision of the store at `record`, by full id or unique prefix.
+            Only for a store path, and needed if it has several leaf revisions.
+
+        Returns
+        -------
+        pypsa.Network
+            The network the record describes.
+
+        Raises
+        ------
+        UnsupportedRecordError
+            If the record lacks something a network needs.
+        ValueError
+            If a selection squeezes a dim but `period`, `scenario` or a dim of
+            the record's own, holds no snapshot, or keeps scenarios weighing
+            nothing in all, or if an attribute's rows name several labels of a
+            dim PyPSA holds it without.
+
+        """
+        from pypsa.network.io._common import require_datarecord  # noqa: PLC0415
+
+        require_datarecord()
+        if isinstance(record, (str, os.PathLike)):
+            n = cls()
+            n.import_from_datarecord(record, revision=revision)
+            return n
+        if revision is not None:
+            msg = "revision= is for a store path, not for a record"
+            raise ValueError(msg)
+        from pypsa.network.io.datarecord import PyPSA  # noqa: PLC0415
+
+        return PyPSA.open(record)
 
     def __str__(self) -> str:
         """Get a string representation of the network.
@@ -319,8 +412,25 @@ class Network(
 
     def __setstate__(self, state: dict) -> None:
         """Restore state and the references lost on pickling."""
-        self.__dict__.update(state)
+        self.__dict__.update({"_record": None, "_revision": None, **state})
         self._restore_references()
+
+    def __getstate__(self) -> dict:
+        """Pickle without the record the network was opened from."""
+        return {**self.__dict__, "_record": None, "_revision": None}
+
+    @property
+    def record(self) -> RecordLike | None:
+        """Record the network was opened from, `None` if it was not opened from one."""
+        return self._record
+
+    @property
+    def revision(self) -> str | None:
+        """Id of the datarecord store revision the network was opened from.
+
+        `None` if it was not opened from a store revision.
+        """
+        return None if self._revision is None else str(self._revision.id)
 
     def __copy__(self) -> Network:
         """Return a shallow copy, sharing data and SubNetwork objects with the original."""
@@ -332,6 +442,10 @@ class Network(
         """Return a deep copy, including SubNetwork objects linked to the copy."""
         n = self.__class__.__new__(self.__class__)
         memo[id(self)] = n
+        if self._record is not None:
+            memo[id(self._record)] = None
+        if self._revision is not None:
+            memo[id(self._revision)] = None
         n.__dict__.update(copy.deepcopy(self.__dict__, memo))
         n._copy_sub_networks(memo)
         n._restore_references()

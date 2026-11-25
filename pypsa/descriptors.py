@@ -296,21 +296,19 @@ def _update_ports_component_attrs(
             ]
         ports.sort(reverse=True)
 
-        static_attrs = ["bus", "delay", "cyclic_delay"]
-        dynamic_attrs = [c._coefficient_attr, "p"]
-        unsuffixed_attrs = c._unsuffixed_attrs
+        table = c.port_table
 
         c.ctype = replace(c.ctype, defaults=c.defaults.copy(deep=True))
         defaults = c.defaults
 
-        for i, attr in product(ports, static_attrs + dynamic_attrs):
+        for i, attr in product(ports, sorted(table.stems)):
             target = f"{attr}{i}"
             if target in defaults.index:
                 continue
-            j = "" if attr in unsuffixed_attrs else "1"
-            base_attr = attr + j
+            base_attr = table.column(attr, 1)
             if base_attr not in defaults.index:
                 continue
+            dynamic = bool(defaults.at[base_attr, "varying"])
             defaults.loc[target] = defaults.loc[base_attr].apply(
                 _update_ports_doc_changes, args=("1", i)
             )
@@ -321,12 +319,12 @@ def _update_ports_component_attrs(
             new_order.pop(target_index)
             new_order.insert(base_attr_index + 1, target)
             defaults = defaults.reindex(new_order)
-            if attr in dynamic_attrs and target not in c.dynamic:
+            if dynamic and target not in c.dynamic:
                 df = pd.DataFrame(
                     index=n.snapshots, columns=c.static.index[:0], dtype=float
                 )
                 c.dynamic[target] = df
-            elif attr in static_attrs and target not in c.static.columns:
+            elif not dynamic and target not in c.static.columns:
                 c.static[target] = defaults.loc[target, "default"]
 
         c.ctype = replace(c.ctype, defaults=defaults)

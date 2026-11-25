@@ -43,14 +43,10 @@ class Links(_Multiport):
     """
 
     _operational_variables = ["p"]
-    _unsuffixed_attrs = {"efficiency", "delay", "cyclic_delay"}
 
     @property
     def _output_ports(self) -> list[str]:
         return ["1"] + self.additional_ports
-
-    def _port_suffix(self, port: str | int) -> str:
-        return "" if str(port) == "1" else str(port)
 
     @property
     def _coefficient_attr(self) -> str:

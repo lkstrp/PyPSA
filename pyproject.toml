@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 [build-system]
-requires = ["setuptools>=84.1", "setuptools_scm>=8"]
+requires = ["setuptools>=84.1", "setuptools_scm>=10.0.5"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -64,6 +64,7 @@ gurobipy = ["gurobipy"]
 cloudpath = ["cloudpathlib"]
 dotenv = ["python-dotenv"]
 tsam = ["tsam>=3"]
+datarecord = ["datarecord==0.1.0a2; python_version >= '3.12'"]
 test = [
     "pytest",
     "pytest-cov",
@@ -86,6 +87,7 @@ dev = [
     "jupyter>=1.1.1",
     "typing-extensions>=4.14.0",
     "reuse>=5.1.1",
+    "datarecord==0.1.0a2; python_version >= '3.12'",
 ]
 docs = [
     "mkdocs-material",
@@ -112,6 +114,8 @@ docs = [
 
 [tool.setuptools_scm]
 version_scheme = "no-guess-dev"
+# Strict tag parsing skips non-release tags such as datarecord-phase-*.
+tag.strict = true
 
 [tool.setuptools.packages.find]
 include = ["pypsa"]
@@ -155,6 +159,7 @@ filterwarnings = [
 ]
 markers = [
     "mpl_image_compare",
+    "slow: long-running tests",
 ]
 
 # Coverage settings
@@ -173,6 +178,7 @@ exclude_also = [
 [tool.mypy]
 exclude = ['dev/*', 'examples/*', 'docs/*']
 ignore_missing_imports = true
+explicit_package_bases = true
 no_implicit_optional = true
 warn_unused_ignores = true
 show_error_code_links = true
@@ -271,6 +277,19 @@ ignore = [
     'ARG',   # flake8-unused-arguments
     'PL',    # pylint
     'TRY'    # tryceratops
+]
+
+# The datarecord tool is moved verbatim from the datarecord package
+"pypsa/network/io/datarecord/**" = [
+    'D102',   # Missing docstring in public method
+    'D401',   # First line of docstring should be in imperative mood
+    'D404',   # First word of the docstring should not be "This"
+    'D417',   # Missing argument descriptions in the docstring
+    'PLC0415', # import outside top-level (breaks import cycles)
+    'PLR0917', # Too many positional arguments
+    'S608',   # SQL built from strings (DuckDB relation expressions)
+    'TC002',  # Move third-party import into a type-checking block
+    'TC003',  # Move standard library import into a type-checking block
 ]
 
 # Ignore for test files
