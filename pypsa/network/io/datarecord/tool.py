@@ -579,10 +579,21 @@ class PyPSATool(Tool):
                 "Write a solved network's results over it with `results_only=True`"
             )
             raise ValueError(msg)
-        if len(model.snapshots) == 1 and model.snapshots[0] == "now":
+        multi = isinstance(model.snapshots, pd.MultiIndex)
+        axis = (
+            model.snapshots.get_level_values("timestep") if multi else model.snapshots
+        )
+        if not pd.api.types.is_datetime64_any_dtype(axis):
+            found = (
+                "the default snapshots `['now']`"
+                if not multi and list(axis) == ["now"]
+                else "snapshots"
+            )
+            level = " (the `timestep` level of a multi-period network)" if multi else ""
             msg = (
-                "the network has the default snapshots `['now']`, which a record "
-                "cannot tell from a real time axis: call `n.set_snapshots(...)` first"
+                f"the network has {found} of dtype `{axis.dtype}`, but a record "
+                f"keeps a datetime snapshot axis{level}: call `n.set_snapshots(...)` "
+                "with datetime snapshots first"
             )
             raise _refusal(self.name, msg)
         untouched = untouched_types(loaded)

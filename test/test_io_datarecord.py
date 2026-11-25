@@ -3354,12 +3354,12 @@ def test_a_child_whose_timesteps_repeat_otherwise_builds_back(
     )
 
 
-def test_scalar_and_series_rows_union_over_integer_snapshots(workspace):
+def test_scalar_and_series_rows_union_over_datetime_snapshots(workspace):
     """A scalar's NULL snapshot takes the type of the series rows it unions with."""
     import pypsa
 
     n = pypsa.Network()
-    n.set_snapshots(pd.Index([0, 1, 2]))
+    n.set_snapshots(pd.date_range("2030-01-01", periods=3, freq="h"))
     n.add("Bus", "b")
     n.add(
         "Load", "series", bus="b", p_set=pd.Series([1.0, 2.0, 3.0], index=n.snapshots)
@@ -3370,7 +3370,7 @@ def test_scalar_and_series_rows_union_over_integer_snapshots(workspace):
     scalar = p_set[p_set["snapshot"].isna()]
     assert scalar[["entity", "value"]].values.tolist() == [["scalar", 5.0]]
     series = p_set[p_set["entity"] == "series"].sort_values("snapshot")
-    assert series["snapshot"].tolist() == [0, 1, 2]
+    assert series["snapshot"].tolist() == list(n.snapshots)
 
 
 def _round_trip(n, tmp_path):
@@ -3710,6 +3710,54 @@ def test_default_snapshots_are_refused(workspace):
     n.add("Generator", "gen", bus="north")
     with pytest.raises(UnsupportedRecordError, match="set_snapshots"):
         PyPSA.to_datarecord(n, workspace.con)
+
+
+@pytest.mark.parametrize(
+    "snapshots",
+    [range(3), pd.Index([0, 1, 2]), pd.Index(["a", "b"])],
+    ids=["range", "int-index", "str-index"],
+)
+@pytest.mark.parametrize(
+    "write",
+    [
+        lambda n, workspace, path: PyPSA.to_datarecord(n, workspace.con),
+        lambda n, workspace, path: n.export_to_datarecord(path),
+    ],
+    ids=["to_datarecord", "export_to_datarecord"],
+)
+def test_non_datetime_snapshots_are_refused(workspace, tmp_path, snapshots, write):
+    import pypsa
+
+    # `object` before pandas 3, `str` from it on.
+    dtype = str(pd.Index(snapshots).dtype)
+
+    n = pypsa.Network(snapshots=snapshots)
+    n.add("Bus", "north")
+    n.add("Generator", "gen", bus="north")
+    with pytest.raises(UnsupportedRecordError) as refused:
+        write(n, workspace, tmp_path / "record")
+    message = str(refused.value)
+    assert "set_snapshots" in message
+    assert dtype in message
+    assert not (tmp_path / "record" / "dimensions" / "snapshot.parquet").exists()
+
+
+def test_multiperiod_integer_timesteps_are_refused(workspace):
+    import pypsa
+
+    n = pypsa.Network()
+    n.set_snapshots(
+        pd.MultiIndex.from_arrays(
+            [[2030, 2030, 2040], [0, 1, 2]], names=["period", "timestep"]
+        )
+    )
+    n.add("Bus", "north")
+    n.add("Generator", "gen", bus="north")
+    with pytest.raises(UnsupportedRecordError) as refused:
+        PyPSA.to_datarecord(n, workspace.con)
+    message = str(refused.value)
+    for word in ("int64", "timestep", "set_snapshots"):
+        assert word in message
 
 
 def test_a_series_naming_no_component_of_its_type_is_refused(workspace):
