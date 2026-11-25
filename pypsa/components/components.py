@@ -20,38 +20,37 @@ Generic functionality is implemented in the abstract module.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from collections.abc import Mapping
+from enum import Enum
+from functools import partial
+from typing import TYPE_CHECKING, Any, Final, Literal
 
-import geopandas as gpd
 import numpy as np
 import pandas as pd
 import xarray
 from deprecation import deprecated
-from pyproj import CRS
 
 from pypsa.common import equals
 from pypsa.components.array import ComponentsArrayMixin
 from pypsa.components.descriptors import ComponentsDescriptorsMixin
 from pypsa.components.index import ComponentsIndexMixin
+from pypsa.components.source import InMemorySource, Source
 from pypsa.components.transform import ComponentsTransformMixin
 from pypsa.constants import (
-    DEFAULT_EPSG,
-    DEFAULT_TIMESTAMP,
     RE_PORTS,
     piecewise_attrs,
     piecewise_schema,
 )
 from pypsa.costs import annuity, periodized_cost
-from pypsa.definitions.structures import Dict
+from pypsa.definitions.structures import Dict, LazyDict
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection
-    from typing import Literal
 
     from pypsa import Network
+    from pypsa.components.ports import PortTable
     from pypsa.definitions.components import ComponentType
 
     PortsLike = Literal["all"] | str | int | Collection[str] | Collection[int]  # noqa: PYI051
@@ -61,9 +60,15 @@ if TYPE_CHECKING:
 # - snapshots, investment_periods
 
 
-@dataclass
+class _Unread(Enum):
+    TOKEN = 0
+
+
+_UNREAD: Final = _Unread.TOKEN
+
+
 class ComponentsData:
-    """Dataclass for Components.
+    """Data store of Components.
 
     <!-- md:guide components.md -->
 
@@ -76,6 +81,10 @@ class ComponentsData:
     attributes and properties which are available for all component types) as well as
     in specific type classes as [`Generators`][pypsa.components.Generators] (which
     define logic and methods specific to the component type).
+
+    The data containers are read from a [`Source`][pypsa.components.source.Source]
+    on first access and kept as live pandas objects afterwards. Assigning a container
+    replaces it and the source is not consulted for it again.
 
     Attributes
     ----------
@@ -90,53 +99,173 @@ class ComponentsData:
         Dynamic (time-varying) data of components as a dict-like object of pandas
         DataFrames. Keys of the dict are the attribute names and each value is a pandas
         DataFrame with snapshots as index and the component names as columns.
+    piecewise : dict
+        Piecewise linear breakpoint data as a dict-like object of pandas DataFrames,
+        keyed by y-axis attribute name.
 
     """
 
     ctype: ComponentType
     n: Network
-    static: pd.DataFrame
-    """
-    Dataframe with static data for all components of this type.
 
-    Returns
-    -------
-    pandas.DataFrame
-        Static data of the component.
+    def __init__(
+        self,
+        ctype: ComponentType,
+        n: Network,
+        source: Source | None = None,
+    ) -> None:
+        """Initialize the data store, reading nothing from `source` yet.
 
-    Examples
-    --------
-    >>> c.static
-    """
-    dynamic: Dict
-    """
-    Dataframe with dynamic data for all components of this type.
+        Parameters
+        ----------
+        ctype : ComponentType
+            Component type information.
+        n : Network
+            Network the components belong to.
+        source : Source, optional
+            Source the data containers are read from, by default an
+            [`InMemorySource`][pypsa.components.source.InMemorySource].
 
-    Returns
-    -------
-    pandas.DataFrame
-        Dynamic data of the component.
+        """
+        self.ctype = ctype
+        self.n = n
+        self._source: Source = InMemorySource() if source is None else source
+        self._static: pd.DataFrame | Literal[_Unread.TOKEN] = _UNREAD
+        self._dynamic: Dict | Literal[_Unread.TOKEN] = _UNREAD
+        self._piecewise: Dict | Literal[_Unread.TOKEN] = _UNREAD
 
-    Examples
-    --------
-    >>> c.dynamic
-    """
-    piecewise: Dict
-    """
-    Piecewise linear breakpoint data for all components of this type.
+    @property
+    def static(self) -> pd.DataFrame:
+        """Dataframe with static data for all components of this type.
 
-    Dict-like container keyed by y-axis attribute name (e.g. 'efficiency',
-    'marginal_cost', 'capital_cost'). Each value is a DataFrame with:
+        Returns
+        -------
+        pandas.DataFrame
+            Static data of the component.
 
-    - index: breakpoint number (int, 0-based), ``index.name = "breakpoint"``
-    - columns: MultiIndex ``(name, attribute)`` where ``attribute`` holds both
-      the x-axis coordinate (e.g. ``p_pu``, ``p_nom``) and the y-axis attribute,
-      ``columns.names = ["name", "attribute"]``
+        Examples
+        --------
+        >>> c.static  # doctest: +SKIP
 
-    Examples
-    --------
-    >>> c.piecewise.efficiency
-    """
+        """
+        if self._static is _UNREAD:
+            self._static = self._source.static(self.ctype)
+        return self._static
+
+    @static.setter
+    def static(self, value: pd.DataFrame) -> None:
+        self._static = value
+
+    @property
+    def dynamic(self) -> Dict:
+        """Dataframe with dynamic data for all components of this type.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Dynamic data of the component.
+
+        Examples
+        --------
+        >>> c.dynamic  # doctest: +SKIP
+
+        """
+        if self._dynamic is _UNREAD:
+            self._dynamic = LazyDict(
+                load=partial(self._source.dynamic, self.ctype),
+                keys=self._source.varying_attrs(self.ctype),
+            )
+        return self._dynamic
+
+    @dynamic.setter
+    def dynamic(self, value: Mapping[str, pd.DataFrame]) -> None:
+        self._dynamic = _as_dict(value)
+
+    @property
+    def piecewise(self) -> Dict:
+        """Piecewise linear breakpoint data for all components of this type.
+
+        Dict-like container keyed by y-axis attribute name (e.g. 'efficiency',
+        'marginal_cost', 'capital_cost'). Each value is a DataFrame with:
+
+        - index: breakpoint number (int, 0-based), ``index.name = "breakpoint"``
+        - columns: MultiIndex ``(name, attribute)`` where ``attribute`` holds both
+          the x-axis coordinate (e.g. ``p_pu``, ``p_nom``) and the y-axis attribute,
+          ``columns.names = ["name", "attribute"]``
+
+        Examples
+        --------
+        >>> c.piecewise.efficiency  # doctest: +SKIP
+
+        """
+        if self._piecewise is _UNREAD:
+            self._piecewise = LazyDict(
+                load=partial(self._source.piecewise, self.ctype),
+                keys=piecewise_attrs(self.ctype.name).y.unique(),
+            )
+        return self._piecewise
+
+    @piecewise.setter
+    def piecewise(self, value: Mapping[str, pd.DataFrame]) -> None:
+        self._piecewise = _as_dict(value)
+
+    def _static_names(self) -> pd.Index:
+        """Component names, without the scenario level, read from the source while `static` is unread."""
+        if self._static is _UNREAD:
+            return self._source.names(self.ctype)
+        idx = self._static.index
+        if isinstance(idx, pd.MultiIndex):
+            idx = idx.get_level_values(-1).drop_duplicates()
+        return idx
+
+    @property
+    def loaded_attributes(self) -> frozenset[str]:
+        """Attributes whose data the network holds in memory, reading nothing.
+
+        The columns of `static` once it is read, plus the keys of `dynamic` that
+        are loaded; a container still unread contributes nothing. This is read
+        state, not change tracking: a read is not a change.
+
+        Examples
+        --------
+        >>> c.loaded_attributes  # doctest: +SKIP
+
+        """
+        attrs: set[str] = set()
+        if self._static is not _UNREAD:
+            attrs.update(self._static.columns)
+        if self._dynamic is not _UNREAD:
+            attrs.update(dict.keys(self._dynamic))
+        return frozenset(attrs)
+
+    def _materialize(self) -> None:
+        """Read every container from the source, so nothing depends on it anymore."""
+        _ = self.static
+        for store in (self.dynamic, self.piecewise):
+            if isinstance(store, LazyDict):
+                store.materialize()
+
+    def _set_source(self, source: Source) -> None:
+        """Replace the source and reset every container to be read from it.
+
+        Discards any written container data.
+        """
+        self._source = source
+        self._static = _UNREAD
+        self._dynamic = _UNREAD
+        self._piecewise = _UNREAD
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Pickle with every container read from the source."""
+        self._materialize()
+        return {**self.__dict__, "_source": InMemorySource()}
+
+
+def _as_dict(value: Any) -> Any:
+    """Wrap a plain mapping in `Dict`, keep anything else as the very object given."""
+    if isinstance(value, Mapping) and not isinstance(value, Dict):
+        return Dict(value)
+    return value
 
 
 def _split_port(attr: str) -> tuple[str, str]:
@@ -162,7 +291,7 @@ class Components(
     Base class for container of energy system related assets, such as
     generators or transmission lines. Use the specific subclasses for concrete or
     a generic component type.
-    All data is stored in the dataclass [ComponentsData][pypsa.components.components.ComponentsData].
+    All data is stored in [ComponentsData][pypsa.components.components.ComponentsData].
     Components inherits from it, adds logic and methods, but does not store any data
     itself.
 
@@ -174,6 +303,7 @@ class Components(
         self,
         ctype: ComponentType,
         n: Network,
+        source: Source | None = None,
     ) -> None:
         """Initialize Components object.
 
@@ -183,13 +313,21 @@ class Components(
             Component type information.
         n : Network
             Network the components belong to.
+        source : Source, optional
+            Source the data containers are read from on first access, by default an
+            [`InMemorySource`][pypsa.components.source.InMemorySource].
 
         """
-        static, dynamic, piecewise = self._get_data_containers(ctype)
-        ComponentsData.__init__(
-            self, ctype, n=n, static=static, dynamic=dynamic, piecewise=piecewise
-        )
+        ComponentsData.__init__(self, ctype, n=n, source=source)
         ComponentsArrayMixin.__init__(self)
+
+    def __deepcopy__(self, memo: dict[int, object] | None = None) -> Components:
+        """Deep copy with every container read from the source first."""
+        self._materialize()
+        if memo is None:
+            memo = {}
+        memo[id(self._source)] = InMemorySource()
+        return super().__deepcopy__(memo)  # type: ignore[return-value]
 
     def __str__(self) -> str:
         """Get string representation of component.
@@ -267,7 +405,7 @@ class Components(
             If the attribute is not found in component.
 
         """
-        if key in self.__dict__:
+        if key in self.__dict__ or key in ("static", "dynamic", "piecewise"):
             setattr(self, key, value)
         else:
             msg = f"'{key}' not found in Component"
@@ -366,51 +504,6 @@ class Components(
                 self.piecewise, other.piecewise, log_mode=log_mode, path="c.piecewise"
             )
         )
-
-    @staticmethod
-    def _get_data_containers(ct: ComponentType) -> tuple[pd.DataFrame, Dict, Dict]:
-        static_dtypes = ct.defaults.loc[ct.defaults.static, "dtype"].drop(["name"])
-        if ct.name == "Shape":
-            crs = CRS.from_epsg(
-                DEFAULT_EPSG
-            )  # if n is None else n.crs #TODO attach mechanism
-            static = gpd.GeoDataFrame(
-                {k: gpd.GeoSeries(dtype=d) for k, d in static_dtypes.items()},
-                columns=static_dtypes.index,
-                crs=crs,
-            )
-        else:
-            static = pd.DataFrame(
-                {k: pd.Series(dtype=d) for k, d in static_dtypes.items()},
-                columns=static_dtypes.index,
-            )
-        static.index.name = "name"
-
-        # # it's currently hard to imagine non-float series,
-        # but this could be generalised
-        dynamic = Dict()
-        snapshots = pd.Index(
-            [DEFAULT_TIMESTAMP]
-        )  # if n is None else n.snapshots #TODO attach mechanism
-        for k in ct.defaults.index[ct.defaults.varying]:
-            df = pd.DataFrame(index=snapshots, columns=[], dtype=float)
-            df.index.name = "snapshot"
-            df.columns.name = "name"
-            dynamic[k] = df
-
-        # Piecewise breakpoint data: one empty DataFrame per piecewise attribute
-        # defined by the piecewise_x column in the component's attribute CSV.
-        piecewise = Dict()
-        for y_attr in piecewise_attrs(ct.name).y.unique():
-            cols = pd.MultiIndex.from_tuples([], names=["name", "attribute"])
-            df = pd.DataFrame(
-                index=pd.Index([], name="breakpoint", dtype=int),
-                columns=cols,
-                dtype=float,
-            )
-            piecewise[y_attr] = df
-
-        return static, dynamic, piecewise
 
     @property
     def _piecewise_attrs(self) -> pd.DataFrame:
@@ -631,7 +724,9 @@ class Components(
         True
 
         """
-        return self.static.empty
+        if self._static is _UNREAD:
+            return len(self._static_names()) == 0
+        return self._static.empty
 
     @property
     @deprecated(
@@ -817,6 +912,26 @@ class Components(
         return [
             match.group(1) for col in self.static if (match := RE_PORTS.search(col))
         ]
+
+    @property
+    def port_table(self) -> PortTable:
+        """Port table of this component type.
+
+        Returns
+        -------
+        pypsa.components.PortTable
+            The cached table of `pypsa.components.port_table(self.name)`.
+
+        Examples
+        --------
+        >>> c = n.components.links
+        >>> c.port_table.column("efficiency", 2)
+        'efficiency2'
+
+        """
+        from pypsa.components.ports import port_table  # noqa: PLC0415
+
+        return port_table(self.name)
 
     def _as_port(self, port: int | str) -> int:
         """Convert a single port specification to an integer index.

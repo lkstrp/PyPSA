@@ -193,6 +193,28 @@ def test_1449():
     assert status == "ok"
 
 
+def test_global_constraint_named_like_a_generator():
+    n = pypsa.Network(snapshots=range(3))
+    n.add("Carrier", "gas", co2_emissions=0.5)
+    n.add("Bus", "b")
+    n.add("Generator", "co2", bus="b", carrier="gas", p_nom=10, marginal_cost=1)
+    n.add("Generator", "clean", bus="b", p_nom=10, marginal_cost=10)
+    n.add("Load", "l", bus="b", p_set=5)
+    n.add(
+        "GlobalConstraint",
+        "co2",
+        type="primary_energy",
+        carrier_attribute="co2_emissions",
+        sense="<=",
+        constant=3,
+    )
+    status, _ = n.optimize()
+    assert status == "ok"
+    assert n.c.global_constraints.static.loc["co2", "mu"] != 0
+    assert n.c.generators.static.loc["co2", "p_nom_opt"] == 10
+    assert n.c.generators.dynamic.p["co2"].sum() == pytest.approx(6)
+
+
 def test_1884():
     """
     A tech_capacity_expansion_limit with no investment_period must still apply.

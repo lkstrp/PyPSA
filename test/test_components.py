@@ -2,6 +2,8 @@
 #
 # SPDX-License-Identifier: MIT
 
+import copy
+import pickle
 import warnings
 
 import pandas as pd
@@ -9,7 +11,9 @@ import pytest
 
 from pypsa import Components, Network
 from pypsa.components.legacy import Component
+from pypsa.components.source import InMemorySource
 from pypsa.components.types import get as get_component_type
+from pypsa.definitions.structures import Dict
 
 
 def test_components_init():
@@ -243,3 +247,148 @@ def test_add_fills_omitted_static_attributes_with_defaults(component, kwargs):
     empty = Network().c[component].static[static.columns]
     assert static.dtypes.equals(empty.dtypes)
     assert static.loc["x"].astype(object).equals(defaults.astype(object))
+
+
+class RecordingSource(InMemorySource):
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+
+    def static(self, ctype):
+        self.calls.append(("static", ctype.name))
+        return super().static(ctype)
+
+    def dynamic(self, ctype, attr):
+        self.calls.append(("dynamic", ctype.name, attr))
+        return super().dynamic(ctype, attr)
+
+    def piecewise(self, ctype, attr):
+        self.calls.append(("piecewise", ctype.name, attr))
+        return super().piecewise(ctype, attr)
+
+    def varying_attrs(self, ctype):
+        self.calls.append(("varying_attrs", ctype.name))
+        return super().varying_attrs(ctype)
+
+
+@pytest.fixture
+def source_components():
+    src = RecordingSource()
+    return src, Components(get_component_type("Generator"), Network(), source=src)
+
+
+def test_source_not_read_at_construction(source_components):
+    src, _ = source_components
+    assert src.calls == []
+
+
+def test_static_loads_once(source_components):
+    src, c = source_components
+    first = c.static
+    assert c.static is first
+    assert src.calls == [("static", "Generator")]
+
+
+def test_dynamic_keys_without_data(source_components):
+    src, c = source_components
+    ctype = get_component_type("Generator")
+    assert list(c.dynamic) == InMemorySource().varying_attrs(ctype)
+    assert not any(call[0] == "dynamic" for call in src.calls)
+    df = c.dynamic["p_max_pu"]
+    assert c.dynamic["p_max_pu"] is df
+    assert src.calls.count(("dynamic", "Generator", "p_max_pu")) == 1
+
+
+def test_dynamic_items_load_everything(source_components):
+    src, c = source_components
+    keys = list(c.dynamic)
+    dict(c.dynamic.items())
+    assert c.dynamic.pending == frozenset()
+    assert {call[2] for call in src.calls if call[0] == "dynamic"} == set(keys)
+
+
+def test_piecewise_keys_without_data(source_components):
+    src, c = source_components
+    assert "efficiency" in c.piecewise
+    assert not any(call[0] == "piecewise" for call in src.calls)
+    c.piecewise["efficiency"]
+    assert src.calls[-1] == ("piecewise", "Generator", "efficiency")
+
+
+def test_setters_bypass_source(source_components):
+    src, c = source_components
+    df = pd.DataFrame(index=pd.Index([], name="name"))
+    c.static = df
+    assert c.static is df
+    d = Dict(p_max_pu=pd.DataFrame())
+    c.dynamic = d
+    assert c.dynamic is d
+    c.dynamic["p_max_pu"]
+    c.piecewise = {"efficiency": pd.DataFrame()}
+    assert type(c.piecewise) is Dict
+    assert src.calls == []
+
+
+def test_setitem_on_property(source_components):
+    _, c = source_components
+    df = pd.DataFrame(index=pd.Index([], name="name"))
+    c["static"] = df
+    assert c.static is df
+    with pytest.raises(KeyError):
+        c["not_an_attribute"] = 1
+
+
+@pytest.mark.parametrize(
+    "roundtrip",
+    [copy.deepcopy, lambda c: pickle.loads(pickle.dumps(c))],
+    ids=["deepcopy", "pickle"],
+)
+def test_copy_materializes(source_components, roundtrip):
+    _, c = source_components
+    other = roundtrip(c)
+    assert other.dynamic.pending == frozenset()
+    pd.testing.assert_frame_equal(other.static, c.static)
+    for k, df in c.dynamic.items():
+        pd.testing.assert_frame_equal(other.dynamic[k], df)
+
+
+def test_default_source_pending_after_snapshots():
+    n = Network()
+    n.set_snapshots(range(3))
+    assert n.c.generators.dynamic.pending == frozenset()
+    assert len(n.c.generators.dynamic["p_max_pu"]) == 3
+
+
+class UncopyableSource(InMemorySource):
+    def __deepcopy__(self, memo):
+        raise TypeError("source cannot be copied")
+
+    def __reduce__(self):
+        raise TypeError("source cannot be pickled")
+
+
+@pytest.mark.parametrize(
+    "roundtrip",
+    [copy.deepcopy, lambda c: pickle.loads(pickle.dumps(c))],
+    ids=["deepcopy", "pickle"],
+)
+def test_copy_drops_source(roundtrip):
+    c = Components(
+        get_component_type("Generator"), Network(), source=UncopyableSource()
+    )
+    other = roundtrip(c)
+    assert type(other._source) is InMemorySource
+    assert type(c._source) is UncopyableSource
+    pd.testing.assert_frame_equal(other.static, c.static)
+
+
+def test_setting_none_does_not_rearm_source(source_components):
+    src, c = source_components
+    c.static = None
+    assert c.static is None
+    assert src.calls == []
+
+
+def test_setitem_rejects_read_only_property(source_components):
+    _, c = source_components
+    with pytest.raises(KeyError):
+        c["name"] = "x"

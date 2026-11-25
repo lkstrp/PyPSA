@@ -158,6 +158,7 @@ nav:
       - Transform: api/networks/transform.md
       - Descriptors: api/networks/descriptors.md
       - IO: api/networks/io.md
+      - Names: api/networks/names.md
       - Power Flow: api/networks/power-flow.md
       - Optimize: api/networks/optimize.md
       - Constraints: api/networks/constraints.md
@@ -184,6 +185,7 @@ nav:
       - Process: api/components/types/processes.md
       - Shapes: api/components/types/shapes.md
     - Utilities: api/components/common.md
+    - Port Table: api/components/ports.md
   - Other:
     - Consistency Checks: api/other/consistency.md
     - Examples: api/other/api-examples.md

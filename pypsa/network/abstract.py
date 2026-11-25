@@ -19,12 +19,20 @@ if TYPE_CHECKING:
 
     import linopy
     import pandas as pd
+    from datarecord.protocols import RecordLike
 
     from pypsa.components.store import ComponentsStore
     from pypsa.optimization.window import SnapshotWindow
 
 
 class _NetworkABC(ABC):
+    # Names
+    deduplicated_names: dict[str, dict[str, str]]
+    _names_unchecked: bool
+
+    # Record the network was opened from
+    _record: RecordLike | None
+
     # Indexing
     snapshots: pd.Index | pd.MultiIndex
     snapshot_weightings: pd.DataFrame

@@ -14,11 +14,19 @@ SPDX-License-Identifier: CC-BY-4.0
         - "!logger"
         - "!iteration"
         - "!__deepcopy__"
+        - "!__getstate__"
         - "!__getitem__"
         - "!__setitem__"
         - "!add"
         - "!get_bounds_pu"
 
 ::: pypsa.components.components.ComponentsData
+    options:
+        heading_level: 2
+        filters:
+        - "!^_[^_]"
+        - "!__getstate__"
+
+::: pypsa.components.source
     options:
         heading_level: 2

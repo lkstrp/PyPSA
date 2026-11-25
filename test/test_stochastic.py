@@ -1033,7 +1033,7 @@ def test_multiperiod_stochastic_tiny_default():
             capital_cost=10,
             carrier="elec",
         )
-        n.add("Load", 1, bus=1, p_set=100)
+        n.add("Load", "load1", bus=1, p_set=100)
 
         n.set_scenarios({"high": 0.5, "low": 0.5})
         n.c.loads.dynamic.p_set = pd.DataFrame(
@@ -1087,7 +1087,7 @@ def test_multiperiod_stochastic_tiny_build_year():
             build_year=2020,
             carrier="elec",
         )
-        n.add("Load", 1, bus=1, p_set=100)
+        n.add("Load", "load1", bus=1, p_set=100)
 
         n.set_scenarios({"scenario": 1.0})  # Single scenario
         n.c.loads.dynamic.p_set = pd.DataFrame(
@@ -1123,7 +1123,7 @@ def test_multiperiod_stochastic_tiny_infeasible():
             build_year=2030,
             carrier="elec",
         )
-        n.add("Load", 1, bus=1, p_set=100)
+        n.add("Load", "load1", bus=1, p_set=100)
 
         n.set_scenarios({"scenario": 1.0})
         n.c.loads.dynamic.p_set = pd.DataFrame(

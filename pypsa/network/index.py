@@ -108,6 +108,13 @@ class NetworkIndexMixin(_NetworkABC):
             msg = "Snapshots must not be empty."
             raise ValueError(msg)
 
+        # A source-backed frame is read against the snapshots in force, so read
+        # every one before they change.
+        for component in self.all_components:
+            dynamic = self.c[component].dynamic
+            if hasattr(dynamic, "materialize"):
+                dynamic.materialize()
+
         self._snapshots_data = self._snapshots_data.reindex(
             sns, fill_value=default_snapshot_weightings
         )
@@ -792,6 +799,11 @@ class NetworkIndexMixin(_NetworkABC):
                 "not yet supported."
             )
             raise NotImplementedError(msg)
+
+        # A source-backed frame is read against the static index in force, so
+        # read every one before the scenario level is added.
+        for c in self.components.values():
+            c._materialize()
 
         for c in self.components.values():  # Loop all components, not just empty ones
             c.static = pd.concat(

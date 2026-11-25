@@ -29,7 +29,10 @@ class _Multiport(Components):
 
     """
 
-    _unsuffixed_attrs: set[str] = set()
+    @property
+    def _unsuffixed_attrs(self) -> set[str]:
+        """Stems left bare at port 1, from the type's port table."""
+        return set(self.port_table.unsuffixed)
 
     @property
     def additional_ports(self) -> list[str]:
@@ -71,9 +74,8 @@ class _Multiport(Components):
         """
         ...
 
-    @abstractmethod
     def _port_suffix(self, port: str | int) -> str:
-        """Return the attribute suffix for a given port.
+        """Return the attribute suffix for a given port, from the type's port table.
 
         Parameters
         ----------
@@ -83,10 +85,12 @@ class _Multiport(Components):
         Returns
         -------
         str
-            Suffix used for port-specific attributes.
+            Suffix used for port-specific attributes, e.g. `""` for a Link's
+            port 1 and `"1"` for a Process's.
 
         """
-        ...
+        attr = self._coefficient_attr
+        return self.port_table.column(attr, int(port))[len(attr) :]
 
     @property
     @abstractmethod

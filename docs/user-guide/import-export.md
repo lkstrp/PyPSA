@@ -35,6 +35,8 @@ n.remove("Generator", "my_generator")
 
 Two networks with a disjunct set of component indices can be **merged** with [`n1.merge(n2)`][pypsa.network.transform.NetworkTransformMixin.merge]
 
+Names are unique across all entity types, i.e. every component type except buses, carriers, sub-networks, line and transformer types and global constraints. `n.add()` raises if a name is already used by another entity type, and `merge` and `rename_component_names` refuse such clashes. Importers and spatial clustering rename clashing names with a single warning and record the renames in `n.deduplicated_names`; [`deduplicate_names`][pypsa.network.names.deduplicate_names] does the same for your own data.
+
 ## CSV Files
 
 Create a folder with CSVs for each component type (e.g. `generators.csv`), then a CSV for each time-dependent variable (e.g.
@@ -109,6 +111,46 @@ To **import** network data from an HDF5 store, run [`n.import_from_hdf5()`][pyps
 n.export_to_hdf5("foo/bar.h5")
 n_import = pypsa.Network("foo/bar.h5")
 ```
+
+## datarecord
+
+A [datarecord](https://github.com/energy-models/datarecord) is a directory holding a `manifest.json`. It is DuckDB-native, stores one long table per attribute, and stacks revisions as layers. To **export** the network, run [`n.export_to_datarecord()`][pypsa.network.io.NetworkIOMixin.export_to_datarecord]; it raises a `FileExistsError` if the path exists. To **import** one, run [`n.import_from_datarecord()`][pypsa.network.io.NetworkIOMixin.import_from_datarecord] or provide the directory in the [`pypsa.Network`][] constructor.
+
+``` py
+n.export_to_datarecord("my-record")
+n_import = pypsa.Network("my-record")
+```
+
+To work with the record in memory, use [`n.to_datarecord()`][pypsa.network.io.NetworkIOMixin.to_datarecord] and [`Network.from_datarecord()`][pypsa.Network.from_datarecord]. `to_datarecord` presents the network as a record for the writers of `datarecord`; `from_datarecord` opens a stored record as a network. A layer holding only optimization results needs the `base` record it sits on (`results_only=True` together with `base`); results of the bus attribute `p` are stored as `p_bus`.
+
+``` py
+from datarecord import Workspace
+
+ws = Workspace.process()
+ws.write(n.to_datarecord(), "my-record")
+n_import = pypsa.Network.from_datarecord(ws.at("my-record"))
+```
+
+To store a change as a new revision of a record in a `datarecord` store, open the network from the revision, edit it, export it over its own record and commit the layer on top of the revision. This example is not executed, it needs a store.
+
+``` py
+n = pypsa.Network.from_datarecord(rev.record)
+n.c.generators.static["marginal_cost"] *= 1.1
+layer = n.to_datarecord(base=n.record)
+child = rev.store.commit(layer, parent=rev)
+```
+
+With `base=n.record`, the export compares and writes only the attributes the network has read, so an attribute the network never touched is not read from the record and is taken from the parent revision. `con` then defaults to the connection of the base. Any other `base`, and a network not opened from a record, compare every attribute. The attributes of a component that are in memory are listed by [`c.loaded_attributes`][pypsa.components.components.ComponentsData.loaded_attributes]; this is read state, not change tracking.
+
+Once the store has committed over `rev`, the record the network reads from is closed and reading more data from `n` raises an error of `datarecord`. Treat the network as done and reopen it from `child.record`.
+
+The `datarecord` package is an optional dependency and requires Python 3.12 or newer. Until a PyPI release it is installed from a pinned git source.
+
+``` sh
+pip install 'pypsa[datarecord]'
+```
+
+Import is lazy: opening a record reads the manifest and the axes. Each static frame and each time series materialises on first access and then stays live pandas. Structural operations materialise what they touch: `set_snapshots` every series, `n.add` the type it adds to, `copy` and the exporters everything. Open is cheap, the first structural edit is not. The network keeps the opened record as `n.record`. Importing into a network that already holds components is the one eager path: the record is read in full and merged. Names already used by another component type are renamed and listed in `n.deduplicated_names`; names already used by the same type warn and are skipped. Records that PyPSA cannot represent raise an `UnsupportedRecordError`, namely the same bus on two ports of a component, default "now" snapshots, name clashes between entity types (a global constraint may share an entity's name), custom bus or carrier columns named like an attribute of another component type, or, on export, a time series whose columns name no component of its type (by scenario and name on a stochastic network). Piecewise-linear attributes such as `marginal_cost` and `efficiency` are written as one row per breakpoint, the x value in `breakpoint` and the y value in `value`, and read back lazily into `c.piecewise`; a component's scalar or series on an attribute it holds a curve for is not exported. Carriers that a bus refers to but that are not listed in `n.carriers` are added as carriers on import.
 
 ## PYPOWER
 

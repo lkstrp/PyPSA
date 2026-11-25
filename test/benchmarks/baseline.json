@@ -1,0 +1,54 @@
+{
+  "host": {
+    "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "python": "3.14.7",
+    "cpu_count": 8,
+    "pypsa": "1.4.0.post1.dev252+gb32ffe81.d20261124",
+    "datarecord": "0.1.0a2",
+    "duckdb": "2.0.0"
+  },
+  "snapshots": 2190,
+  "results": {
+    "w0_import_pypsa": {
+      "wall_s": 3.12796579208225,
+      "peak_rss_mb": 315.53125
+    },
+    "w1_record_one_attribute": {
+      "wall_s": 3.357503459788859,
+      "peak_rss_mb": 663.65625,
+      "attribute_mb": 14.515769958496094
+    },
+    "w1_nc_one_attribute": {
+      "wall_s": 3.4484787080436945,
+      "peak_rss_mb": 1737.359375,
+      "attribute_mb": 14.452743530273438
+    },
+    "w1_record_eight": {
+      "wall_s": 17.21936949994415,
+      "peak_rss_mb": 777.453125,
+      "attribute_mb": 116.12615966796875
+    },
+    "w1_nc_eight": {
+      "wall_s": 39.58071408327669,
+      "peak_rss_mb": 2476.40625,
+      "attribute_mb": 115.6219482421875
+    },
+    "w2_record_open_touch_export_nc": {
+      "wall_s": 31.458472459577024,
+      "peak_rss_mb": 2304.671875
+    },
+    "w2_nc_import_export": {
+      "wall_s": 19.048330582678318,
+      "peak_rss_mb": 2307.765625
+    },
+    "w3_create_model_scigrid": {
+      "wall_s": 0.6519877910614014,
+      "peak_rss_mb": 618.671875
+    },
+    "w4_add_10k": {
+      "wall_s": 37.88969441689551,
+      "peak_rss_mb": 309.40625
+    }
+  },
+  "partial_refresh": "w1 and w2 re-measured 2026-11-24 at 2190 snapshots on datarecord 0.1.0a2; w0, w3 and w4 are from 2026-11-05"
+}
